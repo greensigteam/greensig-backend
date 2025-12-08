@@ -1,10 +1,94 @@
-@"
-*.pyc
-__pycache__/
-.venv/
-venv/
-*.sqlite3
-.env
+# Logs
+logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+build
+*.local
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
-"@ | Out-File -FilePath .gitignore -Encoding utf8
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+Thumbs.db
+
+# Testing
+coverage
+*.lcov
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Vite
+.vite
+
+# GeoJSON files
+*.geojson
+
+# Exclude Geojson project folder
+Gejson/
+Gejson
+verificationdemodules
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+media/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Fly.io
+fly.toml
+
+# Autres
+*.md
+.DS_Store
+Thumbs.db
+

@@ -27,7 +27,7 @@ SECRET_KEY = config('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=lambda v: [s.strip() for s in v.split(',')])
 
 
 # Application definition
@@ -48,6 +48,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -57,12 +58,11 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",      # Frontend Vue 3 (ancien)
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",      # Frontend GreenSIGV1 (React)
-    "http://127.0.0.1:3000",
-]
+CORS_ALLOWED_ORIGINS = config(
+    'CORS_ALLOWED_ORIGINS',
+    default='http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000',
+    cast=lambda v: [s.strip() for s in v.split(',')]
+)
 
 ROOT_URLCONF = 'greensig_web.urls'
 
@@ -135,6 +135,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -147,8 +149,17 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 50  # Nombre d'éléments par page par défaut
 }
 
-import os
+# Configuration GDAL/GEOS selon l'environnement
 if os.name == 'nt':
+    # Windows local (QGIS)
     GDAL_LIBRARY_PATH = r'C:\Program Files\QGIS 3.40.13\bin\gdal311.dll'
     GEOS_LIBRARY_PATH = r'C:\Program Files\QGIS 3.40.13\bin\geos_c.dll'
     os.environ['PROJ_LIB'] = r'C:\Program Files\QGIS 3.40.13\share\proj'
+# Linux/Docker : les variables GDAL_LIBRARY_PATH et GEOS_LIBRARY_PATH sont définies via env
+
+# Configuration CSRF pour production
+CSRF_TRUSTED_ORIGINS = config(
+    'CSRF_TRUSTED_ORIGINS',
+    default='http://localhost:5173,http://127.0.0.1:5173',
+    cast=lambda v: [s.strip() for s in v.split(',')]
+)
