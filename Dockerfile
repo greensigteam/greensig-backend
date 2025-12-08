@@ -32,8 +32,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copier le code de l'application
 COPY . .
 
-# Collecter les fichiers statiques
-RUN python manage.py collectstatic --noinput
+# Collecter les fichiers statiques (variables temporaires pour le build uniquement)
+RUN SECRET_KEY=build-secret-key-not-for-production \
+    DEBUG=False \
+    DB_NAME=dummy \
+    DB_USER=dummy \
+    DB_PASSWORD=dummy \
+    DB_HOST=localhost \
+    python manage.py collectstatic --noinput
 
 # Exposer le port
 EXPOSE 8000
