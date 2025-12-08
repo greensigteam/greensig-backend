@@ -1,3 +1,35 @@
-fly.toml
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+media/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
 .git/
-*.sqlite3
+.gitignore
+
+# Fly.io
+fly.toml
+
+# Autres
+*.md
+.DS_Store
+Thumbs.db

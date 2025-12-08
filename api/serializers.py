@@ -175,7 +175,7 @@ class PuitSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'profondeur', 'diametre', 'niveau_statique',
+            'nom', 'profondeur', 'diametre', 'niveau_statique',
             'niveau_dynamique', 'symbole', 'observation', 'last_intervention_date'
         )
 
@@ -193,7 +193,7 @@ class PompeSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'type', 'diametre', 'puissance', 'debit',
+            'nom', 'type', 'diametre', 'puissance', 'debit',
             'symbole', 'observation', 'last_intervention_date'
         )
 
@@ -211,8 +211,8 @@ class VanneSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'marque', 'type', 'diametre', 'materiau',
-            'pression', 'symbole', 'observation', 'last_intervention_date'
+            'marque', 'type', 'diametre', 'materiau',
+            'pression', 'symbole', 'observation'
         )
 
 
@@ -229,8 +229,8 @@ class ClapetSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'marque', 'type', 'diametre', 'materiau',
-            'pression', 'symbole', 'observation', 'last_intervention_date'
+            'marque', 'type', 'diametre', 'materiau',
+            'pression', 'symbole', 'observation'
         )
 
 
@@ -247,8 +247,8 @@ class CanalisationSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'marque', 'type', 'diametre', 'materiau',
-            'pression', 'symbole', 'observation', 'last_intervention_date'
+            'marque', 'type', 'diametre', 'materiau',
+            'pression', 'symbole', 'observation'
         )
 
 
@@ -265,8 +265,8 @@ class AspersionSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'marque', 'type', 'diametre', 'materiau',
-            'pression', 'symbole', 'observation', 'last_intervention_date'
+            'marque', 'type', 'diametre', 'materiau',
+            'pression', 'symbole', 'observation'
         )
 
 
@@ -283,8 +283,8 @@ class GoutteSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'type', 'diametre', 'materiau', 'pression',
-            'symbole', 'observation', 'last_intervention_date'
+            'type', 'diametre', 'materiau', 'pression',
+            'symbole', 'observation'
         )
 
 
@@ -301,6 +301,6 @@ class BallonSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'marque', 'pression', 'volume', 'materiau',
-            'observation', 'last_intervention_date'
+            'marque', 'pression', 'volume', 'materiau',
+            'observation'
         )
