@@ -41,8 +41,10 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.gis',
     'rest_framework',
+    'rest_framework_simplejwt',
     'django_filters',
     'api',
+    'api_users',
     'corsheaders',
 ]
 
@@ -143,10 +145,19 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Custom User Model
+AUTH_USER_MODEL = 'api_users.Utilisateur'
+
 REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 50  # Nombre d'éléments par page par défaut
+    'PAGE_SIZE': 50,  # Nombre d'éléments par page par défaut
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
 }
 
 # Configuration GDAL/GEOS selon l'environnement
@@ -163,3 +174,25 @@ CSRF_TRUSTED_ORIGINS = config(
     default='http://localhost:5173,http://127.0.0.1:5173',
     cast=lambda v: [s.strip() for s in v.split(',')]
 )
+
+# Configuration JWT
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),  # Token d'acces valide 30 minutes
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),     # Refresh token valide 7 jours
+    'ROTATE_REFRESH_TOKENS': True,                   # Nouveau refresh token a chaque refresh
+    'BLACKLIST_AFTER_ROTATION': True,                # Invalide l'ancien refresh token
+    'UPDATE_LAST_LOGIN': True,                       # Met a jour last_login
+
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+}
