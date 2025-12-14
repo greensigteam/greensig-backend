@@ -295,10 +295,11 @@ class OperateurCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operateur
         fields = [
-            'email', 'nom', 'prenom', 'password',
+            'utilisateur', 'email', 'nom', 'prenom', 'password',
             'numero_immatriculation', 'statut', 'equipe',
             'date_embauche', 'telephone', 'photo'
         ]
+        read_only_fields = ['utilisateur']
 
     def create(self, validated_data):
         # Extraire les données utilisateur
