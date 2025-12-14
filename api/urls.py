@@ -31,6 +31,8 @@ from .views import (
     ExportDataView,
     # Inventaire unifié
     InventoryListView,
+    # Options de filtrage
+    FilterOptionsView,
     # Carte avec bounding box
     MapObjectsView,
 )
@@ -65,6 +67,7 @@ urlpatterns = [
     # INVENTAIRE UNIFIÉ (15 types combinés)
     # ==============================================================================
     path('inventory/', InventoryListView.as_view(), name='inventory-unified'),
+    path('inventory/filter-options/', FilterOptionsView.as_view(), name='filter-options'),
 
     # ==============================================================================
     # HIÉRARCHIE SPATIALE
