@@ -24,7 +24,6 @@ class Migration(migrations.Migration):
                 ('email', models.EmailField(help_text='Adresse email de connexion (unique)', max_length=254, unique=True, verbose_name='Email')),
                 ('nom', models.CharField(max_length=100, verbose_name='Nom')),
                 ('prenom', models.CharField(max_length=100, verbose_name='Prénom')),
-                ('type_utilisateur', models.CharField(choices=[('ADMIN', 'Administrateur'), ('OPERATEUR', 'Opérateur'), ('CLIENT', 'Client')], default='OPERATEUR', max_length=20, verbose_name="Type d'utilisateur")),
                 ('date_creation', models.DateTimeField(auto_now_add=True, verbose_name='Date de création')),
                 ('actif', models.BooleanField(default=True, help_text='Désactiver plutôt que supprimer (soft delete)', verbose_name='Actif')),
                 ('derniere_connexion', models.DateTimeField(blank=True, null=True, verbose_name='Dernière connexion')),

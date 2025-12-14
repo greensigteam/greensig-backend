@@ -6,7 +6,7 @@ from django.utils import timezone
 from .models import (
     Utilisateur, Role, UtilisateurRole, Client, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
-    HistoriqueEquipeOperateur, TypeUtilisateur, StatutOperateur,
+    HistoriqueEquipeOperateur, StatutOperateur,
     NiveauCompetence, StatutAbsence
 )
 
@@ -24,7 +24,7 @@ class UtilisateurSerializer(serializers.ModelSerializer):
         model = Utilisateur
         fields = [
             'id', 'email', 'nom', 'prenom', 'full_name',
-            'type_utilisateur', 'date_creation', 'actif',
+            'date_creation', 'actif',
             'derniere_connexion', 'roles'
         ]
         read_only_fields = ['id', 'date_creation', 'derniere_connexion']
@@ -52,7 +52,7 @@ class UtilisateurCreateSerializer(serializers.ModelSerializer):
         model = Utilisateur
         fields = [
             'id', 'email', 'nom', 'prenom', 'password', 'password_confirm',
-            'type_utilisateur', 'actif'
+            'actif'
         ]
 
     def validate(self, attrs):
@@ -65,6 +65,7 @@ class UtilisateurCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data.pop('password_confirm')
         password = validated_data.pop('password')
+        # Création sans rôle, l'admin attribuera les rôles ensuite
         user = Utilisateur.objects.create_user(
             password=password,
             **validated_data
@@ -165,7 +166,6 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             'email': validated_data.pop('email'),
             'nom': validated_data.pop('nom'),
             'prenom': validated_data.pop('prenom'),
-            'type_utilisateur': TypeUtilisateur.CLIENT,
         }
         password = validated_data.pop('password')
 
@@ -181,9 +181,7 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-        # Attribuer le rôle CLIENT
-        role_client, _ = Role.objects.get_or_create(nom_role='CLIENT')
-        UtilisateurRole.objects.create(utilisateur=utilisateur, role=role_client)
+            # Créer le profil client sans rôle, l'admin attribuera les rôles ensuite
 
         return client
 
@@ -308,15 +306,14 @@ class OperateurCreateSerializer(serializers.ModelSerializer):
             'email': validated_data.pop('email'),
             'nom': validated_data.pop('nom'),
             'prenom': validated_data.pop('prenom'),
-            'type_utilisateur': TypeUtilisateur.OPERATEUR,
         }
         password = validated_data.pop('password')
 
         # Créer l'utilisateur
         utilisateur = Utilisateur.objects.create_user(
-            password=password,
-            **user_data
-        )
+                password=password,
+                **user_data
+            )
 
         # Créer le profil opérateur
         operateur = Operateur.objects.create(
@@ -324,9 +321,7 @@ class OperateurCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-        # Attribuer le rôle OPERATEUR
-        role_operateur, _ = Role.objects.get_or_create(nom_role='OPERATEUR')
-        UtilisateurRole.objects.create(utilisateur=utilisateur, role=role_operateur)
+            # Créer le profil opérateur sans rôle, l'admin attribuera les rôles ensuite
 
         # Historiser l'affectation à l'équipe si applicable
         if operateur.equipe:
@@ -403,7 +398,8 @@ class EquipeListSerializer(serializers.ModelSerializer):
     """Serializer pour la liste des équipes."""
     chef_equipe_nom = serializers.CharField(
         source='chef_equipe.utilisateur.get_full_name',
-        read_only=True
+        read_only=True,
+        allow_null=True
     )
     nombre_membres = serializers.IntegerField(read_only=True)
     statut_operationnel = serializers.CharField(read_only=True)
@@ -449,11 +445,15 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""
+        # Si aucune valeur fournie (chef optionnel), accepter
+        if value is None:
+            return value
+
         if not value.peut_etre_chef():
             raise serializers.ValidationError(
                 "Cet opérateur ne peut pas être chef d'équipe. "
                 "Il doit avoir la compétence 'Gestion d'équipe' "
-                "avec un niveau Intermédiaire, Expert ou Autorisé."
+                "avec un niveau Intermédiaire ou Expert."
             )
         return value
 
@@ -477,12 +477,13 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
                 role_dans_equipe='MEMBRE'
             )
 
-        # Attribuer le rôle CHEF_EQUIPE au chef
-        role_chef, _ = Role.objects.get_or_create(nom_role='CHEF_EQUIPE')
-        UtilisateurRole.objects.get_or_create(
-            utilisateur=equipe.chef_equipe.utilisateur,
-            role=role_chef
-        )
+        # Attribuer le rôle CHEF_EQUIPE au chef si fourni
+        if equipe.chef_equipe:
+            role_chef, _ = Role.objects.get_or_create(nom_role='CHEF_EQUIPE')
+            UtilisateurRole.objects.get_or_create(
+                utilisateur=equipe.chef_equipe.utilisateur,
+                role=role_chef
+            )
 
         return equipe
 
@@ -496,30 +497,70 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""
+        if value is None:
+            return value
+
         if not value.peut_etre_chef():
             raise serializers.ValidationError(
                 "Cet opérateur ne peut pas être chef d'équipe. "
                 "Il doit avoir la compétence 'Gestion d'équipe' "
-                "avec un niveau Intermédiaire, Expert ou Autorisé."
+                "avec un niveau Intermédiaire ou Expert."
             )
         return value
 
 
 class AffecterMembresSerializer(serializers.Serializer):
-    """Serializer pour affecter des membres à une équipe."""
-    operateurs = serializers.PrimaryKeyRelatedField(
-        many=True,
-        queryset=Operateur.objects.all()
-    )
+    """Serializer pour affecter des membres à une équipe.
+
+    Accepte une liste d'IDs (entiers). Pour chaque ID :
+    - si un `Operateur` existe avec cette PK, on l'utilise
+    - sinon si un `Utilisateur` existe, on crée un `Operateur` minimal
+      (numéro d'immatriculation auto-généré, date_embauche = aujourd'hui)
+      afin de permettre à des administrateurs (ou utilisateurs avec rôle)
+      d'être ajoutés comme membres même s'ils n'avaient pas de profil
+      opérateur préalable.
+    """
+    operateurs = serializers.ListField(child=serializers.IntegerField())
+
+    def validate_operateurs(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('La valeur doit être une liste d\'IDs.')
+        return value
 
     def update_membres(self, equipe, operateurs):
-        """Met à jour les membres d'une équipe."""
         today = timezone.now().date()
+
+        # Convertir les IDs en objets Operateur, en créant si nécessaire
+        operateur_objs = []
+        for pk in operateurs:
+            try:
+                op = Operateur.objects.get(pk=pk)
+            except Operateur.DoesNotExist:
+                try:
+                    user = Utilisateur.objects.get(pk=pk)
+                except Utilisateur.DoesNotExist:
+                    raise serializers.ValidationError({'operateurs': f'Utilisateur {pk} inexistant.'})
+
+                # Générer un numéro d'immatriculation unique
+                base_num = f'AUTO-{user.id}'
+                numero = base_num
+                suffix = 1
+                while Operateur.objects.filter(numero_immatriculation=numero).exists():
+                    suffix += 1
+                    numero = f"{base_num}-{suffix}"
+
+                op = Operateur.objects.create(
+                    utilisateur=user,
+                    numero_immatriculation=numero,
+                    date_embauche=today,
+                    telephone=''
+                )
+            operateur_objs.append(op)
 
         # Retirer les anciens membres
         anciens_membres = equipe.operateurs.all()
         for ancien in anciens_membres:
-            if ancien not in operateurs:
+            if ancien not in operateur_objs:
                 # Fermer l'historique
                 HistoriqueEquipeOperateur.objects.filter(
                     operateur=ancien,
@@ -531,7 +572,7 @@ class AffecterMembresSerializer(serializers.Serializer):
                 ancien.save()
 
         # Ajouter les nouveaux membres
-        for nouveau in operateurs:
+        for nouveau in operateur_objs:
             if nouveau.equipe != equipe:
                 # Fermer l'ancien historique si existant
                 if nouveau.equipe:

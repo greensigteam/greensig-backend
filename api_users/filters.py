@@ -5,7 +5,7 @@ from django.db.models import Q
 from .models import (
     Utilisateur, Operateur, Equipe, Absence,
     Competence, CompetenceOperateur, HistoriqueEquipeOperateur,
-    TypeUtilisateur, StatutOperateur, StatutAbsence, TypeAbsence,
+    StatutOperateur, StatutAbsence, TypeAbsence,
     CategorieCompetence, NiveauCompetence, StatutEquipe
 )
 
@@ -21,7 +21,6 @@ class UtilisateurFilter(django_filters.FilterSet):
     search = django_filters.CharFilter(method='filter_search', label='Recherche')
 
     # Filtres simples
-    type_utilisateur = django_filters.ChoiceFilter(choices=TypeUtilisateur.choices)
     actif = django_filters.BooleanFilter()
 
     # Filtres par date
@@ -44,7 +43,7 @@ class UtilisateurFilter(django_filters.FilterSet):
 
     class Meta:
         model = Utilisateur
-        fields = ['type_utilisateur', 'actif']
+        fields = ['actif']
 
     def filter_search(self, queryset, name, value):
         """Recherche dans nom, prenom, email."""
@@ -174,7 +173,7 @@ class OperateurFilter(django_filters.FilterSet):
     def filter_by_niveau_minimum(self, queryset, name, value):
         """Filtre par niveau minimum de competence."""
         if value:
-            niveaux = ['NON', 'DEBUTANT', 'INTERMEDIAIRE', 'EXPERT', 'AUTORISE']
+            niveaux = ['NON', 'DEBUTANT', 'INTERMEDIAIRE', 'EXPERT']
             try:
                 idx = niveaux.index(value)
                 niveaux_valides = niveaux[idx:]
@@ -224,8 +223,7 @@ class OperateurFilter(django_filters.FilterSet):
                 competences_operateur__competence__nom_competence='Gestion d\'equipe',
                 competences_operateur__niveau__in=[
                     NiveauCompetence.INTERMEDIAIRE,
-                    NiveauCompetence.EXPERT,
-                    NiveauCompetence.AUTORISE
+                    NiveauCompetence.EXPERT
                 ]
             ).distinct()
         return queryset

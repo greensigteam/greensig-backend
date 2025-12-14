@@ -29,13 +29,10 @@ class UtilisateurManager(BaseUserManager):
         """Crée et retourne un superutilisateur."""
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-        extra_fields.setdefault('type_utilisateur', TypeUtilisateur.ADMIN)
-
         if extra_fields.get('is_staff') is not True:
             raise ValueError('Le superutilisateur doit avoir is_staff=True.')
         if extra_fields.get('is_superuser') is not True:
             raise ValueError('Le superutilisateur doit avoir is_superuser=True.')
-
         return self.create_user(email, password, **extra_fields)
 
 
@@ -43,11 +40,7 @@ class UtilisateurManager(BaseUserManager):
 # ENUMERATIONS
 # ==============================================================================
 
-class TypeUtilisateur(models.TextChoices):
-    """Types d'utilisateurs possibles."""
-    ADMIN = 'ADMIN', 'Administrateur'
-    OPERATEUR = 'OPERATEUR', 'Opérateur'
-    CLIENT = 'CLIENT', 'Client'
+
 
 
 class StatutOperateur(models.TextChoices):
@@ -69,7 +62,6 @@ class NiveauCompetence(models.TextChoices):
     DEBUTANT = 'DEBUTANT', 'Débutant'
     INTERMEDIAIRE = 'INTERMEDIAIRE', 'Intermédiaire'
     EXPERT = 'EXPERT', 'Expert'
-    AUTORISE = 'AUTORISE', 'Autorisé'
 
 
 class TypeAbsence(models.TextChoices):
@@ -113,12 +105,6 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     )
     nom = models.CharField(max_length=100, verbose_name="Nom")
     prenom = models.CharField(max_length=100, verbose_name="Prénom")
-    type_utilisateur = models.CharField(
-        max_length=20,
-        choices=TypeUtilisateur.choices,
-        default=TypeUtilisateur.OPERATEUR,
-        verbose_name="Type d'utilisateur"
-    )
     date_creation = models.DateTimeField(
         auto_now_add=True,
         verbose_name="Date de création"
@@ -202,7 +188,8 @@ class Role(models.Model):
 
 class UtilisateurRole(models.Model):
     """
-    Table d'association N-N entre Utilisateur et Role.
+
+    # Table d'association N-N entre Utilisateur et Role.
 
     Permet à un utilisateur d'avoir plusieurs rôles
     (ex: un opérateur peut aussi être chef d'équipe).
@@ -283,9 +270,6 @@ class Client(models.Model):
         return self.nom_structure
 
     def save(self, *args, **kwargs):
-        """S'assure que l'utilisateur associé est de type CLIENT."""
-        self.utilisateur.type_utilisateur = TypeUtilisateur.CLIENT
-        self.utilisateur.save()
         super().save(*args, **kwargs)
 
 
@@ -351,10 +335,12 @@ class Equipe(models.Model):
     )
     chef_equipe = models.ForeignKey(
         'Operateur',
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='equipes_dirigees',
         verbose_name="Chef d'équipe",
-        help_text="Doit avoir la compétence 'Gestion d'équipe'"
+        help_text="Doit avoir la compétence 'Gestion d'equipe' (optionnel)"
     )
     specialite = models.CharField(
         max_length=100,
@@ -420,17 +406,18 @@ class Equipe(models.Model):
 
     def clean(self):
         """Valide que le chef a la competence 'Gestion d'equipe'."""
+        # Si aucun chef n'est défini, on autorise la création sans chef.
         if self.chef_equipe_id:
             has_gestion = CompetenceOperateur.objects.filter(
                 operateur=self.chef_equipe,
                 competence__nom_competence="Gestion d'equipe",
-                niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT, NiveauCompetence.AUTORISE]
+                niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
             ).exists()
 
             if not has_gestion:
                 raise ValidationError({
                     'chef_equipe': "Le chef d'equipe doit avoir la competence 'Gestion d'equipe' "
-                                   "avec un niveau Intermediaire, Expert ou Autorise."
+                                   "avec un niveau Intermediaire ou Expert."
                 })
 
     def save(self, *args, **kwargs):
@@ -509,9 +496,6 @@ class Operateur(models.Model):
         return f"{self.utilisateur.get_full_name()} ({self.numero_immatriculation})"
 
     def save(self, *args, **kwargs):
-        """S'assure que l'utilisateur associé est de type OPERATEUR."""
-        self.utilisateur.type_utilisateur = TypeUtilisateur.OPERATEUR
-        self.utilisateur.save()
         super().save(*args, **kwargs)
 
     @property
@@ -539,7 +523,7 @@ class Operateur(models.Model):
         return CompetenceOperateur.objects.filter(
             operateur=self,
             competence__nom_competence="Gestion d'equipe",
-            niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT, NiveauCompetence.AUTORISE]
+            niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
         ).exists()
 
 

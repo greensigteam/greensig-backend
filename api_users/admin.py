@@ -70,17 +70,17 @@ class UtilisateurAdmin(BaseUserAdmin):
     """Admin personnalise pour le modele Utilisateur."""
 
     list_display = [
-        'email', 'nom', 'prenom', 'type_utilisateur',
+        'email', 'nom', 'prenom',
         'actif', 'is_staff', 'date_creation'
     ]
-    list_filter = ['type_utilisateur', 'actif', 'is_staff', 'date_creation']
+    list_filter = ['actif', 'is_staff', 'date_creation']
     search_fields = ['email', 'nom', 'prenom']
     ordering = ['nom', 'prenom']
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
         ('Informations personnelles', {'fields': ('nom', 'prenom')}),
-        ('Type et statut', {'fields': ('type_utilisateur', 'actif')}),
+        ('Statut', {'fields': ('actif',)}),
         ('Permissions Django', {
             'fields': ('is_staff', 'is_superuser', 'groups', 'user_permissions'),
             'classes': ('collapse',)
@@ -96,7 +96,7 @@ class UtilisateurAdmin(BaseUserAdmin):
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'nom', 'prenom', 'password1', 'password2', 'type_utilisateur'),
+            'fields': ('email', 'nom', 'prenom', 'password1', 'password2'),
         }),
     )
 

@@ -8,7 +8,12 @@ class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        serializer = UtilisateurSerializer(request.user)
+        user = request.user
+        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+        # Si l'utilisateur n'a qu'un seul rôle et que c'est OPERATEUR, refuser l'accès
+        if len(roles) == 1 and roles[0] == 'OPERATEUR':
+            return Response({'detail': "Accès refusé : vous n'avez pas les droits nécessaires."}, status=403)
+        serializer = UtilisateurSerializer(user)
         return Response(serializer.data)
 
 
@@ -237,7 +242,7 @@ class CompetenceViewSet(viewsets.ModelViewSet):
 
     def _get_niveaux_superieurs(self, niveau):
         """Retourne les niveaux supérieurs ou égaux au niveau donné."""
-        ordre = ['NON', 'DEBUTANT', 'INTERMEDIAIRE', 'EXPERT', 'AUTORISE']
+        ordre = ['NON', 'DEBUTANT', 'INTERMEDIAIRE', 'EXPERT']
         try:
             idx = ordre.index(niveau)
             return ordre[idx:]
@@ -271,6 +276,50 @@ class OperateurViewSet(viewsets.ModelViewSet):
         elif self.action == 'retrieve':
             return OperateurDetailSerializer
         return OperateurListSerializer
+
+    def list(self, request, *args, **kwargs):
+        """
+        Liste les opérateurs existants MAIS inclut aussi les `Utilisateur`
+        qui ont le rôle `OPERATEUR` sans profil `Operateur`.
+        Cela permet d'afficher dans la page RH les users qui se sont attribués
+        le rôle sans avoir de profil technique.
+        """
+        # opérateurs avec profil
+        qs_operateurs = self.filter_queryset(self.get_queryset())
+        serializer = OperateurListSerializer(qs_operateurs, many=True)
+        data = list(serializer.data)
+
+        # utilisateurs ayant le rôle OPERATEUR mais sans profil Operateur
+        users_without_profile = Utilisateur.objects.filter(
+            roles_utilisateur__role__nom_role='OPERATEUR',
+            actif=True
+        ).filter(operateur_profile__isnull=True).distinct()
+
+        for u in users_without_profile:
+            data.append({
+                'utilisateur': u.id,
+                'email': u.email,
+                'nom': u.nom,
+                'prenom': u.prenom,
+                'full_name': u.get_full_name(),
+                'actif': u.actif,
+                'numero_immatriculation': None,
+                'statut': None,
+                'equipe': None,
+                'equipe_nom': None,
+                'date_embauche': None,
+                'telephone': None,
+                'photo': None,
+                'est_chef_equipe': False,
+                'est_disponible': False
+            })
+
+        # pagination manuelle si configurée
+        page = self.paginate_queryset(data)
+        if page is not None:
+            return self.get_paginated_response(page)
+
+        return Response(data)
 
     def destroy(self, request, *args, **kwargs):
         """
@@ -338,14 +387,19 @@ class OperateurViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        comp_op, created = CompetenceOperateur.objects.update_or_create(
+        # On utilise get_or_create pour garantir que 'created' existe toujours
+        comp_op, created = CompetenceOperateur.objects.get_or_create(
             operateur=operateur,
             competence=competence,
             defaults={
                 'niveau': niveau,
-                'date_acquisition': timezone.now().date() if created else None
+                'date_acquisition': timezone.now().date()
             }
         )
+        if not created:
+            # Si déjà existant, on met à jour le niveau si besoin
+            comp_op.niveau = niveau
+            comp_op.save()
 
         serializer = CompetenceOperateurSerializer(comp_op)
         return Response(serializer.data)
@@ -424,7 +478,6 @@ class OperateurViewSet(viewsets.ModelViewSet):
             competences_operateur__niveau__in=[
                 NiveauCompetence.INTERMEDIAIRE,
                 NiveauCompetence.EXPERT,
-                NiveauCompetence.AUTORISE
             ]
         ).distinct()
 
@@ -453,7 +506,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
         # Filtrer par niveau minimum
         if niveau_minimum:
-            niveaux = ['NON', 'DEBUTANT', 'INTERMEDIAIRE', 'EXPERT', 'AUTORISE']
+            niveaux = ['NON', 'DEBUTANT', 'INTERMEDIAIRE', 'EXPERT']
             try:
                 idx = niveaux.index(niveau_minimum)
                 niveaux_valides = niveaux[idx:]
@@ -833,11 +886,11 @@ class StatistiquesUtilisateursView(APIView):
         stats_utilisateurs = {
             'total': Utilisateur.objects.count(),
             'actifs': Utilisateur.objects.filter(actif=True).count(),
-            'par_type': dict(
-                Utilisateur.objects.values('type_utilisateur')
-                .annotate(count=Count('id'))
-                .values_list('type_utilisateur', 'count')
-            )
+                # 'par_type': dict(
+                #     Utilisateur.objects.values('type_utilisateur')
+                #     .annotate(count=Count('id'))
+                #     .values_list('type_utilisateur', 'count')
+                # )
         }
 
         # Statistiques opérateurs
