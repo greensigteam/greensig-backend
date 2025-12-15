@@ -92,3 +92,7 @@ fly.toml
 .DS_Store
 Thumbs.db
 
+modules
+modules/MCD_GreeSIG_Corrige (5).md
+scripts
+scripts/verificationdemodules.py
