@@ -63,6 +63,16 @@ class Tache(models.Model):
     notifiee = models.BooleanField(default=False, verbose_name="Notifiée")
     confirmee = models.BooleanField(default=False, verbose_name="Confirmée")
     
+    # Lien avec Réclamation (MCD Entité 19 / Note 54)
+    reclamation = models.ForeignKey(
+        'api_reclamations.Reclamation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taches_correctives',
+        verbose_name="Réclamation liée"
+    )
+    
     deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Supprimé le") # Soft delete
 
     # Many-to-Many relation with Inventory Objects

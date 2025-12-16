@@ -31,6 +31,7 @@ class TacheSerializer(serializers.ModelSerializer):
     equipe_detail = EquipeListSerializer(source='id_equipe', read_only=True)
     participations_detail = ParticipationTacheSerializer(source='participations', many=True, read_only=True)
     objets_detail = ObjetSimpleSerializer(source='objets', many=True, read_only=True)
+    reclamation_numero = serializers.CharField(source='reclamation.numero_reclamation', read_only=True, allow_null=True)
     
     class Meta:
         model = Tache

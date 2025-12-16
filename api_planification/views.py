@@ -36,6 +36,10 @@ class TacheViewSet(viewsets.ModelViewSet):
         end_date = self.request.query_params.get('end_date')
         if end_date:
             qs = qs.filter(date_fin_planifiee__lte=end_date)
+
+        has_reclamation = self.request.query_params.get('has_reclamation')
+        if has_reclamation == 'true':
+            qs = qs.filter(reclamation__isnull=False)
             
         return qs
 
@@ -64,9 +68,30 @@ class TacheViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         tache = serializer.save()
+        
+        # Gestion Récurrence
         if tache.parametres_recurrence:
             from .services import RecurrenceService
             RecurrenceService.generate_occurrences(tache)
+
+        # Gestion Statut Réclamation (User 6.6.5.4)
+        if tache.reclamation:
+            from api_reclamations.models import HistoriqueReclamation
+            
+            rec = tache.reclamation
+            # On passe en 'EN_COURS' uniquement si on est au début du cycle
+            if rec.statut in ['NOUVELLE', 'PRISE_EN_COMPTE']:
+                old_statut = rec.statut
+                rec.statut = 'EN_COURS'
+                rec.save()
+                
+                HistoriqueReclamation.objects.create(
+                    reclamation=rec,
+                    statut_precedent=old_statut,
+                    statut_nouveau='EN_COURS',
+                    auteur=self.request.user,
+                    commentaire=f"Passage en cours automatique suite à la création de tâches"
+                )
 
     def perform_update(self, serializer):
         tache = serializer.save()
