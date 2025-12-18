@@ -14,29 +14,22 @@ from .models import (
 
 class SiteSerializer(GeoFeatureModelSerializer):
     geometrie_emprise = GeometryField()
-    centroid = GeometryField()
-    superficie_calculee = serializers.SerializerMethodField()
-    
-    def get_superficie_calculee(self, obj):
-        """Calculate area in square meters using PostGIS ST_Area with geography."""
-        if obj.geometrie_emprise:
-            from django.db import connection
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT ST_Area(%s::geography)",
-                    [obj.geometrie_emprise.ewkt]
-                )
-                result = cursor.fetchone()
-                return round(result[0], 2) if result and result[0] else None
-        return None
+    centroid = GeometryField(read_only=True)  # Auto-calculated from geometrie_emprise
+    code_site = serializers.CharField(read_only=True)  # Auto-generated
+    client_nom = serializers.SerializerMethodField()
 
     class Meta:
         model = Site
         geo_field = "geometrie_emprise"
         fields = (
             'id', 'nom_site', 'adresse', 'superficie_totale', 'code_site',
-            'date_debut_contrat', 'date_fin_contrat', 'actif', 'centroid', 'superficie_calculee'
+            'client', 'client_nom',
+            'date_debut_contrat', 'date_fin_contrat', 'actif', 'centroid'
         )
+
+    def get_client_nom(self, obj):
+        """Return client name or None if no client assigned"""
+        return obj.client.nom_structure if obj.client else None
 
 
 class SousSiteSerializer(GeoFeatureModelSerializer):
@@ -65,8 +58,8 @@ class ArbreSerializer(GeoFeatureModelSerializer):
         model = Arbre
         geo_field = "geometry"
         fields = (
-            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom', 'etat',
-            'nom', 'famille', 'taille', 'symbole', 'observation', 'last_intervention_date'
+            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
+            'nom', 'famille', 'taille', 'symbole', 'observation', 'last_intervention_date', 'etat'
         )
 
 
@@ -96,8 +89,8 @@ class GazonSerializer(GeoFeatureModelSerializer):
         model = Gazon
         geo_field = "geometry"
         fields = (
-            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom', 'etat',
-            'nom', 'famille', 'area_sqm', 'superficie_calculee', 'observation', 'last_intervention_date'
+            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
+            'nom', 'famille', 'area_sqm', 'observation', 'last_intervention_date', 'etat'
         )
 
 
@@ -113,8 +106,8 @@ class PalmierSerializer(GeoFeatureModelSerializer):
         model = Palmier
         geo_field = "geometry"
         fields = (
-            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom', 'etat',
-            'nom', 'famille', 'taille', 'symbole', 'observation', 'last_intervention_date'
+            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
+            'nom', 'famille', 'taille', 'symbole', 'observation', 'last_intervention_date', 'etat'
         )
 
 
@@ -144,8 +137,8 @@ class ArbusteSerializer(GeoFeatureModelSerializer):
         model = Arbuste
         geo_field = "geometry"
         fields = (
-            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom', 'etat',
-            'nom', 'famille', 'densite', 'symbole', 'superficie_calculee', 'observation', 'last_intervention_date'
+            'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
+            'nom', 'famille', 'densite', 'symbole', 'observation', 'last_intervention_date', 'etat'
         )
 
 

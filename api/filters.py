@@ -14,6 +14,7 @@ class SiteFilter(django_filters.FilterSet):
         fields = {
             'nom_site': ['icontains'],
             'code_site': ['exact', 'icontains'],
+            'client': ['exact'],
             'actif': ['exact'],
             'date_debut_contrat': ['gte', 'lte'],
             'date_fin_contrat': ['gte', 'lte'],

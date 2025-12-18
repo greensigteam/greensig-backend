@@ -1,4 +1,6 @@
 from django.contrib.gis.db import models
+from django.utils import timezone
+import uuid
 
 
 # ==============================================================================
@@ -10,7 +12,17 @@ class Site(models.Model):
     nom_site = models.CharField(max_length=255, verbose_name="Nom du site")
     adresse = models.TextField(verbose_name="Adresse complète", blank=True, null=True)
     superficie_totale = models.FloatField(verbose_name="Surface totale m²", blank=True, null=True)
-    code_site = models.CharField(max_length=50, unique=True, verbose_name="Code unique")
+    code_site = models.CharField(max_length=50, unique=True, verbose_name="Code unique", blank=True)
+
+    # Client propriétaire du site
+    client = models.ForeignKey(
+        'api_users.Client',
+        on_delete=models.CASCADE,
+        related_name='sites',
+        verbose_name="Client propriétaire",
+        null=True,
+        blank=True
+    )
 
     # Dates de contrat
     date_debut_contrat = models.DateField(blank=True, null=True)
@@ -20,6 +32,24 @@ class Site(models.Model):
     # Géométrie
     geometrie_emprise = models.PolygonField(srid=4326, verbose_name="Délimitation (Polygon)")
     centroid = models.PointField(srid=4326, blank=True, null=True, verbose_name="Point central")
+
+    def save(self, *args, **kwargs):
+        # Auto-generate code_site if not provided
+        if not self.code_site:
+            year = timezone.now().year
+            # Generate a unique code: SITE-YYYY-XXXX
+            short_uuid = uuid.uuid4().hex[:4].upper()
+            self.code_site = f"SITE-{year}-{short_uuid}"
+            # Ensure uniqueness
+            while Site.objects.filter(code_site=self.code_site).exists():
+                short_uuid = uuid.uuid4().hex[:4].upper()
+                self.code_site = f"SITE-{year}-{short_uuid}"
+
+        # Auto-calculate centroid from geometrie_emprise if not provided
+        if self.geometrie_emprise and not self.centroid:
+            self.centroid = self.geometrie_emprise.centroid
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.nom_site
@@ -66,6 +96,14 @@ class Objet(models.Model):
         verbose_name="État de l'objet",
         db_index=True
     )
+
+    ETAT_CHOICES = [
+        ('bon', 'Bon'),
+        ('moyen', 'Moyen'),
+        ('mauvais', 'Mauvais'),
+        ('critique', 'Critique'),
+    ]
+    etat = models.CharField(max_length=50, choices=ETAT_CHOICES, default='bon', verbose_name="État")
 
     def get_type_reel(self):
         """

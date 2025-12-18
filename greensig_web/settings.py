@@ -45,6 +45,9 @@ INSTALLED_APPS = [
     'django_filters',
     'api',
     'api_users',
+    'api_planification',
+    'api_suivi_taches',
+    'api_reclamations',
     'corsheaders',
 ]
 
@@ -137,6 +140,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
@@ -179,7 +184,7 @@ CSRF_TRUSTED_ORIGINS = config(
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),  # Token d'acces valide 30 minutes
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),    # Token d'acces valide 24 heures
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),     # Refresh token valide 7 jours
     'ROTATE_REFRESH_TOKENS': True,                   # Nouveau refresh token a chaque refresh
     'BLACKLIST_AFTER_ROTATION': True,                # Invalide l'ancien refresh token
