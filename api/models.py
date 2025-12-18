@@ -69,6 +69,14 @@ class SousSite(models.Model):
 # CLASSE MÈRE CONCRÈTE (Polymorphisme)
 # ==============================================================================
 
+ETAT_CHOICES = [
+    ('bon', 'Bon état'),
+    ('moyen', 'État moyen'),
+    ('mauvais', 'Mauvais état'),
+    ('critique', 'État critique'),
+]
+
+
 class Objet(models.Model):
     """
     Classe Mère CONCRÈTE (crée une table 'api_objet' en base de données).
@@ -81,6 +89,13 @@ class Objet(models.Model):
     """
     site = models.ForeignKey(Site, on_delete=models.CASCADE)
     sous_site = models.ForeignKey(SousSite, on_delete=models.SET_NULL, null=True, blank=True)
+    etat = models.CharField(
+        max_length=20,
+        choices=ETAT_CHOICES,
+        default='bon',
+        verbose_name="État de l'objet",
+        db_index=True
+    )
 
     ETAT_CHOICES = [
         ('bon', 'Bon'),
@@ -160,10 +175,10 @@ TAILLE_CHOICES = [
 class Arbre(Objet):
     """ Table physique : api_tree """
     nom = models.CharField(max_length=255, verbose_name="Nom")
-    famille = models.CharField(max_length=255, blank=True, null=True, verbose_name="Famille")
+    famille = models.CharField(max_length=255, blank=True, null=True, verbose_name="Famille", db_index=True)
     observation = models.TextField(blank=True, null=True)
-    last_intervention_date = models.DateField(blank=True, null=True)
-    taille = models.CharField(max_length=50, choices=TAILLE_CHOICES, blank=True, null=True)
+    last_intervention_date = models.DateField(blank=True, null=True, db_index=True)
+    taille = models.CharField(max_length=50, choices=TAILLE_CHOICES, blank=True, null=True, db_index=True)
     symbole = models.CharField(max_length=255, blank=True, null=True)
 
     # Géométrie STRICTE : Point
@@ -173,10 +188,10 @@ class Arbre(Objet):
 class Gazon(Objet):
     """ Table physique : api_lawnarea """
     nom = models.CharField(max_length=255, verbose_name="Nom")
-    famille = models.CharField(max_length=255, blank=True, null=True, verbose_name="Famille")
+    famille = models.CharField(max_length=255, blank=True, null=True, verbose_name="Famille", db_index=True)
     observation = models.TextField(blank=True, null=True)
-    last_intervention_date = models.DateField(blank=True, null=True)
-    area_sqm = models.FloatField(blank=True, null=True, verbose_name="Surface m²")
+    last_intervention_date = models.DateField(blank=True, null=True, db_index=True)
+    area_sqm = models.FloatField(blank=True, null=True, verbose_name="Surface m²", db_index=True)
 
     # Géométrie STRICTE : Polygone
     geometry = models.PolygonField(srid=4326)
@@ -184,10 +199,10 @@ class Gazon(Objet):
 
 class Palmier(Objet):
     nom = models.CharField(max_length=255, verbose_name="Nom")
-    famille = models.CharField(max_length=255, blank=True, null=True, verbose_name="Famille")
+    famille = models.CharField(max_length=255, blank=True, null=True, verbose_name="Famille", db_index=True)
     observation = models.TextField(blank=True, null=True)
-    last_intervention_date = models.DateField(blank=True, null=True)
-    taille = models.CharField(max_length=50, choices=TAILLE_CHOICES, blank=True, null=True)
+    last_intervention_date = models.DateField(blank=True, null=True, db_index=True)
+    taille = models.CharField(max_length=50, choices=TAILLE_CHOICES, blank=True, null=True, db_index=True)
     symbole = models.CharField(max_length=255, blank=True, null=True)
     geometry = models.PointField(srid=4326)
 
@@ -235,9 +250,9 @@ class Graminee(Objet):
 class Puit(Objet):
     nom = models.CharField(max_length=255, verbose_name="Nom")
     observation = models.TextField(blank=True, null=True)
-    last_intervention_date = models.DateField(blank=True, null=True)
-    profondeur = models.FloatField(blank=True, null=True)
-    diametre = models.FloatField(blank=True, null=True)
+    last_intervention_date = models.DateField(blank=True, null=True, db_index=True)
+    profondeur = models.FloatField(blank=True, null=True, db_index=True)
+    diametre = models.FloatField(blank=True, null=True, db_index=True)
     niveau_statique = models.FloatField(blank=True, null=True)
     niveau_dynamique = models.FloatField(blank=True, null=True)
     symbole = models.CharField(max_length=255, blank=True, null=True)

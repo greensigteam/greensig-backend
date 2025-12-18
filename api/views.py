@@ -324,8 +324,9 @@ class TankDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class SearchView(APIView):
     """
-    Vue pour la recherche multicritère.
+    Vue pour la recherche multicritère sur TOUS les types d'objets.
     Accepte un paramètre de requête `q`.
+    Recherche dans Sites, SousSites, et tous les 15 types d'objets (végétation + hydraulique).
     """
     def get(self, request, *args, **kwargs):
         query = request.query_params.get('q', '').strip()
@@ -357,20 +358,69 @@ class SearchView(APIView):
                 'type': 'Sous-site',
                 'location': {'type': 'Point', 'coordinates': [location.x, location.y]} if location else None,
             })
-            
-        # Recherche sur les Arbres (par nom)
-        arbres = Arbre.objects.filter(nom__icontains=query)
-        for item in arbres:
-            location = item.geometry
-            results.append({
-                'id': f"arbre-{item.pk}",
-                'name': f"{item.nom}",
-                'type': 'Arbre',
-                'location': {'type': 'Point', 'coordinates': [location.x, location.y]} if location else None,
-            })
+
+        # ✅ Recherche sur TOUS les types d'objets (végétation + hydraulique)
+        # Mapping: (Model, type_name, id_prefix)
+        object_models = [
+            # Végétation (7 types)
+            (Arbre, 'Arbre', 'arbre'),
+            (Gazon, 'Gazon', 'gazon'),
+            (Palmier, 'Palmier', 'palmier'),
+            (Arbuste, 'Arbuste', 'arbuste'),
+            (Vivace, 'Vivace', 'vivace'),
+            (Cactus, 'Cactus', 'cactus'),
+            (Graminee, 'Graminée', 'graminee'),
+            # Hydraulique (8 types)
+            (Puit, 'Puit', 'puit'),
+            (Pompe, 'Pompe', 'pompe'),
+            (Vanne, 'Vanne', 'vanne'),
+            (Clapet, 'Clapet', 'clapet'),
+            (Canalisation, 'Canalisation', 'canalisation'),
+            (Aspersion, 'Aspersion', 'aspersion'),
+            (Goutte, 'Goutte', 'goutte'),
+            (Ballon, 'Ballon', 'ballon'),
+        ]
+
+        for Model, type_name, id_prefix in object_models:
+            try:
+                # Recherche par nom (ou marque pour certains types hydrauliques)
+                query_filter = Q(nom__icontains=query)
+                if hasattr(Model, 'marque'):
+                    query_filter |= Q(marque__icontains=query)
+                if hasattr(Model, 'famille'):
+                    query_filter |= Q(famille__icontains=query)
+
+                objects = Model.objects.filter(query_filter).select_related('site')[:5]  # Max 5 par type
+                for obj in objects:
+                    try:
+                        location = obj.geometry if hasattr(obj, 'geometry') else None
+                        site_name = obj.site.nom_site if hasattr(obj, 'site') and obj.site else 'Inconnu'
+
+                        # Centroid pour polygones/lignes
+                        if location and location.geom_type in ['Polygon', 'LineString', 'MultiPolygon', 'MultiLineString']:
+                            location = location.centroid
+
+                        # Nom de l'objet
+                        obj_name = obj.nom if hasattr(obj, 'nom') and obj.nom else f"{type_name} #{obj.pk}"
+
+                        results.append({
+                            'id': f"{id_prefix}-{obj.pk}",
+                            'name': f"{obj_name} ({site_name})",
+                            'type': type_name,
+                            'location': {'type': 'Point', 'coordinates': [location.x, location.y]} if location else None,
+                        })
+                    except Exception as e:
+                        # Log error but continue with next object
+                        print(f"Error processing {type_name} #{obj.pk}: {str(e)}")
+                        continue
+
+            except Exception as e:
+                # Log error but continue with next model type
+                print(f"Error searching {type_name}: {str(e)}")
+                continue
 
         # Limiter le nombre total de résultats
-        return Response(results[:20])
+        return Response(results[:30])
 
 
 # ==============================================================================
@@ -443,23 +493,23 @@ class ExportPDFView(APIView):
 
         # Couleurs de légende (correspondant aux styles du frontend)
         layer_colors = {
-            'sites': (255, 0, 0),
-            'sousSites': (255, 165, 0),
-            'arbres': (34, 139, 34),
-            'gazons': (144, 238, 144),
-            'palmiers': (139, 69, 19),
-            'arbustes': (50, 205, 50),
-            'vivaces': (147, 112, 219),
-            'cactus': (85, 107, 47),
-            'graminees': (154, 205, 50),
-            'puits': (0, 0, 255),
-            'pompes': (0, 128, 255),
-            'vannes': (255, 140, 0),
-            'clapets': (255, 215, 0),
-            'canalisations': (128, 128, 128),
-            'aspersions': (0, 255, 255),
-            'gouttes': (0, 191, 255),
-            'ballons': (70, 130, 180)
+            'sites': (59, 130, 246),      # #3b82f6
+            'sousSites': (255, 165, 0),   # Orange (inchangé car pas dans constants.ts)
+            'arbres': (34, 197, 94),      # #22c55e
+            'gazons': (132, 204, 22),     # #84cc16
+            'palmiers': (22, 163, 74),    # #16a34a
+            'arbustes': (101, 163, 13),   # #65a30d
+            'vivaces': (163, 230, 53),    # #a3e635
+            'cactus': (77, 124, 15),      # #4d7c0f
+            'graminees': (190, 242, 100), # #bef264
+            'puits': (14, 165, 233),      # #0ea5e9
+            'pompes': (6, 182, 212),      # #06b6d4
+            'vannes': (20, 184, 166),     # #14b8a6
+            'clapets': (8, 145, 178),     # #0891b2
+            'canalisations': (2, 132, 199), # #0284c7
+            'aspersions': (56, 189, 248), # #38bdf8
+            'gouttes': (125, 211, 252),   # #7dd3fc
+            'ballons': (3, 105, 161)      # #0369a1
         }
 
         layer_names = {
@@ -829,35 +879,43 @@ class InventoryListView(APIView):
 
     Query params optionnels:
     - type: filtrer par type ('Arbre', 'Gazon', 'Puit', etc.)
-    - site: filtrer par site ID
+    - site: filtrer par site ID ou liste d'IDs séparés par virgule
+    - state: filtrer par état (bon, moyen, mauvais, critique) - liste séparée par virgule
+    - search: recherche textuelle
     - page: numéro de page (pagination 50 items)
+    
+    Filtres par plages numériques:
+    - surface_min, surface_max: plage de surface en m²
+    - diameter_min, diameter_max: plage de diamètre en cm
+    - depth_min, depth_max: plage de profondeur en m
+    - density_min, density_max: plage de densité
+    
+    Filtres par date:
+    - last_intervention_start, last_intervention_end: plage de dates (YYYY-MM-DD)
+    - never_intervened: true/false - objets jamais intervenus
+    - urgent_maintenance: true/false - objets nécessitant maintenance urgente (> 6 mois)
+    
+    Filtres spécifiques:
+    - family: famille botanique (liste séparée par virgule)
+    - size: taille (Petit, Moyen, Grand) - liste séparée par virgule
+    - material: matériau (liste séparée par virgule)
+    - equipment_type: type d'équipement (liste séparée par virgule)
 
     Returns:
         {
             "count": 450,
             "next": "url_page_suivante",
             "previous": null,
-            "results": [
-                {
-                    "type": "Feature",
-                    "id": 1,
-                    "geometry": {...},
-                    "properties": {
-                        "object_type": "Arbre",
-                        "nom": "Palmier Phoenix",
-                        ...
-                    }
-                },
-                ...
-            ]
+            "results": [...]
         }
     """
 
     def get(self, request):
         from rest_framework.pagination import PageNumberPagination
+        from datetime import timedelta
+        from django.utils import timezone
 
         # Récupérer tous les objets avec prefetch des 15 types enfants
-        # order_by('id') pour éviter UnorderedObjectListWarning lors de la pagination
         objets = Objet.objects.select_related(
             'arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee',
             'puit', 'pompe', 'vanne', 'clapet', 'canalisation', 'aspersion', 'goutte', 'ballon',
@@ -933,6 +991,14 @@ class InventoryListView(APIView):
         # Pagination
         paginator = PageNumberPagination()
         paginator.page_size = 50
+        
+        # Override page_size if specified in query params
+        page_size_param = request.query_params.get('page_size', None)
+        if page_size_param:
+            try:
+                paginator.page_size = int(page_size_param)
+            except ValueError:
+                pass
 
         # Paginer les résultats
         page = paginator.paginate_queryset(results, request)
@@ -944,6 +1010,199 @@ class InventoryListView(APIView):
             'count': len(results),
             'results': results
         })
+
+    def apply_id_filter(self, queryset, request):
+        """Filtre par ID d'objet (pour récupérer un objet spécifique)"""
+        object_id = request.query_params.get('id', None)
+        if object_id:
+            try:
+                queryset = queryset.filter(id=int(object_id))
+            except ValueError:
+                pass  # Ignore invalid ID
+        return queryset
+
+    def apply_type_filter(self, queryset, request):
+        """Filtre par type d'objet"""
+        type_filter = request.query_params.get('type', None)
+        if type_filter:
+            types = [t.lower().strip() for t in type_filter.split(',')]
+            objets_ids = []
+            for obj in queryset:
+                for t in types:
+                    if t == 'graminée': t = 'graminee'
+                    if hasattr(obj, t):
+                        objets_ids.append(obj.id)
+                        break
+            queryset = queryset.filter(id__in=objets_ids)
+        return queryset
+
+    def apply_site_filter(self, queryset, request):
+        """Filtre par site (supporte liste d'IDs)"""
+        site_filter = request.query_params.get('site', None)
+        if site_filter:
+            site_ids = [int(s.strip()) for s in site_filter.split(',') if s.strip().isdigit()]
+            if site_ids:
+                queryset = queryset.filter(site_id__in=site_ids)
+        return queryset
+
+    def apply_state_filter(self, queryset, request):
+        """Filtre par état (supporte liste)"""
+        state_filter = request.query_params.get('state', None)
+        if state_filter:
+            states = [s.strip() for s in state_filter.split(',')]
+            queryset = queryset.filter(etat__in=states)
+        return queryset
+
+    def apply_search_filter(self, queryset, request):
+        """Filtre par recherche textuelle"""
+        search_query = request.query_params.get('search', '').strip()
+        if search_query:
+            q_search = Q()
+            q_search |= Q(site__nom_site__icontains=search_query)
+            q_search |= Q(site__code_site__icontains=search_query)
+            q_search |= Q(sous_site__nom__icontains=search_query)
+
+            for model_name in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee']:
+                q_search |= Q(**{f"{model_name}__nom__icontains": search_query})
+                q_search |= Q(**{f"{model_name}__famille__icontains": search_query})
+            
+            for model_name in ['puit', 'pompe']:
+                q_search |= Q(**{f"{model_name}__nom__icontains": search_query})
+
+            for model_name in ['vanne', 'clapet', 'canalisation', 'aspersion', 'ballon']:
+                q_search |= Q(**{f"{model_name}__marque__icontains": search_query})
+            
+            q_search |= Q(goutte__type__icontains=search_query)
+            queryset = queryset.filter(q_search)
+        return queryset
+
+    def apply_range_filters(self, queryset, request):
+        """Filtre par plages numériques (surface, diamètre, profondeur, densité)"""
+        # Surface (Gazon uniquement)
+        surface_min = request.query_params.get('surface_min')
+        surface_max = request.query_params.get('surface_max')
+        if surface_min or surface_max:
+            q = Q()
+            if surface_min:
+                q &= Q(gazon__area_sqm__gte=float(surface_min))
+            if surface_max:
+                q &= Q(gazon__area_sqm__lte=float(surface_max))
+            queryset = queryset.filter(q)
+
+        # Diamètre (Puit, Pompe, équipements hydrauliques)
+        diameter_min = request.query_params.get('diameter_min')
+        diameter_max = request.query_params.get('diameter_max')
+        if diameter_min or diameter_max:
+            q = Q()
+            for model in ['puit', 'pompe', 'vanne', 'clapet', 'canalisation', 'aspersion', 'goutte']:
+                if diameter_min:
+                    q |= Q(**{f"{model}__diametre__gte": float(diameter_min)})
+                if diameter_max:
+                    q |= Q(**{f"{model}__diametre__lte": float(diameter_max)})
+            queryset = queryset.filter(q)
+
+        # Profondeur (Puit uniquement)
+        depth_min = request.query_params.get('depth_min')
+        depth_max = request.query_params.get('depth_max')
+        if depth_min or depth_max:
+            q = Q()
+            if depth_min:
+                q &= Q(puit__profondeur__gte=float(depth_min))
+            if depth_max:
+                q &= Q(puit__profondeur__lte=float(depth_max))
+            queryset = queryset.filter(q)
+
+        # Densité (Arbuste, Vivace, Cactus, Graminee)
+        density_min = request.query_params.get('density_min')
+        density_max = request.query_params.get('density_max')
+        if density_min or density_max:
+            q = Q()
+            for model in ['arbuste', 'vivace', 'cactus', 'graminee']:
+                if density_min:
+                    q |= Q(**{f"{model}__densite__gte": float(density_min)})
+                if density_max:
+                    q |= Q(**{f"{model}__densite__lte": float(density_max)})
+            queryset = queryset.filter(q)
+
+        return queryset
+
+    def apply_date_filters(self, queryset, request):
+        """Filtre par dates d'intervention"""
+        from datetime import timedelta
+        from django.utils import timezone
+
+        start_date = request.query_params.get('last_intervention_start')
+        end_date = request.query_params.get('last_intervention_end')
+        never_intervened = request.query_params.get('never_intervened', '').lower() == 'true'
+        urgent = request.query_params.get('urgent_maintenance', '').lower() == 'true'
+
+        # Jamais intervenu
+        if never_intervened:
+            q = Q()
+            for model in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee', 'puit', 'pompe']:
+                q |= Q(**{f"{model}__last_intervention_date__isnull": True})
+            queryset = queryset.filter(q)
+
+        # Maintenance urgente (> 6 mois)
+        if urgent:
+            six_months_ago = timezone.now().date() - timedelta(days=180)
+            q = Q()
+            for model in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee', 'puit', 'pompe']:
+                q |= Q(**{f"{model}__last_intervention_date__lt": six_months_ago})
+            queryset = queryset.filter(q)
+
+        # Plage de dates personnalisée
+        if start_date:
+            q = Q()
+            for model in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee', 'puit', 'pompe']:
+                q |= Q(**{f"{model}__last_intervention_date__gte": start_date})
+            queryset = queryset.filter(q)
+
+        if end_date:
+            q = Q()
+            for model in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee', 'puit', 'pompe']:
+                q |= Q(**{f"{model}__last_intervention_date__lte": end_date})
+            queryset = queryset.filter(q)
+
+        return queryset
+
+    def apply_specific_filters(self, queryset, request):
+        """Filtre par attributs spécifiques (famille, taille, matériau, type)"""
+        # Famille (végétaux)
+        family_filter = request.query_params.get('family')
+        if family_filter:
+            families = [f.strip() for f in family_filter.split(',')]
+            q = Q()
+            for model in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee']:
+                q |= Q(**{f"{model}__famille__in": families})
+            queryset = queryset.filter(q)
+
+        # Taille (Arbre, Palmier)
+        size_filter = request.query_params.get('size')
+        if size_filter:
+            sizes = [s.strip() for s in size_filter.split(',')]
+            q = Q(arbre__taille__in=sizes) | Q(palmier__taille__in=sizes)
+            queryset = queryset.filter(q)
+
+        # Matériau (équipements hydrauliques)
+        material_filter = request.query_params.get('material')
+        if material_filter:
+            materials = [m.strip() for m in material_filter.split(',')]
+            q = Q()
+            for model in ['vanne', 'clapet', 'canalisation', 'aspersion', 'goutte', 'ballon']:
+                q |= Q(**{f"{model}__materiau__in": materials})
+            queryset = queryset.filter(q)
+
+        # Type d'équipement (Pompe, équipements hydrauliques)
+        equipment_type_filter = request.query_params.get('equipment_type')
+        if equipment_type_filter:
+            types = [t.strip() for t in equipment_type_filter.split(',')]
+            q = Q()
+            for model in ['pompe', 'vanne', 'clapet', 'canalisation', 'aspersion', 'goutte']:
+                q |= Q(**{f"{model}__type__in": types})
+            queryset = queryset.filter(q)
+
+        return queryset
 
     def _get_serializer_class(self, objet):
         """
@@ -973,6 +1232,174 @@ class InventoryListView(APIView):
             'Ballon': BallonSerializer,
         }
         return type_mapping.get(objet.__class__.__name__, ArbreSerializer)
+
+
+# ==============================================================================
+# ENDPOINT POUR LES OPTIONS DE FILTRAGE
+# ==============================================================================
+
+class FilterOptionsView(APIView):
+    """
+    Endpoint pour récupérer les options disponibles pour les filtres.
+    
+    Endpoint: GET /api/inventory/filter-options/
+    
+    Query params optionnels:
+    - type: filtrer les options par type d'objet (ex: 'Arbre', 'Puit')
+    
+    Returns:
+        {
+            "sites": [{"id": 1, "name": "Jardin Majorelle"}, ...],
+            "zones": ["Zone A", "Villa 1", ...],
+            "families": ["Palmaceae", "Rosaceae", ...],
+            "materials": ["PVC", "Acier", ...],
+            "equipment_types": ["Centrifuge", "Immergée", ...],
+            "sizes": ["Petit", "Moyen", "Grand"],
+            "states": ["bon", "moyen", "mauvais", "critique"],
+            "ranges": {
+                "surface": [0, 5000],
+                "diameter": [0, 200],
+                "depth": [0, 150],
+                "density": [0, 100]
+            }
+        }
+    """
+    
+    def get(self, request):
+        from django.db.models import Min, Max
+        from django.core.cache import cache
+        from django.utils.encoding import force_str
+        
+        object_type = request.query_params.get('type', '').strip()
+        
+        # Créer une clé de cache basée sur le type d'objet
+        cache_key = f'filter_options_{object_type or "all"}'
+        
+        # Essayer de récupérer depuis le cache (5 minutes)
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+        
+        # Sites (toujours tous) - optimisé avec only()
+        sites = Site.objects.filter(actif=True).only('id', 'nom_site').order_by('nom_site')
+        sites_list = [{'id': s.id, 'name': s.nom_site} for s in sites]
+        
+        # Zones (sous-sites)
+        zones = SousSite.objects.values_list('nom', flat=True).distinct().order_by('nom')
+        zones_list = [z for z in zones if z]
+        
+        # États (depuis ETAT_CHOICES)
+        from .models import ETAT_CHOICES
+        states_list = [choice[0] for choice in ETAT_CHOICES]
+        
+        # Tailles (depuis TAILLE_CHOICES)
+        from .models import TAILLE_CHOICES
+        sizes_list = [choice[0] for choice in TAILLE_CHOICES]
+        
+        # Familles botaniques (végétaux)
+        families = set()
+        if not object_type or object_type.lower() in ['arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee']:
+            for model in [Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee]:
+                model_families = model.objects.values_list('famille', flat=True).distinct()
+                families.update([f for f in model_families if f])
+        families_list = sorted(list(families))
+        
+        # Matériaux (équipements hydrauliques)
+        materials = set()
+        if not object_type or object_type.lower() in ['vanne', 'clapet', 'canalisation', 'aspersion', 'goutte', 'ballon']:
+            for model in [Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon]:
+                if hasattr(model, 'materiau'):
+                    model_materials = model.objects.values_list('materiau', flat=True).distinct()
+                    materials.update([m for m in model_materials if m])
+        materials_list = sorted(list(materials))
+        
+        # Types d'équipements (hydraulique)
+        equipment_types = set()
+        if not object_type or object_type.lower() in ['pompe', 'vanne', 'clapet', 'canalisation', 'aspersion', 'goutte']:
+            for model in [Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte]:
+                if hasattr(model, 'type'):
+                    model_types = model.objects.values_list('type', flat=True).distinct()
+                    equipment_types.update([t for t in model_types if t])
+        equipment_types_list = sorted(list(equipment_types))
+        
+        # Plages de valeurs
+        ranges = {}
+        
+        # Surface (Gazon)
+        if not object_type or object_type.lower() == 'gazon':
+            surface_range = Gazon.objects.aggregate(
+                min=Min('area_sqm'),
+                max=Max('area_sqm')
+            )
+            ranges['surface'] = [
+                float(surface_range['min'] or 0),
+                float(surface_range['max'] or 0)
+            ]
+        
+        # Diamètre (Puit, Pompe, équipements hydrauliques)
+        if not object_type or object_type.lower() in ['puit', 'pompe', 'vanne', 'clapet', 'canalisation', 'aspersion', 'goutte']:
+            diameter_values = []
+            for model in [Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte]:
+                if hasattr(model, 'diametre'):
+                    model_range = model.objects.aggregate(
+                        min=Min('diametre'),
+                        max=Max('diametre')
+                    )
+                    if model_range['min'] is not None:
+                        diameter_values.append(float(model_range['min']))
+                    if model_range['max'] is not None:
+                        diameter_values.append(float(model_range['max']))
+            
+            if diameter_values:
+                ranges['diameter'] = [min(diameter_values), max(diameter_values)]
+            else:
+                ranges['diameter'] = [0, 0]
+        
+        # Profondeur (Puit)
+        if not object_type or object_type.lower() == 'puit':
+            depth_range = Puit.objects.aggregate(
+                min=Min('profondeur'),
+                max=Max('profondeur')
+            )
+            ranges['depth'] = [
+                float(depth_range['min'] or 0),
+                float(depth_range['max'] or 0)
+            ]
+        
+        # Densité (Arbuste, Vivace, Cactus, Graminee)
+        if not object_type or object_type.lower() in ['arbuste', 'vivace', 'cactus', 'graminee']:
+            density_values = []
+            for model in [Arbuste, Vivace, Cactus, Graminee]:
+                if hasattr(model, 'densite'):
+                    model_range = model.objects.aggregate(
+                        min=Min('densite'),
+                        max=Max('densite')
+                    )
+                    if model_range['min'] is not None:
+                        density_values.append(float(model_range['min']))
+                    if model_range['max'] is not None:
+                        density_values.append(float(model_range['max']))
+            
+            if density_values:
+                ranges['density'] = [min(density_values), max(density_values)]
+            else:
+                ranges['density'] = [0, 0]
+        
+        response_data = {
+            'sites': sites_list,
+            'zones': zones_list,
+            'families': families_list,
+            'materials': materials_list,
+            'equipment_types': equipment_types_list,
+            'sizes': sizes_list,
+            'states': states_list,
+            'ranges': ranges
+        }
+        
+        # Mettre en cache pour 5 minutes (300 secondes)
+        cache.set(cache_key, response_data, 300)
+        
+        return Response(response_data)
 
 
 # ==============================================================================
