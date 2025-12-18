@@ -3,6 +3,9 @@ from api_users.models import Client, Equipe, Operateur
 from api.models import Objet
 from django.utils import timezone
 
+# TODO: La fonctionnalité de création de type de tâche côté frontend a été supprimée (bouton "Créer un nouveau type").
+# Elle doit être réactivée uniquement si nécessaire, via le backend ou une interface admin dédiée.
+# Voir demande utilisateur du 17/12/2025.
 class TypeTache(models.Model):
     nom_tache = models.CharField(max_length=100, unique=True, verbose_name="Nom de la tâche")
     symbole = models.CharField(max_length=50, blank=True, verbose_name="Symbole")
@@ -36,7 +39,12 @@ class Tache(models.Model):
 
     id_client = models.ForeignKey(Client, on_delete=models.SET_NULL, null=True, blank=True, related_name='taches', verbose_name="Client")
     id_type_tache = models.ForeignKey(TypeTache, on_delete=models.PROTECT, related_name='taches', verbose_name="Type de tâche")
-    id_equipe = models.ForeignKey(Equipe, on_delete=models.SET_NULL, null=True, blank=True, related_name='taches', verbose_name="Équipe")
+
+    # Équipe unique (legacy - conservé pour rétrocompatibilité)
+    id_equipe = models.ForeignKey(Equipe, on_delete=models.SET_NULL, null=True, blank=True, related_name='taches_legacy', verbose_name="Équipe (legacy)")
+
+    # Multi-équipes (US-PLAN-013)
+    equipes = models.ManyToManyField(Equipe, related_name='taches', blank=True, verbose_name="Équipes assignées")
     
     date_debut_planifiee = models.DateTimeField(verbose_name="Date début planifiée")
     date_fin_planifiee = models.DateTimeField(verbose_name="Date fin planifiée")
@@ -49,7 +57,11 @@ class Tache(models.Model):
     date_debut_reelle = models.DateTimeField(null=True, blank=True, verbose_name="Date début réelle")
     date_fin_reelle = models.DateTimeField(null=True, blank=True, verbose_name="Date fin réelle")
     duree_reelle_minutes = models.IntegerField(null=True, blank=True, verbose_name="Durée réelle (minutes)")
-    
+    charge_estimee_heures = models.FloatField(null=True, blank=True, verbose_name="Charge estimée (heures)",
+        help_text="Calculée automatiquement ou saisie manuellement")
+    charge_manuelle = models.BooleanField(default=False, verbose_name="Charge manuelle",
+        help_text="Si True, la charge ne sera pas recalculée automatiquement")
+
     description_travaux = models.TextField(blank=True, verbose_name="Description des travaux")
     
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='PLANIFIEE', verbose_name="Statut")
@@ -90,6 +102,57 @@ class Tache(models.Model):
         """Soft delete implementation"""
         self.deleted_at = timezone.now()
         self.save()
+
+class RatioProductivite(models.Model):
+    """
+    Matrice de productivité: ratio par combinaison (TypeTache, type_objet).
+    Le ratio représente le nombre d'unités traitables par heure.
+    """
+    UNITE_CHOICES = [
+        ('m2', 'Mètres carrés'),
+        ('ml', 'Mètres linéaires'),
+        ('unite', 'Unité'),
+    ]
+
+    id_type_tache = models.ForeignKey(
+        TypeTache,
+        on_delete=models.CASCADE,
+        related_name='ratios_productivite',
+        verbose_name="Type de tâche"
+    )
+    type_objet = models.CharField(
+        max_length=50,
+        verbose_name="Type d'objet",
+        help_text="Nom de la classe (Arbre, Gazon, Palmier, etc.)"
+    )
+    unite_mesure = models.CharField(
+        max_length=10,
+        choices=UNITE_CHOICES,
+        default='unite',
+        verbose_name="Unité de mesure"
+    )
+    ratio = models.FloatField(
+        verbose_name="Ratio (unités/heure)",
+        help_text="Nombre d'unités traitables par heure"
+    )
+    description = models.TextField(
+        blank=True,
+        verbose_name="Description/Notes"
+    )
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif"
+    )
+
+    class Meta:
+        verbose_name = "Ratio de productivité"
+        verbose_name_plural = "Ratios de productivité"
+        unique_together = ['id_type_tache', 'type_objet']
+        ordering = ['id_type_tache', 'type_objet']
+
+    def __str__(self):
+        return f"{self.id_type_tache.nom_tache} - {self.type_objet}: {self.ratio} {self.unite_mesure}/h"
+
 
 class ParticipationTache(models.Model):
     ROLE_CHOICES = [

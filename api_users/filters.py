@@ -241,7 +241,6 @@ class EquipeFilter(django_filters.FilterSet):
 
     # Filtres simples
     actif = django_filters.BooleanFilter()
-    specialite = django_filters.CharFilter(lookup_expr='icontains')
 
     # Filtre par chef
     chef_equipe = django_filters.NumberFilter(field_name='chef_equipe_id')
@@ -265,14 +264,13 @@ class EquipeFilter(django_filters.FilterSet):
 
     class Meta:
         model = Equipe
-        fields = ['actif', 'chef_equipe', 'specialite']
+        fields = ['actif', 'chef_equipe']
 
     def filter_search(self, queryset, name, value):
-        """Recherche dans nom equipe et specialite."""
+        """Recherche dans nom equipe."""
         if value:
             return queryset.filter(
                 Q(nom_equipe__icontains=value) |
-                Q(specialite__icontains=value) |
                 Q(chef_equipe__utilisateur__nom__icontains=value) |
                 Q(chef_equipe__utilisateur__prenom__icontains=value)
             )

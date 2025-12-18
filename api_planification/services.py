@@ -1,7 +1,12 @@
 import datetime
+import logging
+from typing import Dict, Optional, Tuple
 from dateutil.rrule import rrule, DAILY, WEEKLY, MONTHLY, MO, TU, WE, TH, FR, SA, SU
 from django.db import transaction
-from .models import Tache
+from django.db.models import QuerySet
+from .models import Tache, RatioProductivite
+
+logger = logging.getLogger(__name__)
 
 class RecurrenceService:
     """
@@ -135,3 +140,197 @@ class RecurrenceService:
                 task.objets.set(objets)
 
         return len(created_tasks)
+
+
+class WorkloadCalculationService:
+    """
+    Service pour calculer la charge de travail estimée d'une tâche
+    basée sur les objets liés et les ratios de productivité.
+    """
+
+    # Classification des types d'objets par type de géométrie
+    POINT_OBJECTS = ['Arbre', 'Palmier', 'Puit', 'Pompe', 'Vanne', 'Clapet', 'Ballon']
+    POLYGON_OBJECTS = ['Gazon', 'Arbuste', 'Vivace', 'Cactus', 'Graminee']
+    LINE_OBJECTS = ['Canalisation', 'Aspersion', 'Goutte']
+
+    @classmethod
+    def calculate_workload(cls, tache: Tache) -> Optional[float]:
+        """
+        Calcule la charge estimée en heures pour une tâche.
+
+        Args:
+            tache: Instance de Tache avec objets et type_tache
+
+        Returns:
+            Charge en heures ou None si calcul impossible
+        """
+        if not tache.id_type_tache_id:
+            logger.warning(f"Tache {tache.id}: Pas de type de tâche défini")
+            return None
+
+        objets = tache.objets.all()
+        if not objets.exists():
+            logger.info(f"Tache {tache.id}: Aucun objet lié, charge = 0")
+            return 0.0
+
+        # Récupérer les ratios de productivité pour ce type de tâche
+        ratios = cls._get_ratios_for_task_type(tache.id_type_tache_id)
+        if not ratios:
+            logger.warning(f"Tache {tache.id}: Aucun ratio défini pour le type {tache.id_type_tache}")
+            return None
+
+        total_hours = 0.0
+        objects_without_ratio = []
+
+        # Grouper les objets par type
+        objects_by_type = cls._group_objects_by_type(objets)
+
+        for type_objet, objs in objects_by_type.items():
+            if type_objet not in ratios:
+                objects_without_ratio.append(type_objet)
+                continue
+
+            ratio_info = ratios[type_objet]
+            quantity = cls._calculate_quantity(objs, type_objet, ratio_info['unite_mesure'])
+
+            if quantity > 0 and ratio_info['ratio'] > 0:
+                hours = quantity / ratio_info['ratio']
+                total_hours += hours
+                logger.debug(f"  {type_objet}: {quantity} {ratio_info['unite_mesure']} / {ratio_info['ratio']} = {hours:.2f}h")
+
+        if objects_without_ratio:
+            logger.warning(f"Tache {tache.id}: Types sans ratio défini: {objects_without_ratio}")
+
+        return round(total_hours, 2)
+
+    @classmethod
+    def _get_ratios_for_task_type(cls, type_tache_id: int) -> Dict[str, dict]:
+        """
+        Récupère les ratios de productivité pour un type de tâche.
+
+        Returns:
+            Dict mapping type_objet -> {ratio, unite_mesure}
+        """
+        ratios = RatioProductivite.objects.filter(
+            id_type_tache_id=type_tache_id,
+            actif=True
+        ).values('type_objet', 'ratio', 'unite_mesure')
+
+        return {
+            r['type_objet']: {'ratio': r['ratio'], 'unite_mesure': r['unite_mesure']}
+            for r in ratios
+        }
+
+    @classmethod
+    def _group_objects_by_type(cls, objets: QuerySet) -> Dict[str, list]:
+        """
+        Groupe les objets par leur type réel (Arbre, Gazon, etc.).
+        """
+        grouped = {}
+        for obj in objets:
+            type_name = obj.get_nom_type()
+            if type_name not in grouped:
+                grouped[type_name] = []
+            grouped[type_name].append(obj)
+        return grouped
+
+    @classmethod
+    def _calculate_quantity(cls, objets: list, type_objet: str, unite_mesure: str) -> float:
+        """
+        Calcule la quantité totale pour un groupe d'objets.
+
+        Args:
+            objets: Liste d'objets du même type
+            type_objet: Nom du type (Arbre, Gazon, etc.)
+            unite_mesure: 'm2', 'ml', ou 'unite'
+
+        Returns:
+            Quantité totale dans l'unité spécifiée
+        """
+        if unite_mesure == 'unite':
+            return float(len(objets))
+
+        total = 0.0
+        for obj in objets:
+            real_obj = obj.get_type_reel()
+            if not real_obj:
+                continue
+
+            geometry = getattr(real_obj, 'geometry', None)
+            if not geometry:
+                continue
+
+            try:
+                if unite_mesure == 'm2':
+                    # Pour polygones: utiliser area_sqm si disponible, sinon calculer
+                    if hasattr(real_obj, 'area_sqm') and real_obj.area_sqm:
+                        total += real_obj.area_sqm
+                    elif geometry.geom_type in ('Polygon', 'MultiPolygon'):
+                        total += cls._calculate_area_m2(geometry)
+
+                elif unite_mesure == 'ml':
+                    # Pour lignes: calculer la longueur
+                    if geometry.geom_type in ('LineString', 'MultiLineString'):
+                        total += cls._calculate_length_m(geometry)
+            except Exception as e:
+                logger.error(f"Erreur calcul géométrie pour {type_objet}: {e}")
+                continue
+
+        return total
+
+    @classmethod
+    def _calculate_area_m2(cls, geometry) -> float:
+        """Calcule l'aire en m² d'une géométrie polygonale."""
+        import math
+        area_deg = geometry.area
+        centroid = geometry.centroid
+        cos_lat = math.cos(math.radians(centroid.y))
+        return area_deg * (111000 ** 2) * cos_lat
+
+    @classmethod
+    def _calculate_length_m(cls, geometry) -> float:
+        """Calcule la longueur en mètres d'une géométrie linéaire."""
+        import math
+        length_deg = geometry.length
+        centroid = geometry.centroid
+        cos_lat = math.cos(math.radians(centroid.y))
+        return length_deg * 111000 * cos_lat
+
+    @classmethod
+    def recalculate_and_save(cls, tache: Tache, force: bool = False) -> Tuple[Optional[float], bool]:
+        """
+        Calcule et sauvegarde la charge estimée pour une tâche.
+
+        Args:
+            tache: Instance de Tache
+            force: Si True, recalcule même si charge_manuelle est activé
+
+        Returns:
+            Tuple (charge_calculee, success)
+        """
+        # Ne pas écraser une charge saisie manuellement (sauf si force=True)
+        if tache.charge_manuelle and not force:
+            logger.info(f"Tache {tache.id}: charge manuelle, calcul automatique ignoré")
+            return tache.charge_estimee_heures, True
+
+        try:
+            charge = cls.calculate_workload(tache)
+            tache.charge_estimee_heures = charge
+            tache.save(update_fields=['charge_estimee_heures'])
+            logger.info(f"Tache {tache.id}: charge estimée = {charge}h")
+            return charge, True
+        except Exception as e:
+            logger.error(f"Erreur calcul charge tâche {tache.id}: {e}")
+            return None, False
+
+    @classmethod
+    def reset_to_auto(cls, tache: Tache) -> Tuple[Optional[float], bool]:
+        """
+        Remet la tâche en mode calcul automatique et recalcule la charge.
+
+        Returns:
+            Tuple (charge_calculee, success)
+        """
+        tache.charge_manuelle = False
+        tache.save(update_fields=['charge_manuelle'])
+        return cls.recalculate_and_save(tache, force=True)

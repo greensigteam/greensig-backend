@@ -181,7 +181,13 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-            # Créer le profil client sans rôle, l'admin attribuera les rôles ensuite
+        # Attribuer automatiquement le rôle CLIENT
+        from .models import Role, UtilisateurRole
+        role_client, _ = Role.objects.get_or_create(nom_role='CLIENT')
+        UtilisateurRole.objects.get_or_create(
+            utilisateur=utilisateur,
+            role=role_client
+        )
 
         return client
 
@@ -322,7 +328,13 @@ class OperateurCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-            # Créer le profil opérateur sans rôle, l'admin attribuera les rôles ensuite
+        # Attribuer automatiquement le rôle OPERATEUR
+        from .models import Role, UtilisateurRole
+        role_operateur, _ = Role.objects.get_or_create(nom_role='OPERATEUR')
+        UtilisateurRole.objects.get_or_create(
+            utilisateur=utilisateur,
+            role=role_operateur
+        )
 
         # Historiser l'affectation à l'équipe si applicable
         if operateur.equipe:
@@ -409,7 +421,7 @@ class EquipeListSerializer(serializers.ModelSerializer):
         model = Equipe
         fields = [
             'id', 'nom_equipe', 'chef_equipe', 'chef_equipe_nom',
-            'specialite', 'actif', 'date_creation',
+            'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel'
         ]
 
@@ -425,7 +437,7 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
         model = Equipe
         fields = [
             'id', 'nom_equipe', 'chef_equipe', 'chef_equipe_detail',
-            'specialite', 'actif', 'date_creation',
+            'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel', 'membres'
         ]
 
@@ -441,7 +453,7 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Equipe
-        fields = ['id', 'nom_equipe', 'chef_equipe', 'specialite', 'actif', 'membres']
+        fields = ['id', 'nom_equipe', 'chef_equipe', 'actif', 'membres']
         read_only_fields = ['id']
 
     def validate_chef_equipe(self, value):
@@ -494,7 +506,7 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Equipe
-        fields = ['nom_equipe', 'chef_equipe', 'specialite', 'actif']
+        fields = ['nom_equipe', 'chef_equipe', 'actif']
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""
@@ -508,6 +520,27 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
                 "avec un niveau Intermédiaire ou Expert."
             )
         return value
+
+    def update(self, instance, validated_data):
+        """Met à jour l'équipe et attribue le rôle CHEF_EQUIPE si nécessaire."""
+        # Récupérer l'ancien et le nouveau chef
+        old_chef = instance.chef_equipe
+        new_chef = validated_data.get('chef_equipe', old_chef)
+
+        # Mettre à jour l'équipe
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Si le chef a changé, attribuer le rôle CHEF_EQUIPE au nouveau chef
+        if new_chef and new_chef != old_chef:
+            role_chef, _ = Role.objects.get_or_create(nom_role='CHEF_EQUIPE')
+            UtilisateurRole.objects.get_or_create(
+                utilisateur=new_chef.utilisateur,
+                role=role_chef
+            )
+
+        return instance
 
 
 class AffecterMembresSerializer(serializers.Serializer):

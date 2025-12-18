@@ -342,11 +342,7 @@ class Equipe(models.Model):
         verbose_name="Chef d'équipe",
         help_text="Doit avoir la compétence 'Gestion d'equipe' (optionnel)"
     )
-    specialite = models.CharField(
-        max_length=100,
-        blank=True,
-        verbose_name="Spécialité principale"
-    )
+
     actif = models.BooleanField(
         default=True,
         verbose_name="Équipe active"

@@ -58,16 +58,25 @@ class ReclamationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        queryset = Reclamation.objects.filter(actif=True)
-        
+        # Optimisation: select_related pour éviter N+1 queries
+        queryset = Reclamation.objects.filter(actif=True).select_related(
+            'client__utilisateur',
+            'site',
+            'zone',
+            'urgence',
+            'type_reclamation',
+            'equipe_affectee',
+            'equipe_affectee__chef_equipe__utilisateur'
+        )
+
         # Admin / Staff : accès total
         if user.is_staff or user.is_superuser:
             return queryset
-            
+
         # Client : accès à ses réclamations uniquement
         if hasattr(user, 'client_profile'):
             return queryset.filter(client=user.client_profile)
-            
+
         # Par défaut (ex: opérateur sans droits spécifiques ici)
         return Reclamation.objects.none()
 

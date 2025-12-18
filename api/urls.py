@@ -4,6 +4,7 @@ from .views import (
     # Hiérarchie spatiale
     SiteListCreateView, SiteDetailView,
     SousSiteListCreateView, SousSiteDetailView,
+    DetectSiteView,
     # Végétaux
     ArbreListCreateView, ArbreDetailView,
     GazonListCreateView, GazonDetailView,
@@ -31,9 +32,23 @@ from .views import (
     ExportDataView,
     # Inventaire unifié
     InventoryListView,
+    InventoryFilterOptionsView,
     # Carte avec bounding box
     MapObjectsView,
+    # Import géographique
+    GeoImportPreviewView,
+    GeoImportValidateView,
+    GeoImportExecuteView,
+    # Opérations géométriques
+    GeometrySimplifyView,
+    GeometrySplitView,
+    GeometryMergeView,
+    GeometryValidateView,
+    GeometryCalculateView,
+    GeometryBufferView,
 )
+from .site_statistics_view import SiteStatisticsView
+from .reporting_view import ReportingView
 
 urlpatterns = [
     # ==============================================================================
@@ -55,6 +70,7 @@ urlpatterns = [
     # STATISTIQUES
     # ==============================================================================
     path('statistics/', StatisticsView.as_view(), name='statistics'),
+    path('reporting/', ReportingView.as_view(), name='reporting'),
 
     # ==============================================================================
     # EXPORT DONNÉES
@@ -62,15 +78,35 @@ urlpatterns = [
     path('export/<str:model_name>/', ExportDataView.as_view(), name='export-data'),
 
     # ==============================================================================
+    # IMPORT GÉOGRAPHIQUE (GeoJSON, KML, Shapefile)
+    # ==============================================================================
+    path('import/preview/', GeoImportPreviewView.as_view(), name='import-preview'),
+    path('import/validate/', GeoImportValidateView.as_view(), name='import-validate'),
+    path('import/execute/', GeoImportExecuteView.as_view(), name='import-execute'),
+
+    # ==============================================================================
+    # OPÉRATIONS GÉOMÉTRIQUES
+    # ==============================================================================
+    path('geometry/simplify/', GeometrySimplifyView.as_view(), name='geometry-simplify'),
+    path('geometry/split/', GeometrySplitView.as_view(), name='geometry-split'),
+    path('geometry/merge/', GeometryMergeView.as_view(), name='geometry-merge'),
+    path('geometry/validate/', GeometryValidateView.as_view(), name='geometry-validate'),
+    path('geometry/calculate/', GeometryCalculateView.as_view(), name='geometry-calculate'),
+    path('geometry/buffer/', GeometryBufferView.as_view(), name='geometry-buffer'),
+
+    # ==============================================================================
     # INVENTAIRE UNIFIÉ (15 types combinés)
     # ==============================================================================
     path('inventory/', InventoryListView.as_view(), name='inventory-unified'),
+    path('inventory/filter-options/', InventoryFilterOptionsView.as_view(), name='inventory-filter-options'),
 
     # ==============================================================================
     # HIÉRARCHIE SPATIALE
     # ==============================================================================
     path('sites/', SiteListCreateView.as_view(), name='site-list'),
     path('sites/<int:pk>/', SiteDetailView.as_view(), name='site-detail'),
+    path('sites/<int:site_id>/statistics/', SiteStatisticsView.as_view(), name='site-statistics'),
+    path('sites/detect/', DetectSiteView.as_view(), name='site-detect'),
     path('sous-sites/', SousSiteListCreateView.as_view(), name='sous-site-list'),
     path('sous-sites/<int:pk>/', SousSiteDetailView.as_view(), name='sous-site-detail'),
 

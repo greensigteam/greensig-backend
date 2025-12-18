@@ -239,12 +239,12 @@ class EquipeAdmin(admin.ModelAdmin):
     """Admin pour les equipes."""
 
     list_display = [
-        'nom_equipe', 'chef_equipe', 'specialite',
+        'nom_equipe', 'chef_equipe',
         'get_nombre_membres', 'get_statut_operationnel', 'actif', 'date_creation'
     ]
-    list_filter = ['actif', 'specialite', 'date_creation']
+    list_filter = ['actif', 'date_creation']
     search_fields = [
-        'nom_equipe', 'specialite',
+        'nom_equipe',
         'chef_equipe__utilisateur__nom', 'chef_equipe__utilisateur__prenom'
     ]
     autocomplete_fields = ['chef_equipe']
@@ -252,7 +252,7 @@ class EquipeAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Information equipe', {
-            'fields': ('nom_equipe', 'specialite', 'actif')
+            'fields': ('nom_equipe', 'actif')
         }),
         ('Chef d\'equipe', {'fields': ('chef_equipe',)}),
     )
