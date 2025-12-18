@@ -1434,6 +1434,7 @@ class GeoImportValidateView(APIView):
         mapping = request.data.get('mapping', {})
         target_type = request.data.get('target_type')
         site_id = request.data.get('site_id')
+        auto_detect_site = request.data.get('auto_detect_site', False)
 
         if not features:
             return Response({'error': 'No features provided'}, status=400)
@@ -1446,15 +1447,21 @@ class GeoImportValidateView(APIView):
 
         # Site is not required for Site objects
         site = None
+        all_sites = None  # For auto-detect mode
         if target_type != 'Site':
-            if not site_id:
-                return Response({'error': 'site_id is required'}, status=400)
-
-            # Verify site exists
-            try:
-                site = Site.objects.get(pk=site_id)
-            except Site.DoesNotExist:
-                return Response({'error': f'Site {site_id} not found'}, status=400)
+            if auto_detect_site:
+                # Load all active sites for geometry-based detection
+                all_sites = list(Site.objects.filter(actif=True))
+                if not all_sites:
+                    return Response({'error': 'No active sites found for auto-detection'}, status=400)
+            elif not site_id:
+                return Response({'error': 'site_id is required (or enable auto_detect_site)'}, status=400)
+            else:
+                # Verify site exists
+                try:
+                    site = Site.objects.get(pk=site_id)
+                except Site.DoesNotExist:
+                    return Response({'error': f'Site {site_id} not found'}, status=400)
 
         errors = []
         warnings = []
@@ -1505,8 +1512,37 @@ class GeoImportValidateView(APIView):
             # Check if geometry is within site boundary (only for non-Site objects)
             try:
                 geom = convert_geometry(geometry, expected_geom_type)
-                if site and site.geometrie_emprise:
-                    if not site.geometrie_emprise.contains(geom) and not site.geometrie_emprise.intersects(geom):
+                detected_site = site  # Use provided site by default
+
+                if auto_detect_site and all_sites:
+                    # Auto-detect: find the site that contains this geometry
+                    detected_site = None
+                    for candidate_site in all_sites:
+                        if candidate_site.geometrie_emprise:
+                            if candidate_site.geometrie_emprise.contains(geom) or candidate_site.geometrie_emprise.intersects(geom):
+                                detected_site = candidate_site
+                                break
+
+                    if not detected_site:
+                        errors.append({
+                            'index': idx,
+                            'message': 'Geometry is not within any site boundary',
+                            'code': 'NO_SITE_FOUND'
+                        })
+                        is_valid = False
+                        invalid_count += 1
+                        validated_features.append({
+                            'index': idx,
+                            'is_valid': False,
+                            'geometry_type': geom_type,
+                            'mapped_properties': {},
+                            'detected_site_id': None
+                        })
+                        continue
+
+                elif detected_site and detected_site.geometrie_emprise:
+                    # Manual mode: check if geometry is within selected site
+                    if not detected_site.geometrie_emprise.contains(geom) and not detected_site.geometrie_emprise.intersects(geom):
                         warnings.append({
                             'index': idx,
                             'message': 'Geometry is outside site boundary',
@@ -1538,10 +1574,15 @@ class GeoImportValidateView(APIView):
                             geometrie_emprise__intersects=geom
                         ).exists()
                     else:
-                        nearby = model_class.objects.filter(
-                            site=site,
-                            geometry__distance_lte=(geom, D(m=1))
-                        ).exists()
+                        # Use detected_site for duplicate check
+                        check_site = detected_site if auto_detect_site else site
+                        if check_site:
+                            nearby = model_class.objects.filter(
+                                site=check_site,
+                                geometry__distance_lte=(geom, D(m=1))
+                            ).exists()
+                        else:
+                            nearby = False
                     if nearby:
                         warnings.append({
                             'index': idx,
@@ -1555,12 +1596,19 @@ class GeoImportValidateView(APIView):
             mapped_props = apply_attribute_mapping(feature, mapping, target_type)
 
             valid_count += 1
-            validated_features.append({
+            feature_result = {
                 'index': idx,
                 'is_valid': True,
                 'geometry_type': geom_type,
                 'mapped_properties': mapped_props
-            })
+            }
+
+            # Include detected site info if in auto-detect mode
+            if auto_detect_site and detected_site:
+                feature_result['detected_site_id'] = detected_site.pk
+                feature_result['detected_site_name'] = detected_site.nom_site
+
+            validated_features.append(feature_result)
 
         return Response({
             'valid_count': valid_count,
@@ -1629,6 +1677,7 @@ class GeoImportExecuteView(APIView):
         target_type = request.data.get('target_type')
         site_id = request.data.get('site_id')
         sous_site_id = request.data.get('sous_site_id')
+        auto_detect_site = request.data.get('auto_detect_site', False)
 
         if not features:
             return Response({'error': 'No features provided'}, status=400)
@@ -1639,15 +1688,21 @@ class GeoImportExecuteView(APIView):
         # Site is not required for Site objects
         site = None
         sous_site = None
+        all_sites = None  # For auto-detect mode
         if target_type != 'Site':
-            if not site_id:
-                return Response({'error': 'site_id is required'}, status=400)
-
-            # Get site and optionally sous_site
-            try:
-                site = Site.objects.get(pk=site_id)
-            except Site.DoesNotExist:
-                return Response({'error': f'Site {site_id} not found'}, status=400)
+            if auto_detect_site:
+                # Load all active sites for geometry-based detection
+                all_sites = list(Site.objects.filter(actif=True))
+                if not all_sites:
+                    return Response({'error': 'No active sites found for auto-detection'}, status=400)
+            elif not site_id:
+                return Response({'error': 'site_id is required (or enable auto_detect_site)'}, status=400)
+            else:
+                # Get site and optionally sous_site
+                try:
+                    site = Site.objects.get(pk=site_id)
+                except Site.DoesNotExist:
+                    return Response({'error': f'Site {site_id} not found'}, status=400)
 
             if sous_site_id:
                 try:
@@ -1696,7 +1751,23 @@ class GeoImportExecuteView(APIView):
                         attributes['code_site'] = f"SITE_{uuid.uuid4().hex[:8].upper()}"
                 else:
                     # Add required fields for other objects
-                    attributes['site'] = site
+                    # Determine the site for this feature
+                    target_site = site  # Use provided site by default
+
+                    if auto_detect_site and all_sites:
+                        # Auto-detect: find the site that contains this geometry
+                        target_site = None
+                        for candidate_site in all_sites:
+                            if candidate_site.geometrie_emprise:
+                                if candidate_site.geometrie_emprise.contains(geom) or candidate_site.geometrie_emprise.intersects(geom):
+                                    target_site = candidate_site
+                                    break
+
+                        if not target_site:
+                            errors.append({'index': idx, 'error': 'Geometry is not within any site boundary'})
+                            continue
+
+                    attributes['site'] = target_site
                     if sous_site:
                         attributes['sous_site'] = sous_site
                     attributes['geometry'] = geom
