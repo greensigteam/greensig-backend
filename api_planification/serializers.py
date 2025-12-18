@@ -80,6 +80,16 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         if 'charge_estimee_heures' in data and data['charge_estimee_heures'] is not None:
             data['charge_manuelle'] = True
 
+        # Validation: tous les objets doivent appartenir au même site
+        objets = data.get('objets')
+        if objets and len(objets) > 1:
+            site_ids = set(obj.site_id for obj in objets)
+            if len(site_ids) > 1:
+                raise serializers.ValidationError({
+                    "objets": "Tous les objets doivent appartenir au même site. "
+                              "Les objets sélectionnés appartiennent à plusieurs sites différents."
+                })
+
         return data
 
     def create(self, validated_data):
