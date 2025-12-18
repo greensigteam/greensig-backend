@@ -184,7 +184,7 @@ CSRF_TRUSTED_ORIGINS = config(
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),  # Token d'acces valide 30 minutes
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),    # Token d'acces valide 24 heures
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),     # Refresh token valide 7 jours
     'ROTATE_REFRESH_TOKENS': True,                   # Nouveau refresh token a chaque refresh
     'BLACKLIST_AFTER_ROTATION': True,                # Invalide l'ancien refresh token
