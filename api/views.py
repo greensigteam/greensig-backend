@@ -620,10 +620,14 @@ class ExportPDFView(APIView):
 class StatisticsView(APIView):
     """
     Vue pour retourner les statistiques globales du système.
+    Retourne des statistiques contextuelles supplémentaires selon le rôle (CHEF_EQUIPE).
     """
     def get(self, request, *args, **kwargs):
-        from django.db.models import Count, Avg, Sum, Max, Min
-
+        from django.db.models import Count, Avg, Sum, Max, Min, Q
+        from django.apps import apps
+        from django.utils import timezone
+        
+        # Statistiques globales (pour tout le monde)
         statistics = {
             # Statistiques de hiérarchie
             'hierarchy': {
@@ -716,6 +720,54 @@ class StatisticsView(APIView):
                 )
             }
         }
+        
+        # --- LOGIQUE SPÉCIFIQUE POUR CHEF D'ÉQUIPE ---
+        user = request.user
+        if user.is_authenticated:
+            is_chef = user.roles_utilisateur.filter(role__nom_role='CHEF_EQUIPE').exists()
+            if is_chef:
+                try:
+                    Tache = apps.get_model('api_planification', 'Tache')
+                    Equipe = apps.get_model('api_users', 'Equipe')
+                    Absence = apps.get_model('api_users', 'Absence')
+                    
+                    # Récupérer l'opérateur lié
+                    operateur = getattr(user, 'operateur_profile', None)
+                    if operateur:
+                        # Ses équipes
+                        mes_equipes_ids = Equipe.objects.filter(chef_equipe=operateur, actif=True).values_list('id', flat=True)
+                        
+                        # Tâches de ses équipes
+                        mes_taches = Tache.objects.filter(
+                            Q(equipes__id__in=mes_equipes_ids) | Q(id_equipe__in=mes_equipes_ids),
+                            deleted_at__isnull=True
+                        ).distinct()
+                        
+                        # Absences dans ses équipes (membres)
+                        # Récupérer tous les membres de ses équipes
+                        membres_ids = set()
+                        for eq in Equipe.objects.filter(id__in=mes_equipes_ids):
+                            membres_ids.update(eq.membres.values_list('id', flat=True))
+                        
+                        today = timezone.now().date()
+                        absences_today = Absence.objects.filter(
+                            employe__id__in=membres_ids,
+                            date_debut__lte=today,
+                            date_fin__gte=today,
+                            statut='VALIDEE'
+                        ).count()
+                        
+                        statistics['chef_equipe_stats'] = {
+                            'taches_today': mes_taches.filter(date_debut_planifiee__date=today).count(),
+                            'taches_en_cours': mes_taches.filter(statut='EN_COURS').count(),
+                            'taches_a_faire': mes_taches.filter(statut='A_FAIRE').count(),
+                            'taches_retard': mes_taches.filter(statut='EN_RETARD').count(), 
+                            'absences_today': absences_today,
+                            'equipes_count': len(mes_equipes_ids)
+                        }
+                except Exception as e:
+                    print(f"Error calculating chef equipe stats: {e}")
+                    # Ne pas bloquer la réponse si erreur dans les stats spécifiques
 
         return Response(statistics)
 
