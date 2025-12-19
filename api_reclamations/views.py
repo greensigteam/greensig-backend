@@ -225,15 +225,14 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         reclamation = self.get_object()
         
         # T6.6.12.1 - Vérification des conditions
-        if reclamation.statut != 'RESOLUE':
-            return Response(
-                {"error": "La réclamation doit être au statut 'Résolue' pour être clôturée."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # On permet la clôture si l'utilisateur le demande (le frontend vérifie déjà les tâches)
+        # On peut ajouter une sécurité supplémentaire ici si besoin.
         
         with transaction.atomic():
             old_statut = reclamation.statut
             reclamation.statut = 'CLOTUREE'
+            if not reclamation.date_resolution:
+                reclamation.date_resolution = timezone.now()
             reclamation.date_cloture_reelle = timezone.now()
             reclamation.save()
             
@@ -320,12 +319,34 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
-        user = self.request.user
         queryset = SatisfactionClient.objects.all()
-        
-        # Filtrer par réclamation si spécifié
         reclamation_id = self.request.query_params.get('reclamation')
         if reclamation_id:
             queryset = queryset.filter(reclamation_id=reclamation_id)
-        
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        """
+        Surcharge du create pour gérer l'unicité (OneToOne) de manière gracieuse.
+        Si une évaluation existe déjà, on la met à jour.
+        """
+        reclamation_id = request.data.get('reclamation')
+        if not reclamation_id:
+            return Response({"detail": "Le champ réclamation est requis."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            # On utilise update_or_create pour éviter les erreurs 400 de doublons
+            satisfaction, created = SatisfactionClient.objects.update_or_create(
+                reclamation_id=reclamation_id,
+                defaults={
+                    'note': request.data.get('note'),
+                    'commentaire': request.data.get('commentaire', '')
+                }
+            )
+            serializer = self.get_serializer(satisfaction)
+            return Response(
+                serializer.data, 
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
