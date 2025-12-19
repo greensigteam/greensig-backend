@@ -28,6 +28,7 @@ SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=lambda v: [s.strip() for s in v.split(',')])
+ALLOWED_HOSTS += ['.trycloudflare.com', '.workers.dev', 'localhost', '127.0.0.1']
 
 
 # Application definition
@@ -50,7 +51,6 @@ INSTALLED_APPS = [
     'api_reclamations',
     'corsheaders',
 ]
-
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -63,11 +63,20 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# Cloudflare Tunnel Proxy Config
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 CORS_ALLOWED_ORIGINS = config(
     'CORS_ALLOWED_ORIGINS',
     default='http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000',
     cast=lambda v: [s.strip() for s in v.split(',')]
 )
+
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r'^https://[a-z0-9-]+\.trycloudflare\.com$',
+    r'^https://[a-z0-9-]+\.workers\.dev$',
+]
 
 ROOT_URLCONF = 'greensig_web.urls'
 
@@ -179,6 +188,10 @@ CSRF_TRUSTED_ORIGINS = config(
     default='http://localhost:5173,http://127.0.0.1:5173',
     cast=lambda v: [s.strip() for s in v.split(',')]
 )
+CSRF_TRUSTED_ORIGINS += [
+    'https://*.trycloudflare.com',
+    'https://*.workers.dev',
+]
 
 # Configuration JWT
 from datetime import timedelta

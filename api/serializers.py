@@ -90,7 +90,7 @@ class GazonSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'area_sqm', 'observation', 'last_intervention_date', 'etat'
+            'nom', 'famille', 'area_sqm', 'superficie_calculee', 'observation', 'last_intervention_date', 'etat'
         )
 
 
@@ -138,7 +138,7 @@ class ArbusteSerializer(GeoFeatureModelSerializer):
         geo_field = "geometry"
         fields = (
             'id', 'site', 'site_nom', 'sous_site', 'sous_site_nom',
-            'nom', 'famille', 'densite', 'symbole', 'observation', 'last_intervention_date', 'etat'
+            'nom', 'famille', 'densite', 'superficie_calculee', 'symbole', 'observation', 'last_intervention_date', 'etat'
         )
 
 

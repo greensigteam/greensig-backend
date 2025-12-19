@@ -30,22 +30,30 @@ class ReclamationListSerializer(serializers.ModelSerializer):
     urgence_couleur = serializers.CharField(source='urgence.couleur', read_only=True)
     site_nom = serializers.CharField(source='site.nom_site', read_only=True)
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
+    createur_nom = serializers.SerializerMethodField()
 
     class Meta:
         model = Reclamation
         fields = [
-            'id', 
-            'numero_reclamation', 
+            'id',
+            'numero_reclamation',
             'type_reclamation', 'type_reclamation_nom',
             'urgence', 'urgence_niveau', 'urgence_couleur',
-            'date_creation', 
-            'statut', 
+            'date_creation',
+            'date_constatation',
+            'statut',
             'site', 'site_nom',
             'zone', 'zone_nom',
             'date_cloture_prevue',
             'date_cloture_reelle',
-            'description'
+            'description',
+            'createur', 'createur_nom'
         ]
+
+    def get_createur_nom(self, obj):
+        if obj.createur:
+            return f"{obj.createur.prenom} {obj.createur.nom}".strip() or obj.createur.email
+        return None
 
 
 
@@ -80,11 +88,51 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     equipe_nom = serializers.CharField(source='equipe_affectee.nom_equipe', read_only=True, allow_null=True)
     photos = PhotoSerializer(many=True, read_only=True)
+    photos_taches = serializers.SerializerMethodField()
+    taches_liees_details = serializers.SerializerMethodField()
     historique = HistoriqueReclamationSerializer(many=True, read_only=True)
-    
+    satisfaction = serializers.SerializerMethodField()
+
     class Meta:
         model = Reclamation
         fields = '__all__'
+
+    def get_taches_liees_details(self, obj):
+        """Retourne les infos de base des tâches liées."""
+        taches = obj.taches_correctives.all()
+        return [{
+            'id': t.id,
+            'type_tache': t.id_type_tache.nom_tache,
+            'statut': t.statut,
+            'date_debut': t.date_debut_planifiee,
+            'equipe': t.id_equipe.nom_equipe if t.id_equipe else (t.equipes.first().nom_equipe if t.equipes.exists() else None)
+        } for t in taches]
+
+    def get_photos_taches(self, obj):
+        """Retourne les photos liées aux tâches de cette réclamation."""
+        from api_suivi_taches.models import Photo
+        photos = Photo.objects.filter(tache__reclamation=obj)
+        # On utilise PhotoListSerializer pour avoir un format plus léger si besoin
+        # ou PhotoSerializer pour avoir l'URL complète
+        return PhotoSerializer(photos, many=True, context=self.context).data
+
+    def get_createur_nom(self, obj):
+        if obj.createur:
+            return f"{obj.createur.prenom} {obj.createur.nom}".strip() or obj.createur.email
+        return None
+
+    def get_satisfaction(self, obj):
+        """Retourne les données de satisfaction si elles existent."""
+        try:
+            satisfaction = obj.satisfaction
+            return {
+                'id': satisfaction.id,
+                'note': satisfaction.note,
+                'commentaire': satisfaction.commentaire,
+                'date_evaluation': satisfaction.date_evaluation
+            }
+        except SatisfactionClient.DoesNotExist:
+            return None
 
 
 class PhotoNestedSerializer(serializers.ModelSerializer):
@@ -96,19 +144,23 @@ class PhotoNestedSerializer(serializers.ModelSerializer):
 class ReclamationCreateSerializer(serializers.ModelSerializer):
     """Pour la création."""
     photos = PhotoNestedSerializer(many=True, required=False)
+    # Client et createur sont optionnels et assignés dans la vue
     client = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
+    createur = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
 
     class Meta:
         model = Reclamation
         fields = [
-            'type_reclamation', 
-            'urgence', 
-            'client', 
-            'zone', 
-            'localisation', 
-            'description', 
+            'type_reclamation',
+            'urgence',
+            'site',
+            'zone',
+            'localisation',
+            'description',
             'date_constatation',
-            'photos'
+            'photos',
+            'client',
+            'createur'
         ]
         
     def create(self, validated_data):

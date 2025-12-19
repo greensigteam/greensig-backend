@@ -37,6 +37,12 @@ class Tache(models.Model):
         ('ANNULEE', 'Annulée'),
     ]
 
+    ETAT_VALIDATION_CHOICES = [
+        ('EN_ATTENTE', 'En attente de validation'),
+        ('VALIDEE', 'Validée'),
+        ('REJETEE', 'Rejetée'),
+    ]
+
     id_client = models.ForeignKey(Client, on_delete=models.SET_NULL, null=True, blank=True, related_name='taches', verbose_name="Client")
     id_type_tache = models.ForeignKey(TypeTache, on_delete=models.PROTECT, related_name='taches', verbose_name="Type de tâche")
 
@@ -66,6 +72,24 @@ class Tache(models.Model):
     
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='PLANIFIEE', verbose_name="Statut")
     note_qualite = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name="Note qualité (1-5)")
+
+    # Validation par l'administrateur
+    etat_validation = models.CharField(
+        max_length=20,
+        choices=ETAT_VALIDATION_CHOICES,
+        default='EN_ATTENTE',
+        verbose_name="État de validation"
+    )
+    date_validation = models.DateTimeField(null=True, blank=True, verbose_name="Date de validation")
+    validee_par = models.ForeignKey(
+        'api_users.Utilisateur',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taches_validees',
+        verbose_name="Validée par"
+    )
+    commentaire_validation = models.TextField(blank=True, verbose_name="Commentaire de validation")
     
     parametres_recurrence = models.JSONField(null=True, blank=True, verbose_name="Paramètres récurrence")
     
