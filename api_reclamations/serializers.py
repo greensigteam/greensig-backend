@@ -99,7 +99,7 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
 
     def get_taches_liees_details(self, obj):
         """Retourne les infos de base des tâches liées."""
-        taches = obj.taches_correctives.all()
+        taches = obj.taches_correctives.filter(deleted_at__isnull=True)
         return [{
             'id': t.id,
             'type_tache': t.id_type_tache.nom_tache,
@@ -200,12 +200,4 @@ class SatisfactionClientSerializer(serializers.ModelSerializer):
         model = SatisfactionClient
         fields = ['id', 'reclamation', 'reclamation_numero', 'note', 'commentaire', 'date_evaluation']
         read_only_fields = ['id', 'date_evaluation']
-    
-    def validate(self, data):
-        # Vérifier qu'une seule évaluation par réclamation
-        reclamation = data.get('reclamation')
-        if reclamation and SatisfactionClient.objects.filter(reclamation=reclamation).exists():
-            if not self.instance:  # Seulement en création
-                raise serializers.ValidationError("Une évaluation existe déjà pour cette réclamation.")
-        return data
 
