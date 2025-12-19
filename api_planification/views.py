@@ -16,9 +16,17 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
 class TacheViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les tâches avec permissions automatiques:
+    - ADMIN: voit toutes les tâches
+    - CLIENT: voit uniquement les tâches de ses sites
+    - CHEF_EQUIPE: voit uniquement les tâches assignées à ses équipes
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        from django.db.models import Q
+
         # Exclude soft-deleted tasks
         qs = Tache.objects.filter(deleted_at__isnull=True)
 
@@ -26,15 +34,44 @@ class TacheViewSet(viewsets.ModelViewSet):
         qs = qs.select_related('id_client', 'id_type_tache', 'id_equipe', 'reclamation')
         qs = qs.prefetch_related('equipes', 'objets', 'participations')
 
-        # Filtres simples (query params)
+        # Appliquer les permissions automatiques basées sur le rôle
+        user = self.request.user
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' not in roles:
+                # CLIENT voit uniquement les tâches de ses clients
+                if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                    qs = qs.filter(id_client=user.client_profile)
+
+                # CHEF_EQUIPE voit uniquement les tâches de ses équipes
+                elif 'CHEF_EQUIPE' in roles:
+                    try:
+                        from api_users.models import Equipe
+                        operateur = user.operateur_profile
+                        equipes_gerees_ids = list(Equipe.objects.filter(
+                            chef_equipe=operateur,
+                            actif=True
+                        ).values_list('id', flat=True))
+
+                        if equipes_gerees_ids:
+                            q_filter = Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
+                            qs = qs.filter(q_filter).distinct()
+                        else:
+                            # Chef d'équipe sans équipes gérées - retourner aucune tâche
+                            qs = qs.none()
+                    except Exception:
+                        # Si pas d'opérateur profile, retourner aucune tâche
+                        qs = qs.none()
+
+        # Filtres optionnels (query params)
         client_id = self.request.query_params.get('client_id')
         if client_id:
             qs = qs.filter(id_client=client_id)
 
         equipe_id = self.request.query_params.get('equipe_id')
         if equipe_id:
-            # Filter by M2M equipes OR legacy id_equipe
-            from django.db.models import Q
             qs = qs.filter(Q(equipes__id=equipe_id) | Q(id_equipe=equipe_id)).distinct()
 
         start_date = self.request.query_params.get('start_date')
@@ -93,6 +130,55 @@ class TacheViewSet(viewsets.ModelViewSet):
             {'error': 'Erreur lors du recalcul de la charge'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+    @action(detail=True, methods=['post'])
+    def valider(self, request, pk=None):
+        """
+        Valide une tâche terminée (ADMIN uniquement).
+        POST /api/planification/taches/{id}/valider/
+        Body: { "etat": "VALIDEE" | "REJETEE", "commentaire": "..." }
+        """
+        # Vérifier que l'utilisateur est ADMIN
+        user = request.user
+        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+        if 'ADMIN' not in roles:
+            return Response(
+                {'error': 'Seul un administrateur peut valider ou rejeter une tâche'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        tache = self.get_object()
+
+        # Vérifier que la tâche est terminée
+        if tache.statut != 'TERMINEE':
+            return Response(
+                {'error': 'Seule une tâche terminée peut être validée ou rejetée'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupérer les données
+        etat = request.data.get('etat')
+        commentaire = request.data.get('commentaire', '')
+
+        if etat not in ['VALIDEE', 'REJETEE']:
+            return Response(
+                {'error': "L'état doit être 'VALIDEE' ou 'REJETEE'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Mettre à jour la tâche
+        tache.etat_validation = etat
+        tache.date_validation = timezone.now()
+        tache.validee_par = user
+        tache.commentaire_validation = commentaire
+        tache.save()
+
+        # Retourner la tâche mise à jour
+        serializer = self.get_serializer(tache)
+        return Response({
+            'message': f'Tâche {etat.lower()} avec succès',
+            'tache': serializer.data
+        })
 
     def perform_create(self, serializer):
         tache = serializer.save()

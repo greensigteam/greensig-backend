@@ -36,20 +36,73 @@ class SiteListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         """
-        Filter sites by client if the logged-in user is a CLIENT.
-        Admin and other roles see all sites.
+        Filtrage automatique basé sur les permissions utilisateur:
+        - ADMIN: voit tous les sites
+        - CLIENT: voit uniquement ses sites
+        - CHEF_EQUIPE: voit uniquement les sites liés aux tâches de ses équipes
         """
         queryset = Site.objects.all().order_by('id')
         user = self.request.user
 
         if user.is_authenticated:
-            # Check if user has CLIENT role
-            has_client_role = user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
-            if has_client_role and hasattr(user, 'client_profile'):
-                # Filter sites belonging to this client
-                queryset = queryset.filter(client=user.client_profile)
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' in roles:
+                return queryset
+
+            # CLIENT voit uniquement ses sites
+            if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                return queryset.filter(client=user.client_profile)
+
+            # CHEF_EQUIPE voit uniquement les sites liés à ses tâches
+            if 'CHEF_EQUIPE' in roles:
+                site_ids = self._get_chef_equipe_site_ids(user)
+                if site_ids:
+                    return queryset.filter(id__in=site_ids)
+                else:
+                    return queryset.none()
 
         return queryset
+
+    def _get_chef_equipe_site_ids(self, user):
+        """
+        Récupère les IDs des sites contenant les objets liés aux tâches du chef d'équipe.
+        Seuls les sites avec des objets dans les tâches sont retournés.
+        """
+        from api_users.models import Equipe
+        from api_planification.models import Tache
+
+        try:
+            operateur = user.operateur_profile
+            # Équipes gérées par ce chef d'équipe
+            equipes_gerees_ids = list(Equipe.objects.filter(
+                chef_equipe=operateur,
+                actif=True
+            ).values_list('id', flat=True))
+
+            if not equipes_gerees_ids:
+                return []
+
+            # Tâches assignées à ces équipes (non supprimées)
+            taches = Tache.objects.filter(
+                deleted_at__isnull=True
+            ).filter(
+                Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
+            ).prefetch_related('objets').distinct()
+
+            # Récupérer les IDs des sites UNIQUEMENT depuis les objets des tâches
+            site_ids = set()
+
+            for tache in taches:
+                # Sites des objets directement liés à la tâche
+                for objet in tache.objets.all():
+                    if objet.site_id:
+                        site_ids.add(objet.site_id)
+
+            return list(site_ids)
+        except Exception:
+            return []
 
 
 class SiteDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -1410,10 +1463,10 @@ class MapObjectsView(APIView):
     """
     Endpoint unique et intelligent pour charger tous les objets de la carte.
 
-    Supporte :
-    - Filtrage par bounding box (zone visible)
-    - Filtrage par types d'objets
-    - Chargement optimisé selon le zoom
+    Permissions automatiques basées sur le rôle:
+    - ADMIN: voit tout
+    - CLIENT: voit uniquement ses sites et objets
+    - CHEF_EQUIPE: voit uniquement les sites/objets liés aux tâches de ses équipes
 
     Endpoint: GET /api/map/
 
@@ -1443,13 +1496,21 @@ class MapObjectsView(APIView):
 
         results = []
 
-        # Check if user is a CLIENT to filter by their sites only
-        client_filter = None
+        # Déterminer les permissions basées sur le rôle
         user = request.user
+        is_admin = False
+        client_filter = None
+        chef_equipe_filter = None  # (site_ids, object_ids)
+
         if user.is_authenticated:
-            has_client_role = user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
-            if has_client_role and hasattr(user, 'client_profile'):
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            if 'ADMIN' in roles:
+                is_admin = True
+            elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
                 client_filter = user.client_profile
+            elif 'CHEF_EQUIPE' in roles:
+                chef_equipe_filter = self._get_chef_equipe_filters(user)
 
         # ==============================================================================
         # 1. CHARGER LES SITES (toujours tous car peu nombreux)
@@ -1457,9 +1518,16 @@ class MapObjectsView(APIView):
         if not requested_types or 'sites' in requested_types:
             sites = Site.objects.filter(actif=True).order_by('id')
 
-            # Filter by client if user is a CLIENT
-            if client_filter:
-                sites = sites.filter(client=client_filter)
+            # Appliquer les filtres de permissions
+            if not is_admin:
+                if client_filter:
+                    sites = sites.filter(client=client_filter)
+                elif chef_equipe_filter:
+                    site_ids, _ = chef_equipe_filter
+                    if site_ids:
+                        sites = sites.filter(id__in=site_ids)
+                    else:
+                        sites = sites.none()
 
             for site in sites:
                 # Utiliser le centroid pré-calculé (ou calculer depuis geometrie_emprise)
@@ -1517,9 +1585,17 @@ class MapObjectsView(APIView):
                             geometry__intersects=bbox_polygon
                         ).select_related('site', 'sous_site')
 
-                        # Filter by client's sites if user is a CLIENT
-                        if client_filter:
-                            queryset = queryset.filter(site__client=client_filter)
+                        # Appliquer les filtres de permissions (sauf pour ADMIN)
+                        if not is_admin:
+                            if client_filter:
+                                queryset = queryset.filter(site__client=client_filter)
+                            elif chef_equipe_filter:
+                                _, object_ids = chef_equipe_filter
+                                # CHEF_EQUIPE: ne voir QUE les objets directement liés aux tâches
+                                if object_ids:
+                                    queryset = queryset.filter(objet_ptr_id__in=object_ids)
+                                else:
+                                    queryset = queryset.none()
 
                         queryset = queryset.order_by('id')[:100]  # 100 par type max
 
@@ -1542,6 +1618,52 @@ class MapObjectsView(APIView):
             'bbox_used': bbox_str is not None,
             'zoom': zoom
         })
+
+    def _get_chef_equipe_filters(self, user):
+        """
+        Récupère les IDs des sites et objets liés aux tâches du chef d'équipe.
+        Returns: tuple (site_ids, object_ids)
+
+        Le chef d'équipe voit:
+        - Les sites qui contiennent les objets de ses tâches
+        - Uniquement les objets directement liés à ses tâches
+        """
+        from api_users.models import Equipe
+        from api_planification.models import Tache
+
+        try:
+            operateur = user.operateur_profile
+            # Équipes gérées par ce chef d'équipe
+            equipes_gerees_ids = list(Equipe.objects.filter(
+                chef_equipe=operateur,
+                actif=True
+            ).values_list('id', flat=True))
+
+            if not equipes_gerees_ids:
+                return ([], [])
+
+            # Tâches assignées à ces équipes (non supprimées)
+            taches = Tache.objects.filter(
+                deleted_at__isnull=True
+            ).filter(
+                Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
+            ).prefetch_related('objets').distinct()
+
+            # Récupérer les IDs des sites et objets UNIQUEMENT depuis les objets des tâches
+            site_ids = set()
+            object_ids = set()
+
+            for tache in taches:
+                # Objets directement liés aux tâches
+                for objet in tache.objets.all():
+                    object_ids.add(objet.id)
+                    # Site de l'objet (pour afficher le site sur la carte)
+                    if objet.site_id:
+                        site_ids.add(objet.site_id)
+
+            return (list(site_ids), list(object_ids))
+        except Exception:
+            return ([], [])
 
 
 # ==============================================================================

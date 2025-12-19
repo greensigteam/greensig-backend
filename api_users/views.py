@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UtilisateurSerializer
+from .models import Equipe, Operateur
 
 # Endpoint pour récupérer le profil utilisateur connecté
 class MeView(APIView):
@@ -14,7 +15,21 @@ class MeView(APIView):
         if len(roles) == 1 and roles[0] == 'OPERATEUR':
             return Response({'detail': "Accès refusé : vous n'avez pas les droits nécessaires."}, status=403)
         serializer = UtilisateurSerializer(user)
-        return Response(serializer.data)
+        data = serializer.data
+
+        # Si l'utilisateur est chef d'équipe, ajouter les équipes qu'il gère
+        if 'CHEF_EQUIPE' in roles:
+            try:
+                operateur = user.operateur_profile
+                equipes_gerees = Equipe.objects.filter(
+                    chef_equipe=operateur,
+                    actif=True
+                ).values('id', 'nom_equipe')
+                data['equipes_gerees'] = list(equipes_gerees)
+            except Operateur.DoesNotExist:
+                data['equipes_gerees'] = []
+
+        return Response(data)
 
 
 
