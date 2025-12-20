@@ -1,6 +1,6 @@
 from django.contrib.gis.db import models
 from django.conf import settings
-from api_users.models import Client, Equipe
+from api_users.models import Client, Equipe, Utilisateur
 from api.models import Site, SousSite
 from django.utils import timezone
 import datetime
@@ -76,9 +76,20 @@ class Reclamation(models.Model):
     
     type_reclamation = models.ForeignKey(TypeReclamation, on_delete=models.PROTECT, verbose_name="Type")
     urgence = models.ForeignKey(Urgence, on_delete=models.PROTECT, verbose_name="Urgence")
-    
-    client = models.ForeignKey(Client, on_delete=models.CASCADE, verbose_name="Client")
-    
+
+    # Créateur de la réclamation (tout utilisateur peut créer une réclamation)
+    createur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reclamations_creees',
+        verbose_name="Créateur"
+    )
+
+    # Client concerné (optionnel - peut être déduit ou assigné)
+    client = models.ForeignKey(Client, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Client")
+
     # Zone correspond à un SousSite dans notre architecture
     zone = models.ForeignKey(SousSite, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Zone")
     # Site parent pour faciliter le filtrage (peut être déduit de la zone)

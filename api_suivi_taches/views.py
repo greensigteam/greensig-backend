@@ -277,7 +277,7 @@ class PhotoViewSet(viewsets.ModelViewSet):
     def par_tache(self, request):
         """
         Retourne toutes les photos d'une tâche.
-        
+
         GET /photos/par_tache/?tache_id=X
         """
         tache_id = request.query_params.get('tache_id')
@@ -286,16 +286,16 @@ class PhotoViewSet(viewsets.ModelViewSet):
                 {'error': 'Le paramètre tache_id est requis'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         photos = self.get_queryset().filter(tache_id=tache_id)
-        serializer = PhotoListSerializer(photos, many=True)
+        serializer = PhotoListSerializer(photos, many=True, context={'request': request})
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def avant(self, request):
         """
         Retourne les photos AVANT d'une tâche.
-        
+
         GET /photos/avant/?tache_id=X
         """
         tache_id = request.query_params.get('tache_id')
@@ -304,19 +304,19 @@ class PhotoViewSet(viewsets.ModelViewSet):
                 {'error': 'Le paramètre tache_id est requis'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         photos = self.get_queryset().filter(
             tache_id=tache_id,
             type_photo='AVANT'
         )
-        serializer = PhotoListSerializer(photos, many=True)
+        serializer = PhotoListSerializer(photos, many=True, context={'request': request})
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def apres(self, request):
         """
         Retourne les photos APRÈS d'une tâche.
-        
+
         GET /photos/apres/?tache_id=X
         """
         tache_id = request.query_params.get('tache_id')
@@ -325,10 +325,10 @@ class PhotoViewSet(viewsets.ModelViewSet):
                 {'error': 'Le paramètre tache_id est requis'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         photos = self.get_queryset().filter(
             tache_id=tache_id,
             type_photo='APRES'
         )
-        serializer = PhotoListSerializer(photos, many=True)
+        serializer = PhotoListSerializer(photos, many=True, context={'request': request})
         return Response(serializer.data)

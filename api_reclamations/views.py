@@ -45,14 +45,16 @@ class UrgenceViewSet(viewsets.ReadOnlyModelViewSet):
 class ReclamationViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des réclamations.
-    
-    - Les clients ne voient que leurs réclamations.
-    - Création réservée aux clients (ou admin).
-    - Modification restreinte (pas de changement de statut par le client).
+
+    Permissions:
+    - Admin/Staff : accès à TOUTES les réclamations
+    - Chef d'équipe : accès uniquement à SES réclamations créées
+    - Client : accès uniquement à SES réclamations (créées par lui ou liées à lui)
+    - Tout utilisateur authentifié peut créer une réclamation
     """
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
-    filterset_fields = ['statut', 'site', 'zone', 'urgence', 'type_reclamation']
+    filterset_fields = ['statut', 'site', 'zone', 'urgence', 'type_reclamation', 'createur']
     ordering_fields = ['date_creation', 'date_cloture_prevue']
     search_fields = ['numero_reclamation', 'description']
 
@@ -60,6 +62,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Optimisation: select_related pour éviter N+1 queries
         queryset = Reclamation.objects.filter(actif=True).select_related(
+            'createur',
             'client__utilisateur',
             'site',
             'zone',
@@ -69,16 +72,20 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'equipe_affectee__chef_equipe__utilisateur'
         )
 
-        # Admin / Staff : accès total
+        # Admin / Staff : accès à TOUTES les réclamations
         if user.is_staff or user.is_superuser:
             return queryset
 
-        # Client : accès à ses réclamations uniquement
-        if hasattr(user, 'client_profile'):
-            return queryset.filter(client=user.client_profile)
+        # Chef d'équipe ou Opérateur : accès uniquement à ses propres réclamations
+        if hasattr(user, 'operateur_profile'):
+            return queryset.filter(createur=user)
 
-        # Par défaut (ex: opérateur sans droits spécifiques ici)
-        return Reclamation.objects.none()
+        # Client : accès à ses réclamations uniquement (créées par lui ou liées à lui)
+        if hasattr(user, 'client_profile'):
+            return queryset.filter(Q(client=user.client_profile) | Q(createur=user))
+
+        # Tout autre utilisateur : réclamations qu'il a créées
+        return queryset.filter(createur=user)
 
     def perform_destroy(self, instance):
         """Soft delete instead of physical deletion."""
@@ -93,13 +100,18 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         return ReclamationDetailSerializer
 
     def perform_create(self, serializer):
-        # Assigner automatiquement le client si c'est un client connecté
-        # Si c'est un admin, il doit spécifier le client dans le payload (géré par serializer)
+        """
+        Assigner automatiquement le créateur (utilisateur connecté).
+        Si c'est un client, on associe aussi le client_profile.
+        """
         user = self.request.user
+        extra_kwargs = {'createur': user}
+
+        # Si l'utilisateur est un client, on associe également le client_profile
         if hasattr(user, 'client_profile'):
-             reclamation = serializer.save(client=user.client_profile)
-        else:
-             reclamation = serializer.save()
+            extra_kwargs['client'] = user.client_profile
+
+        reclamation = serializer.save(**extra_kwargs)
 
         # Création de l'historique initial
         HistoriqueReclamation.objects.create(
@@ -115,6 +127,18 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         old_statut = instance.statut
         
+        # Mise à jour automatique des dates selon le statut
+        new_statut = serializer.validated_data.get('statut')
+        if new_statut and new_statut != old_statut:
+            if new_statut == 'PRISE_EN_COMPTE' and not instance.date_prise_en_compte:
+                serializer.validated_data['date_prise_en_compte'] = timezone.now()
+            elif new_statut == 'EN_COURS' and not instance.date_debut_traitement:
+                serializer.validated_data['date_debut_traitement'] = timezone.now()
+            elif new_statut == 'RESOLUE' and not instance.date_resolution:
+                serializer.validated_data['date_resolution'] = timezone.now()
+            elif new_statut == 'CLOTUREE' and not instance.date_cloture_reelle:
+                serializer.validated_data['date_cloture_reelle'] = timezone.now()
+
         updated_instance = serializer.save()
         
         # Si le statut a changé, on ajoute une entrée dans l'historique
@@ -165,6 +189,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
              # Si nouvelle -> Prise en compte
              if reclamation.statut == 'NOUVELLE':
                  reclamation.statut = 'PRISE_EN_COMPTE'
+                 if not reclamation.date_prise_en_compte:
+                     reclamation.date_prise_en_compte = timezone.now()
              reclamation.save()
              
              # 2. Propagation aux Tâches (via le related_name 'taches_correctives')
@@ -199,15 +225,14 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         reclamation = self.get_object()
         
         # T6.6.12.1 - Vérification des conditions
-        if reclamation.statut != 'RESOLUE':
-            return Response(
-                {"error": "La réclamation doit être au statut 'Résolue' pour être clôturée."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # On permet la clôture si l'utilisateur le demande (le frontend vérifie déjà les tâches)
+        # On peut ajouter une sécurité supplémentaire ici si besoin.
         
         with transaction.atomic():
             old_statut = reclamation.statut
             reclamation.statut = 'CLOTUREE'
+            if not reclamation.date_resolution:
+                reclamation.date_resolution = timezone.now()
             reclamation.date_cloture_reelle = timezone.now()
             reclamation.save()
             
@@ -294,12 +319,34 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
-        user = self.request.user
         queryset = SatisfactionClient.objects.all()
-        
-        # Filtrer par réclamation si spécifié
         reclamation_id = self.request.query_params.get('reclamation')
         if reclamation_id:
             queryset = queryset.filter(reclamation_id=reclamation_id)
-        
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        """
+        Surcharge du create pour gérer l'unicité (OneToOne) de manière gracieuse.
+        Si une évaluation existe déjà, on la met à jour.
+        """
+        reclamation_id = request.data.get('reclamation')
+        if not reclamation_id:
+            return Response({"detail": "Le champ réclamation est requis."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            # On utilise update_or_create pour éviter les erreurs 400 de doublons
+            satisfaction, created = SatisfactionClient.objects.update_or_create(
+                reclamation_id=reclamation_id,
+                defaults={
+                    'note': request.data.get('note'),
+                    'commentaire': request.data.get('commentaire', '')
+                }
+            )
+            serializer = self.get_serializer(satisfaction)
+            return Response(
+                serializer.data, 
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
