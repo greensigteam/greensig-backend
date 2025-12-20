@@ -97,7 +97,7 @@ class Reclamation(models.Model):
     
     equipe_affectee = models.ForeignKey(Equipe, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Équipe affectée")
     
-    localisation = models.PointField(srid=4326, blank=True, null=True, verbose_name="Localisation précise")
+    localisation = models.GeometryField(srid=4326, blank=True, null=True, verbose_name="Zone affectée")
     
     description = models.TextField(verbose_name="Description du problème")
     justification_rejet = models.TextField(blank=True, null=True, verbose_name="Justification rejet/retard")

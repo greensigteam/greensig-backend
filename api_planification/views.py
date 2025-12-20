@@ -1,3 +1,4 @@
+from django.db import models
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -14,6 +15,55 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
     queryset = TypeTache.objects.all()
     serializer_class = TypeTacheSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=['get'])
+    def applicables(self, request):
+        """
+        Retourne les types de tâches applicables à une liste de types d'objets.
+        GET /api/planification/types-taches/applicables/?types_objets=Arbre,Gazon,Palmier
+
+        Un type de tâche est applicable si un RatioProductivite existe
+        pour TOUS les types d'objets fournis.
+        """
+        types_objets_param = request.query_params.get('types_objets', '')
+
+        if not types_objets_param:
+            # Si aucun type fourni, retourner tous les types de tâches
+            serializer = self.get_serializer(self.get_queryset(), many=True)
+            return Response(serializer.data)
+
+        # Parser la liste des types d'objets (séparés par virgule)
+        types_objets = [t.strip() for t in types_objets_param.split(',') if t.strip()]
+
+        if not types_objets:
+            serializer = self.get_serializer(self.get_queryset(), many=True)
+            return Response(serializer.data)
+
+        # Normaliser les noms de types (première lettre majuscule)
+        types_objets_normalized = [t.capitalize() for t in types_objets]
+
+        # Trouver les types de tâches qui ont un ratio pour TOUS les types d'objets
+        from django.db.models import Count
+
+        # Sous-requête: pour chaque type de tâche, compter combien des types demandés ont un ratio
+        types_taches_applicables = TypeTache.objects.annotate(
+            matching_ratios=Count(
+                'ratios_productivite',
+                filter=models.Q(
+                    ratios_productivite__type_objet__in=types_objets_normalized,
+                    ratios_productivite__actif=True
+                )
+            )
+        ).filter(
+            matching_ratios=len(types_objets_normalized)  # Doit matcher TOUS les types
+        )
+
+        serializer = self.get_serializer(types_taches_applicables, many=True)
+        return Response({
+            'types_objets_demandes': types_objets_normalized,
+            'nombre_types_taches': len(serializer.data),
+            'types_taches': serializer.data
+        })
 
 class TacheViewSet(viewsets.ModelViewSet):
     """

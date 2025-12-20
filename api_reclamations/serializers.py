@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework_gis.fields import GeometryField
 from .models import TypeReclamation, Urgence, Reclamation, HistoriqueReclamation, SatisfactionClient
 from api_suivi_taches.serializers import PhotoSerializer, PhotoCreateSerializer
 from api_suivi_taches.models import Photo
@@ -147,6 +148,8 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
     # Client et createur sont optionnels et assignés dans la vue
     client = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
     createur = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
+    # Geometry field for GeoJSON format
+    localisation = GeometryField(required=False, allow_null=True)
 
     class Meta:
         model = Reclamation

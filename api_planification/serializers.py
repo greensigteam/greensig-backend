@@ -90,6 +90,34 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                               "Les objets sélectionnés appartiennent à plusieurs sites différents."
                 })
 
+        # Validation: le type de tâche doit être applicable à tous les types d'objets sélectionnés
+        type_tache = data.get('id_type_tache')
+        if type_tache and objets:
+            # Récupérer les types d'objets uniques parmi les objets sélectionnés
+            types_objets = set()
+            for obj in objets:
+                # obj est une instance d'Objet, on récupère le type réel
+                type_reel = obj.get_nom_type()
+                if type_reel:
+                    types_objets.add(type_reel)
+
+            # Vérifier que pour chaque type d'objet, un ratio existe
+            types_non_applicables = []
+            for type_objet in types_objets:
+                ratio_exists = RatioProductivite.objects.filter(
+                    id_type_tache=type_tache,
+                    type_objet=type_objet,
+                    actif=True
+                ).exists()
+                if not ratio_exists:
+                    types_non_applicables.append(type_objet)
+
+            if types_non_applicables:
+                raise serializers.ValidationError({
+                    "id_type_tache": f"Le type de tâche '{type_tache.nom_tache}' n'est pas applicable aux types d'objets suivants: {', '.join(types_non_applicables)}. "
+                                     "Veuillez sélectionner un type de tâche compatible avec tous les objets."
+                })
+
         return data
 
     def create(self, validated_data):
