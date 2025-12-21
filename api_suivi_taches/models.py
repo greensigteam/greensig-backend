@@ -334,7 +334,7 @@ class Photo(models.Model):
 
     def clean(self):
         """Validation: une photo doit être liée à au moins une entité."""
-        if not any([self.tache, self.objet]):
+        if not any([self.tache, self.objet, self.reclamation]):
             raise ValidationError(
                 "Une photo doit être liée à au moins une entité (tâche, réclamation ou objet)."
             )

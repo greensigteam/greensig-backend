@@ -154,6 +154,8 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Reclamation
         fields = [
+            'id',
+            'numero_reclamation',
             'type_reclamation',
             'urgence',
             'site',
@@ -165,7 +167,35 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
             'client',
             'createur'
         ]
-        
+        read_only_fields = ['id', 'numero_reclamation']
+
+    def validate(self, attrs):
+        """
+        Validation: si une localisation est fournie sans site,
+        on vérifie qu'un site peut être détecté automatiquement.
+        """
+        from api.models import Site, SousSite
+
+        localisation = attrs.get('localisation')
+        site = attrs.get('site')
+
+        # Si on a une localisation mais pas de site explicite
+        if localisation and not site:
+            # Chercher un SousSite qui intersecte
+            found_zone = SousSite.objects.filter(geometrie__intersects=localisation).select_related('site').first()
+            if found_zone and found_zone.site:
+                # Un site sera détecté automatiquement, OK
+                pass
+            else:
+                # Chercher un Site qui intersecte
+                found_site = Site.objects.filter(geometrie_emprise__intersects=localisation).first()
+                if not found_site:
+                    raise serializers.ValidationError({
+                        "localisation": "La zone indiquée ne correspond à aucun site connu. Veuillez dessiner la zone à l'intérieur d'un site."
+                    })
+
+        return attrs
+
     def create(self, validated_data):
         photos_data = validated_data.pop('photos', [])
         reclamation = Reclamation.objects.create(**validated_data)

@@ -257,7 +257,7 @@ class PhotoViewSet(viewsets.ModelViewSet):
     """
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['type_photo', 'tache', 'objet']
+    filterset_fields = ['type_photo', 'tache', 'objet', 'reclamation']
     ordering_fields = ['date_prise']
     ordering = ['-date_prise']
     

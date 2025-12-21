@@ -248,6 +248,57 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         serializer = ReclamationDetailSerializer(reclamation)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['post'], url_path='detect-site')
+    def detect_site(self, request):
+        """
+        Endpoint pour détecter le site à partir d'une géométrie.
+        Utilisé par le frontend pour afficher le site avant création.
+
+        Body: { "geometry": { "type": "Point", "coordinates": [lng, lat] } }
+        Returns: { "site_id": 1, "site_nom": "Nom du site" } ou { "site_id": null }
+        """
+        from django.contrib.gis.geos import GEOSGeometry
+        from api.models import Site, SousSite
+        import json
+
+        geometry_data = request.data.get('geometry')
+        if not geometry_data:
+            return Response({"error": "Geometry is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Convertir le GeoJSON en objet GEOS
+            geom = GEOSGeometry(json.dumps(geometry_data), srid=4326)
+        except Exception as e:
+            return Response({"error": f"Invalid geometry: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. D'abord chercher un SousSite qui contient la géométrie
+        found_zone = SousSite.objects.filter(geometrie__intersects=geom).select_related('site').first()
+        if found_zone and found_zone.site:
+            return Response({
+                "site_id": found_zone.site.id,
+                "site_nom": found_zone.site.nom_site,
+                "zone_id": found_zone.id,
+                "zone_nom": found_zone.nom
+            })
+
+        # 2. Sinon chercher un Site dont l'emprise contient la géométrie
+        found_site = Site.objects.filter(geometrie_emprise__intersects=geom).first()
+        if found_site:
+            return Response({
+                "site_id": found_site.id,
+                "site_nom": found_site.nom_site,
+                "zone_id": None,
+                "zone_nom": None
+            })
+
+        # 3. Aucun site trouvé
+        return Response({
+            "site_id": None,
+            "site_nom": None,
+            "zone_id": None,
+            "zone_nom": None
+        })
+
     @action(detail=False, methods=['get'])
     def map(self, request):
         """

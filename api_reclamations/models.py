@@ -156,7 +156,14 @@ class Reclamation(models.Model):
                 # On met à jour le site parent automatiquement
                 if not self.site:
                     self.site = found_zone.site
-        
+
+        # Détection automatique du site si pas encore trouvé via la zone
+        # On cherche le Site dont l'emprise contient la localisation
+        if self.localisation and not self.site:
+            found_site = Site.objects.filter(geometrie_emprise__intersects=self.localisation).first()
+            if found_site:
+                self.site = found_site
+
         # Validation de cohérence Site/Zone (si les deux sont fournis)
         if self.zone and self.site and self.zone.site != self.site:
              # Si incohérence, on privilégie la Zone qui est plus précise, et on corrige le Site
