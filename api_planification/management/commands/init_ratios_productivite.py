@@ -1,5 +1,5 @@
 """
-Management command pour initialiser les ratios de productivité par défaut.
+Management command pour initialiser les ratios de productivité et la matrice d'applicabilité.
 
 Usage:
     python manage.py init_ratios_productivite
@@ -10,7 +10,7 @@ from api_planification.models import TypeTache, RatioProductivite
 
 
 class Command(BaseCommand):
-    help = 'Initialise les ratios de productivité par défaut pour le calcul de charge'
+    help = 'Initialise les ratios de productivité (matrice d\'applicabilité tâche/type d\'objet)'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -23,65 +23,42 @@ class Command(BaseCommand):
         force = options['force']
         self.stdout.write('Initialisation des ratios de productivité...\n')
 
-        # Matrice des ratios par défaut
-        # Format: {nom_type_tache: {type_objet: (ratio, unite_mesure)}}
-        DEFAULT_RATIOS = {
-            'Tonte': {
-                'Gazon': (500, 'm2'),      # 500 m²/h avec tondeuse autoportée
-                'Graminee': (400, 'm2'),   # 400 m²/h
-            },
-            'Taille': {
-                'Arbre': (4, 'unite'),     # 4 arbres/h pour taille légère
-                'Palmier': (3, 'unite'),   # 3 palmiers/h
-                'Arbuste': (200, 'm2'),    # 200 m²/h de massifs
-                'Vivace': (300, 'm2'),     # 300 m²/h
-                'Cactus': (150, 'm2'),     # 150 m²/h
-            },
-            'Désherbage': {
-                'Gazon': (100, 'm2'),      # 100 m²/h désherbage manuel
-                'Arbuste': (80, 'm2'),
-                'Vivace': (100, 'm2'),
-                'Graminee': (100, 'm2'),
-            },
-            'Arrosage': {
-                'Gazon': (1000, 'm2'),     # 1000 m²/h avec système automatique
-                'Arbuste': (500, 'm2'),
-                'Arbre': (20, 'unite'),    # 20 arbres/h arrosage manuel
-                'Palmier': (15, 'unite'),
-            },
-            'Élagage': {
-                'Arbre': (2, 'unite'),     # 2 arbres/h (travail intensif)
-                'Palmier': (1.5, 'unite'), # 1.5 palmiers/h
-            },
-            'Inspection irrigation': {
-                'Canalisation': (200, 'ml'),  # 200 m linéaires/h
-                'Aspersion': (150, 'ml'),
-                'Goutte': (100, 'ml'),
-                'Vanne': (15, 'unite'),       # 15 vannes/h
-                'Pompe': (4, 'unite'),
-                'Puit': (3, 'unite'),
-            },
-            'Maintenance pompes': {
-                'Pompe': (2, 'unite'),        # 2 pompes/h maintenance préventive
-                'Ballon': (3, 'unite'),
-            },
-            'Nettoyage général': {
-                'Gazon': (800, 'm2'),         # 800 m²/h ramassage feuilles
-                'Arbuste': (400, 'm2'),
-            },
-            'Traitement phytosanitaire': {
-                'Arbre': (10, 'unite'),       # 10 arbres/h pulvérisation
-                'Palmier': (8, 'unite'),
-                'Arbuste': (300, 'm2'),
-                'Gazon': (600, 'm2'),
-            },
-            'Plantation': {
-                'Arbre': (2, 'unite'),        # 2 arbres/h (préparation + plantation)
-                'Palmier': (1.5, 'unite'),
-                'Arbuste': (50, 'm2'),
-                'Vivace': (100, 'm2'),
-                'Gazon': (200, 'm2'),         # Engazonnement
-            },
+        # Types d'objets disponibles
+        TYPES_VEGETATION = ['Palmier', 'Arbre', 'Arbuste', 'Vivace', 'Cactus', 'Graminee', 'Gazon']
+        TYPES_HYDRAULIQUE = ['Puit', 'Pompe', 'Vanne', 'Clapet', 'Ballon', 'Canalisation', 'Aspersion', 'Goutte']
+
+        # Matrice d'applicabilité
+        # Format: nom_tache: liste des types d'objets applicables
+        # Le ratio utilisé est celui de la productivité théorique du TypeTache
+        APPLICABILITE = {
+            # Tâches applicables à tous les végétaux
+            'Nettoyage': TYPES_VEGETATION,
+            'Binage': TYPES_VEGETATION,
+            'Confection cuvette': TYPES_VEGETATION,
+            'Traitement': TYPES_VEGETATION,
+            'Arrosage': TYPES_VEGETATION,
+            'Sablage': TYPES_VEGETATION,
+            'Fertilisation': TYPES_VEGETATION,
+            'Paillage': TYPES_VEGETATION,
+            'Nivellement du sol': TYPES_VEGETATION,
+            'Aération des sols': TYPES_VEGETATION,
+            'Replantation': TYPES_VEGETATION,
+            'Taille d\'entretien': TYPES_VEGETATION,
+            'Terreautage': TYPES_VEGETATION,
+            'Ramassage des déchets verts': TYPES_VEGETATION,
+            'Désherbage': TYPES_VEGETATION,
+            'Nivellement des bordures': TYPES_VEGETATION,
+            'Arrachage des plantes mortes': TYPES_VEGETATION,
+
+            # Tâches avec applicabilité restreinte
+            'Élagage': ['Palmier', 'Arbre', 'Arbuste'],
+            'Tuteurage': ['Palmier', 'Arbre', 'Arbuste', 'Vivace', 'Cactus'],
+            'Taille de formation': ['Arbre', 'Arbuste', 'Vivace'],
+            'Scarification': ['Graminee', 'Gazon'],
+            'Tonte': ['Graminee', 'Gazon'],
+
+            # Tâche hydraulique uniquement
+            'Réparation des fuites': TYPES_HYDRAULIQUE,
         }
 
         created_count = 0
@@ -89,24 +66,38 @@ class Command(BaseCommand):
         skipped_count = 0
         not_found_types = []
 
-        for task_type_name, object_ratios in DEFAULT_RATIOS.items():
-            # Rechercher le type de tâche (insensible à la casse)
+        for task_type_name, applicable_objects in APPLICABILITE.items():
+            # Rechercher le type de tâche
             try:
-                type_tache = TypeTache.objects.get(nom_tache__iexact=task_type_name)
+                type_tache = TypeTache.objects.get(nom_tache=task_type_name)
             except TypeTache.DoesNotExist:
                 not_found_types.append(task_type_name)
                 continue
 
-            for type_objet, (ratio, unite) in object_ratios.items():
+            # Récupérer la productivité et l'unité du type de tâche
+            ratio = type_tache.productivite_theorique or 1
+            unite = type_tache.unite_productivite or 'unite'
+
+            # Mapper les unités du TypeTache vers celles du RatioProductivite
+            unite_mapping = {
+                'm2': 'm2',
+                'ml': 'ml',
+                'unite': 'unite',
+                'cuvettes': 'unite',
+                'arbres': 'unite',
+            }
+            unite_ratio = unite_mapping.get(unite, 'unite')
+
+            for type_objet in applicable_objects:
                 if force:
                     obj, created = RatioProductivite.objects.update_or_create(
                         id_type_tache=type_tache,
                         type_objet=type_objet,
                         defaults={
                             'ratio': ratio,
-                            'unite_mesure': unite,
+                            'unite_mesure': unite_ratio,
                             'actif': True,
-                            'description': f'Ratio par défaut - {ratio} {unite}/h'
+                            'description': f'{type_tache.nom_tache} sur {type_objet} - {ratio} {unite}/h'
                         }
                     )
                     if created:
@@ -121,9 +112,9 @@ class Command(BaseCommand):
                         type_objet=type_objet,
                         defaults={
                             'ratio': ratio,
-                            'unite_mesure': unite,
+                            'unite_mesure': unite_ratio,
                             'actif': True,
-                            'description': f'Ratio par défaut - {ratio} {unite}/h'
+                            'description': f'{type_tache.nom_tache} sur {type_objet} - {ratio} {unite}/h'
                         }
                     )
                     if created:
@@ -143,8 +134,20 @@ class Command(BaseCommand):
         if not_found_types:
             self.stdout.write('')
             self.stdout.write(self.style.WARNING(
-                f'Types de tâches non trouvés (à créer si nécessaire): {", ".join(not_found_types)}'
+                f'Types de tâches non trouvés (exécutez d\'abord seed_types_taches): {", ".join(not_found_types)}'
             ))
+
+        # Afficher le récapitulatif de la matrice
+        self.stdout.write('')
+        self.stdout.write('=' * 60)
+        self.stdout.write('MATRICE D\'APPLICABILITÉ:')
+        self.stdout.write('=' * 60)
+
+        for task_name, objects in APPLICABILITE.items():
+            self.stdout.write(f'{task_name}: {", ".join(objects)}')
 
         self.stdout.write('')
         self.stdout.write(self.style.SUCCESS('Initialisation terminée!'))
+        self.stdout.write('')
+        self.stdout.write('Note: Pour vérifier l\'applicabilité d\'une tâche à un type d\'objet,')
+        self.stdout.write('      utilisez RatioProductivite.objects.filter(id_type_tache=..., type_objet=...).exists()')

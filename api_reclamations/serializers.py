@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework_gis.fields import GeometryField
 from .models import TypeReclamation, Urgence, Reclamation, HistoriqueReclamation, SatisfactionClient
 from api_suivi_taches.serializers import PhotoSerializer, PhotoCreateSerializer
 from api_suivi_taches.models import Photo
@@ -98,22 +99,60 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_taches_liees_details(self, obj):
-        """Retourne les infos de base des tâches liées."""
-        taches = obj.taches_correctives.filter(deleted_at__isnull=True)
-        return [{
-            'id': t.id,
-            'type_tache': t.id_type_tache.nom_tache,
-            'statut': t.statut,
-            'date_debut': t.date_debut_planifiee,
-            'equipe': t.id_equipe.nom_equipe if t.id_equipe else (t.equipes.first().nom_equipe if t.equipes.exists() else None)
-        } for t in taches]
+        """Retourne les infos de base des tâches liées.
+
+        Note: Utilise le prefetch 'taches_correctives' avec select_related pour éviter N+1.
+        Le prefetch filtre déjà sur deleted_at__isnull=True dans la view.
+        """
+        # Utilise le cache prefetch si disponible, sinon fallback
+        if hasattr(obj, '_prefetched_objects_cache') and 'taches_correctives' in obj._prefetched_objects_cache:
+            taches = obj._prefetched_objects_cache['taches_correctives']
+        else:
+            # Fallback avec optimisation
+            taches = obj.taches_correctives.filter(deleted_at__isnull=True).select_related(
+                'id_type_tache', 'id_equipe'
+            ).prefetch_related('equipes')
+
+        result = []
+        for t in taches:
+            # Utilise les relations prefetchées
+            equipe_nom = None
+            if t.id_equipe:
+                equipe_nom = t.id_equipe.nom_equipe
+            elif hasattr(t, '_prefetched_objects_cache') and 'equipes' in t._prefetched_objects_cache:
+                equipes_list = t._prefetched_objects_cache['equipes']
+                if equipes_list:
+                    equipe_nom = equipes_list[0].nom_equipe
+            else:
+                first_equipe = t.equipes.first()
+                if first_equipe:
+                    equipe_nom = first_equipe.nom_equipe
+
+            result.append({
+                'id': t.id,
+                'type_tache': t.id_type_tache.nom_tache if t.id_type_tache else None,
+                'statut': t.statut,
+                'date_debut': t.date_debut_planifiee,
+                'equipe': equipe_nom
+            })
+        return result
 
     def get_photos_taches(self, obj):
-        """Retourne les photos liées aux tâches de cette réclamation."""
+        """Retourne les photos liées aux tâches de cette réclamation.
+
+        Optimisé: récupère les IDs des tâches préchargées pour limiter la requête.
+        """
         from api_suivi_taches.models import Photo
-        photos = Photo.objects.filter(tache__reclamation=obj)
-        # On utilise PhotoListSerializer pour avoir un format plus léger si besoin
-        # ou PhotoSerializer pour avoir l'URL complète
+
+        # Récupère les IDs des tâches depuis le cache prefetch si disponible
+        if hasattr(obj, '_prefetched_objects_cache') and 'taches_correctives' in obj._prefetched_objects_cache:
+            tache_ids = [t.id for t in obj._prefetched_objects_cache['taches_correctives']]
+            if not tache_ids:
+                return []
+            photos = Photo.objects.filter(tache_id__in=tache_ids).select_related('tache')
+        else:
+            photos = Photo.objects.filter(tache__reclamation=obj).select_related('tache')
+
         return PhotoSerializer(photos, many=True, context=self.context).data
 
     def get_createur_nom(self, obj):
@@ -147,10 +186,14 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
     # Client et createur sont optionnels et assignés dans la vue
     client = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
     createur = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
+    # Geometry field for GeoJSON format
+    localisation = GeometryField(required=False, allow_null=True)
 
     class Meta:
         model = Reclamation
         fields = [
+            'id',
+            'numero_reclamation',
             'type_reclamation',
             'urgence',
             'site',
@@ -162,7 +205,35 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
             'client',
             'createur'
         ]
-        
+        read_only_fields = ['id', 'numero_reclamation']
+
+    def validate(self, attrs):
+        """
+        Validation: si une localisation est fournie sans site,
+        on vérifie qu'un site peut être détecté automatiquement.
+        """
+        from api.models import Site, SousSite
+
+        localisation = attrs.get('localisation')
+        site = attrs.get('site')
+
+        # Si on a une localisation mais pas de site explicite
+        if localisation and not site:
+            # Chercher un SousSite qui intersecte
+            found_zone = SousSite.objects.filter(geometrie__intersects=localisation).select_related('site').first()
+            if found_zone and found_zone.site:
+                # Un site sera détecté automatiquement, OK
+                pass
+            else:
+                # Chercher un Site qui intersecte
+                found_site = Site.objects.filter(geometrie_emprise__intersects=localisation).first()
+                if not found_site:
+                    raise serializers.ValidationError({
+                        "localisation": "La zone indiquée ne correspond à aucun site connu. Veuillez dessiner la zone à l'intérieur d'un site."
+                    })
+
+        return attrs
+
     def create(self, validated_data):
         photos_data = validated_data.pop('photos', [])
         reclamation = Reclamation.objects.create(**validated_data)

@@ -69,6 +69,8 @@ class SiteListCreateView(generics.ListCreateAPIView):
         """
         Récupère les IDs des sites contenant les objets liés aux tâches du chef d'équipe.
         Seuls les sites avec des objets dans les tâches sont retournés.
+
+        OPTIMISÉ: Une seule requête SQL au lieu de N+1.
         """
         from api_users.models import Equipe
         from api_planification.models import Tache
@@ -85,22 +87,20 @@ class SiteListCreateView(generics.ListCreateAPIView):
                 return []
 
             # Tâches assignées à ces équipes (non supprimées)
-            taches = Tache.objects.filter(
+            taches_ids = Tache.objects.filter(
                 deleted_at__isnull=True
             ).filter(
                 Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).prefetch_related('objets').distinct()
+            ).values_list('id', flat=True).distinct()
 
-            # Récupérer les IDs des sites UNIQUEMENT depuis les objets des tâches
-            site_ids = set()
+            # OPTIMISÉ: Récupérer les site_ids en une seule requête via la relation inverse
+            # Au lieu de boucler sur chaque tâche puis chaque objet (N+1)
+            site_ids = list(Objet.objects.filter(
+                taches__id__in=taches_ids,
+                site_id__isnull=False
+            ).values_list('site_id', flat=True).distinct())
 
-            for tache in taches:
-                # Sites des objets directement liés à la tâche
-                for objet in tache.objets.all():
-                    if objet.site_id:
-                        site_ids.add(objet.site_id)
-
-            return list(site_ids)
+            return site_ids
         except Exception:
             return []
 
@@ -1016,88 +1016,125 @@ class InventoryListView(APIView):
     """
 
     def get(self, request):
+        """
+        Méthode GET optimisée: interroge directement les modèles enfants
+        au lieu de passer par Objet, ce qui évite les itérations Python.
+        """
         from rest_framework.pagination import PageNumberPagination
         from datetime import timedelta
         from django.utils import timezone
+        from itertools import chain
 
-        # Récupérer tous les objets avec prefetch des 15 types enfants
-        objets = Objet.objects.select_related(
-            'arbre', 'gazon', 'palmier', 'arbuste', 'vivace', 'cactus', 'graminee',
-            'puit', 'pompe', 'vanne', 'clapet', 'canalisation', 'aspersion', 'goutte', 'ballon',
-            'site', 'sous_site'
-        ).order_by('id')
+        # Mapping des types vers les modèles et serializers
+        MODEL_MAP = {
+            'arbre': (Arbre, ArbreSerializer),
+            'palmier': (Palmier, PalmierSerializer),
+            'gazon': (Gazon, GazonSerializer),
+            'arbuste': (Arbuste, ArbusteSerializer),
+            'vivace': (Vivace, VivaceSerializer),
+            'cactus': (Cactus, CactusSerializer),
+            'graminee': (Graminee, GramineeSerializer),
+            'puit': (Puit, PuitSerializer),
+            'pompe': (Pompe, PompeSerializer),
+            'vanne': (Vanne, VanneSerializer),
+            'clapet': (Clapet, ClapetSerializer),
+            'canalisation': (Canalisation, CanalisationSerializer),
+            'aspersion': (Aspersion, AspersionSerializer),
+            'goutte': (Goutte, GoutteSerializer),
+            'ballon': (Ballon, BallonSerializer),
+        }
 
-        # Filter by client's sites if user is a CLIENT
+        # Paramètres de filtrage
+        type_filter = request.query_params.get('type', None)
+        site_filter = request.query_params.get('site', None)
+        etat_filter = request.query_params.get('etat', None)
+        famille_filter = request.query_params.get('famille', None)
+        search_query = request.query_params.get('search', '').strip()
+
+        # Filtres de date
+        never_intervened = request.query_params.get('never_intervened', '').lower() == 'true'
+        urgent_maintenance = request.query_params.get('urgent_maintenance', '').lower() == 'true'
+        last_intervention_start = request.query_params.get('last_intervention_start', None)
+
+        # Déterminer quels types interroger
+        if type_filter:
+            target_types = [t.strip().lower() for t in type_filter.split(',')]
+            # Normaliser 'graminée' -> 'graminee'
+            target_types = ['graminee' if t == 'graminée' else t for t in target_types]
+        else:
+            target_types = list(MODEL_MAP.keys())
+
+        # Filtrer par rôle client si nécessaire
         user = request.user
+        client_filter = None
         if user.is_authenticated:
             has_client_role = user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
             if has_client_role and hasattr(user, 'client_profile'):
-                objets = objets.filter(site__client=user.client_profile)
+                client_filter = user.client_profile
 
-        # Filtrage par type si spécifié
-        type_filter = request.query_params.get('type', None)
-        if type_filter:
-            # Gérer les types multiples séparés par une virgule
-            target_types = [t.strip().lower() for t in type_filter.split(',')]
-            
-            # Filtrer les objets qui ont l'un des attributs demandés
-            # Optimisation: Au lieu de itérer, on pourrait utiliser des Q objects si on connaissait les champs à l'avance
-            # Mais ici, on reste sur la logique existante pour la compatibilité
-            objets_ids = []
-            for obj in objets:
-                for type_attr in target_types:
-                    if hasattr(obj, type_attr):
-                        objets_ids.append(obj.id)
-                        break
-            objets = objets.filter(id__in=objets_ids)
+        # Collecter les résultats de chaque type
+        all_results = []
 
-        # Filtrage par site si spécifié
-        site_filter = request.query_params.get('site', None)
-        if site_filter:
-            objets = objets.filter(site_id=site_filter)
+        for type_name in target_types:
+            if type_name not in MODEL_MAP:
+                continue
 
-        # Filtrage par état si spécifié
-        etat_filter = request.query_params.get('etat', None)
-        if etat_filter:
-            objets = objets.filter(etat=etat_filter)
+            model_class, serializer_class = MODEL_MAP[type_name]
 
-        # Filtrage par famille si spécifié (un peu plus complexe car dépendant du sous-type)
-        famille_filter = request.query_params.get('famille', None)
-        if famille_filter:
-            # On doit filtrer sur les tables enfants qui ont le champ famille
-            # Comme Objet n'a pas de champ famille, on utilise une requête Q ou on itère
-             # Optimisation: utiliser les relations inverses
-            from django.db.models import Q
-            famille_query = Q(arbre__famille__icontains=famille_filter) | \
-                            Q(gazon__famille__icontains=famille_filter) | \
-                            Q(palmier__famille__icontains=famille_filter) | \
-                            Q(arbuste__famille__icontains=famille_filter) | \
-                            Q(vivace__famille__icontains=famille_filter) | \
-                            Q(cactus__famille__icontains=famille_filter) | \
-                            Q(graminee__famille__icontains=famille_filter)
-            objets = objets.filter(famille_query)
+            # Construire le queryset avec select_related pour éviter les N+1
+            qs = model_class.objects.select_related('site', 'sous_site')
 
-        # Construire la liste des résultats avec les serializers appropriés
-        results = []
-        for objet in objets:
-            objet_reel = objet.get_type_reel()
-            if objet_reel:
-                # Récupérer le serializer approprié
-                serializer_class = self._get_serializer_class(objet_reel)
-                serializer = serializer_class(objet_reel)
+            # Appliquer les filtres au niveau de la base de données
+            if client_filter:
+                qs = qs.filter(site__client=client_filter)
 
-                # Ajouter le type d'objet dans les propriétés
-                data = serializer.data
-                if 'properties' in data:
-                    data['properties']['object_type'] = objet.get_nom_type()
+            if site_filter:
+                qs = qs.filter(site_id=site_filter)
 
-                results.append(data)
+            if etat_filter:
+                qs = qs.filter(etat=etat_filter)
 
-        # Pagination
+            # Filtre famille (pour les types qui ont ce champ)
+            if famille_filter and hasattr(model_class, 'famille'):
+                qs = qs.filter(famille__icontains=famille_filter)
+
+            # Filtre recherche
+            if search_query:
+                q = Q(site__nom_site__icontains=search_query) | Q(site__code_site__icontains=search_query)
+                if hasattr(model_class, 'nom'):
+                    q |= Q(nom__icontains=search_query)
+                if hasattr(model_class, 'famille'):
+                    q |= Q(famille__icontains=search_query)
+                if hasattr(model_class, 'marque'):
+                    q |= Q(marque__icontains=search_query)
+                if hasattr(model_class, 'type'):
+                    q |= Q(type__icontains=search_query)
+                qs = qs.filter(q)
+
+            # Filtres de date d'intervention
+            if hasattr(model_class, 'last_intervention_date'):
+                if never_intervened:
+                    qs = qs.filter(last_intervention_date__isnull=True)
+                if urgent_maintenance:
+                    six_months_ago = timezone.now().date() - timedelta(days=180)
+                    qs = qs.filter(last_intervention_date__lt=six_months_ago)
+                if last_intervention_start:
+                    qs = qs.filter(last_intervention_date__gte=last_intervention_start)
+
+            # Limiter le nombre d'objets récupérés pour éviter les timeout
+            qs = qs.order_by('id')
+
+            # Ajouter au résultat avec le type
+            for obj in qs:
+                all_results.append((obj, type_name.capitalize(), serializer_class))
+
+        # Trier par ID pour un ordre cohérent
+        all_results.sort(key=lambda x: x[0].id)
+
+        # Pagination - d'abord sur les objets, puis sérialisation
         paginator = PageNumberPagination()
         paginator.page_size = 50
-        
-        # Override page_size if specified in query params
+
         page_size_param = request.query_params.get('page_size', None)
         if page_size_param:
             try:
@@ -1105,15 +1142,44 @@ class InventoryListView(APIView):
             except ValueError:
                 pass
 
-        # Paginer les résultats
-        page = paginator.paginate_queryset(results, request)
+        # Créer une structure paginable (liste d'objets)
+        total_count = len(all_results)
 
-        if page is not None:
-            return paginator.get_paginated_response(page)
+        # Calculer la page manuellement pour éviter de tout sérialiser
+        page_num = int(request.query_params.get('page', 1))
+        start_idx = (page_num - 1) * paginator.page_size
+        end_idx = start_idx + paginator.page_size
+
+        page_items = all_results[start_idx:end_idx]
+
+        # Sérialiser uniquement les éléments de la page
+        serialized_results = []
+        for obj, type_name, serializer_class in page_items:
+            serializer = serializer_class(obj)
+            data = serializer.data
+            if 'properties' in data:
+                data['properties']['object_type'] = type_name
+            serialized_results.append(data)
+
+        # Construire la réponse paginée
+        base_url = request.build_absolute_uri().split('?')[0]
+        query_params = request.query_params.copy()
+
+        next_url = None
+        if end_idx < total_count:
+            query_params['page'] = page_num + 1
+            next_url = f"{base_url}?{'&'.join(f'{k}={v}' for k, v in query_params.items())}"
+
+        previous_url = None
+        if page_num > 1:
+            query_params['page'] = page_num - 1
+            previous_url = f"{base_url}?{'&'.join(f'{k}={v}' for k, v in query_params.items())}"
 
         return Response({
-            'count': len(results),
-            'results': results
+            'count': total_count,
+            'next': next_url,
+            'previous': previous_url,
+            'results': serialized_results
         })
 
     def apply_id_filter(self, queryset, request):
@@ -1627,6 +1693,9 @@ class MapObjectsView(APIView):
                 # Déterminer quels types charger
                 types_to_load = requested_types if requested_types else list(type_mapping.keys())
 
+                # Types polygones qui nécessitent le calcul de superficie
+                polygon_types = {'gazons', 'arbustes', 'vivaces', 'cactus', 'graminees'}
+
                 # Charger chaque type avec filtrage bbox
                 for type_name in types_to_load:
                     if type_name in type_mapping:
@@ -1636,6 +1705,17 @@ class MapObjectsView(APIView):
                         queryset = Model.objects.filter(
                             geometry__intersects=bbox_polygon
                         ).select_related('site', 'sous_site')
+
+                        # OPTIMISÉ: Pré-calculer la superficie pour les types polygones
+                        # Évite N+1 requêtes ST_Area dans le serializer
+                        if type_name in polygon_types:
+                            from django.db.models.expressions import RawSQL
+                            queryset = queryset.annotate(
+                                _superficie_annotee=RawSQL(
+                                    "ST_Area(geometry::geography)",
+                                    []
+                                )
+                            )
 
                         # Appliquer les filtres de permissions (sauf pour ADMIN)
                         if not is_admin:
@@ -1679,6 +1759,8 @@ class MapObjectsView(APIView):
         Le chef d'équipe voit:
         - Les sites qui contiennent les objets de ses tâches
         - Uniquement les objets directement liés à ses tâches
+
+        OPTIMISÉ: Une seule requête SQL au lieu de N+1.
         """
         from api_users.models import Equipe
         from api_planification.models import Tache
@@ -1694,26 +1776,27 @@ class MapObjectsView(APIView):
             if not equipes_gerees_ids:
                 return ([], [])
 
-            # Tâches assignées à ces équipes (non supprimées)
-            taches = Tache.objects.filter(
+            # Tâches assignées à ces équipes (non supprimées) - juste les IDs
+            taches_ids = Tache.objects.filter(
                 deleted_at__isnull=True
             ).filter(
                 Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).prefetch_related('objets').distinct()
+            ).values_list('id', flat=True).distinct()
 
-            # Récupérer les IDs des sites et objets UNIQUEMENT depuis les objets des tâches
-            site_ids = set()
-            object_ids = set()
+            # OPTIMISÉ: Récupérer les objets en une seule requête via la relation inverse
+            objets_data = Objet.objects.filter(
+                taches__id__in=taches_ids
+            ).values_list('id', 'site_id').distinct()
 
-            for tache in taches:
-                # Objets directement liés aux tâches
-                for objet in tache.objets.all():
-                    object_ids.add(objet.id)
-                    # Site de l'objet (pour afficher le site sur la carte)
-                    if objet.site_id:
-                        site_ids.add(objet.site_id)
+            # Extraire les IDs d'objets et de sites
+            object_ids = []
+            site_ids = []
+            for obj_id, site_id in objets_data:
+                object_ids.append(obj_id)
+                if site_id:
+                    site_ids.append(site_id)
 
-            return (list(site_ids), list(object_ids))
+            return (list(set(site_ids)), object_ids)
         except Exception:
             return ([], [])
 

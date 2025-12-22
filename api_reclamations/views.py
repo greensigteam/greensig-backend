@@ -72,6 +72,22 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'equipe_affectee__chef_equipe__utilisateur'
         )
 
+        # Prefetch pour le détail (historique, photos, taches, satisfaction)
+        if self.action in ['retrieve', 'suivi']:
+            from django.db.models import Prefetch
+            from api_planification.models import Tache
+            queryset = queryset.prefetch_related(
+                'historique__auteur',
+                'photos',
+                'satisfaction',
+                Prefetch(
+                    'taches_correctives',
+                    queryset=Tache.objects.filter(deleted_at__isnull=True).select_related(
+                        'id_type_tache', 'id_equipe'
+                    ).prefetch_related('equipes')
+                )
+            )
+
         # Admin / Staff : accès à TOUTES les réclamations
         if user.is_staff or user.is_superuser:
             return queryset
@@ -247,6 +263,146 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         
         serializer = ReclamationDetailSerializer(reclamation)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='detect-site')
+    def detect_site(self, request):
+        """
+        Endpoint pour détecter le site à partir d'une géométrie.
+        Utilisé par le frontend pour afficher le site avant création.
+
+        Body: { "geometry": { "type": "Point", "coordinates": [lng, lat] } }
+        Returns: { "site_id": 1, "site_nom": "Nom du site" } ou { "site_id": null }
+        """
+        from django.contrib.gis.geos import GEOSGeometry
+        from api.models import Site, SousSite
+        import json
+
+        geometry_data = request.data.get('geometry')
+        if not geometry_data:
+            return Response({"error": "Geometry is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Convertir le GeoJSON en objet GEOS
+            geom = GEOSGeometry(json.dumps(geometry_data), srid=4326)
+        except Exception as e:
+            return Response({"error": f"Invalid geometry: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. D'abord chercher un SousSite qui contient la géométrie
+        found_zone = SousSite.objects.filter(geometrie__intersects=geom).select_related('site').first()
+        if found_zone and found_zone.site:
+            return Response({
+                "site_id": found_zone.site.id,
+                "site_nom": found_zone.site.nom_site,
+                "zone_id": found_zone.id,
+                "zone_nom": found_zone.nom
+            })
+
+        # 2. Sinon chercher un Site dont l'emprise contient la géométrie
+        found_site = Site.objects.filter(geometrie_emprise__intersects=geom).first()
+        if found_site:
+            return Response({
+                "site_id": found_site.id,
+                "site_nom": found_site.nom_site,
+                "zone_id": None,
+                "zone_nom": None
+            })
+
+        # 3. Aucun site trouvé
+        return Response({
+            "site_id": None,
+            "site_nom": None,
+            "zone_id": None,
+            "zone_nom": None
+        })
+
+    @action(detail=False, methods=['get'])
+    def map(self, request):
+        """
+        Endpoint pour afficher les réclamations sur la carte.
+
+        Retourne un GeoJSON FeatureCollection avec les réclamations:
+        - Qui ont une localisation (geometry non null)
+        - Qui ne sont pas CLOTUREE (disparaissent après clôture)
+
+        Query params optionnels:
+        - bbox: Bounding box au format "west,south,east,north"
+        - statut: Filtrer par statut spécifique
+
+        Chaque feature inclut:
+        - La géométrie de la réclamation
+        - Les propriétés: id, numero, statut, urgence, couleur_statut
+        """
+        from django.contrib.gis.geos import Polygon
+        import json
+
+        # Couleurs par statut (du plus urgent au moins urgent)
+        STATUT_COLORS = {
+            'NOUVELLE': '#ef4444',        # Rouge vif - nouvelle réclamation
+            'PRISE_EN_COMPTE': '#f97316', # Orange - en cours de prise en compte
+            'EN_COURS': '#eab308',         # Jaune - en cours de traitement
+            'RESOLUE': '#22c55e',          # Vert - résolue, en attente de clôture
+            'REJETEE': '#6b7280',          # Gris - rejetée
+            # CLOTUREE n'est pas affiché sur la carte
+        }
+
+        # Base queryset - exclure les réclamations clôturées et celles sans localisation
+        queryset = self.get_queryset().exclude(
+            statut='CLOTUREE'
+        ).exclude(
+            localisation__isnull=True
+        ).select_related(
+            'urgence', 'type_reclamation', 'site', 'zone'
+        )
+
+        # Filtre par statut si spécifié
+        statut_filter = request.query_params.get('statut')
+        if statut_filter:
+            queryset = queryset.filter(statut=statut_filter)
+
+        # Filtre par bbox si fourni
+        bbox_str = request.query_params.get('bbox')
+        if bbox_str:
+            try:
+                west, south, east, north = map(float, bbox_str.split(','))
+                bbox_polygon = Polygon.from_bbox((west, south, east, north))
+                queryset = queryset.filter(localisation__intersects=bbox_polygon)
+            except (ValueError, AttributeError):
+                pass  # Ignorer bbox invalide
+
+        # Construire le GeoJSON
+        features = []
+        for rec in queryset[:200]:  # Limiter à 200 réclamations
+            # Convertir la géométrie en GeoJSON
+            geom_json = json.loads(rec.localisation.geojson)
+
+            feature = {
+                'type': 'Feature',
+                'id': f'reclamation-{rec.id}',
+                'geometry': geom_json,
+                'properties': {
+                    'id': rec.id,
+                    'object_type': 'Reclamation',
+                    'numero_reclamation': rec.numero_reclamation,
+                    'statut': rec.statut,
+                    'statut_display': dict(rec.STATUT_CHOICES).get(rec.statut, rec.statut),
+                    'couleur_statut': STATUT_COLORS.get(rec.statut, '#6b7280'),
+                    'urgence': rec.urgence.niveau_urgence if rec.urgence else None,
+                    'urgence_couleur': rec.urgence.couleur if rec.urgence else None,
+                    'type_reclamation': rec.type_reclamation.nom_reclamation if rec.type_reclamation else None,
+                    'description': rec.description[:100] + '...' if rec.description and len(rec.description) > 100 else rec.description,
+                    'site_nom': rec.site.nom_site if rec.site else None,
+                    'zone_nom': rec.zone.nom if rec.zone else None,
+                    'date_creation': rec.date_creation.isoformat() if rec.date_creation else None,
+                }
+            }
+            features.append(feature)
+
+        return Response({
+            'type': 'FeatureCollection',
+            'features': features,
+            'count': len(features),
+            'statut_colors': STATUT_COLORS
+        })
 
     @action(detail=False, methods=['get'])
     def stats(self, request):

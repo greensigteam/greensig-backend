@@ -187,7 +187,7 @@ class PhotoSerializer(serializers.ModelSerializer):
 
 class PhotoCreateSerializer(serializers.ModelSerializer):
     """Serializer pour créer une photo."""
-    
+
     class Meta:
         model = Photo
         fields = [
@@ -200,7 +200,27 @@ class PhotoCreateSerializer(serializers.ModelSerializer):
             'latitude',
             'longitude'
         ]
-    
+        extra_kwargs = {
+            'tache': {'required': False, 'allow_null': True},
+            'objet': {'required': False, 'allow_null': True},
+            'reclamation': {'required': False, 'allow_null': True},
+        }
+
+    def to_internal_value(self, data):
+        """Convertit les IDs string en int avant la validation des FK."""
+        mutable_data = data.copy() if hasattr(data, 'copy') else dict(data)
+
+        # Convertir les strings en int pour les FK
+        for field in ['tache', 'objet', 'reclamation']:
+            if field in mutable_data:
+                value = mutable_data[field]
+                if isinstance(value, str) and value.isdigit():
+                    mutable_data[field] = int(value)
+                elif value == '' or value is None:
+                    mutable_data[field] = None
+
+        return super().to_internal_value(mutable_data)
+
     def validate(self, data):
         """Valide qu'au moins une entité est liée."""
         if not any([data.get('tache'), data.get('objet'), data.get('reclamation')]):

@@ -7,10 +7,25 @@ from django.utils import timezone
 # Elle doit être réactivée uniquement si nécessaire, via le backend ou une interface admin dédiée.
 # Voir demande utilisateur du 17/12/2025.
 class TypeTache(models.Model):
+    UNITE_PRODUCTIVITE_CHOICES = [
+        ('m2', 'Mètres carrés (m²)'),
+        ('ml', 'Mètres linéaires (ml)'),
+        ('unite', 'Unités'),
+        ('cuvettes', 'Cuvettes'),
+        ('arbres', 'Arbres'),
+    ]
+
     nom_tache = models.CharField(max_length=100, unique=True, verbose_name="Nom de la tâche")
     symbole = models.CharField(max_length=50, blank=True, verbose_name="Symbole")
     description = models.TextField(blank=True, verbose_name="Description")
     productivite_theorique = models.FloatField(null=True, blank=True, verbose_name="Productivité théorique")
+    unite_productivite = models.CharField(
+        max_length=20,
+        choices=UNITE_PRODUCTIVITE_CHOICES,
+        default='m2',
+        blank=True,
+        verbose_name="Unité de productivité"
+    )
 
     class Meta:
         verbose_name = "Type de tâche"

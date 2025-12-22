@@ -97,7 +97,7 @@ class Reclamation(models.Model):
     
     equipe_affectee = models.ForeignKey(Equipe, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Équipe affectée")
     
-    localisation = models.PointField(srid=4326, blank=True, null=True, verbose_name="Localisation précise")
+    localisation = models.GeometryField(srid=4326, blank=True, null=True, verbose_name="Zone affectée")
     
     description = models.TextField(verbose_name="Description du problème")
     justification_rejet = models.TextField(blank=True, null=True, verbose_name="Justification rejet/retard")
@@ -156,7 +156,14 @@ class Reclamation(models.Model):
                 # On met à jour le site parent automatiquement
                 if not self.site:
                     self.site = found_zone.site
-        
+
+        # Détection automatique du site si pas encore trouvé via la zone
+        # On cherche le Site dont l'emprise contient la localisation
+        if self.localisation and not self.site:
+            found_site = Site.objects.filter(geometrie_emprise__intersects=self.localisation).first()
+            if found_site:
+                self.site = found_site
+
         # Validation de cohérence Site/Zone (si les deux sont fournis)
         if self.zone and self.site and self.zone.site != self.site:
              # Si incohérence, on privilégie la Zone qui est plus précise, et on corrige le Site

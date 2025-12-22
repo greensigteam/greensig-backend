@@ -9,7 +9,12 @@ class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
+        from .models import Utilisateur
+        # Refetch user avec prefetch pour éviter N+1 sur les rôles
+        user = Utilisateur.objects.prefetch_related(
+            'roles_utilisateur__role'
+        ).get(pk=request.user.pk)
+
         roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
         # Si l'utilisateur n'a qu'un seul rôle et que c'est OPERATEUR, refuser l'accès
         if len(roles) == 1 and roles[0] == 'OPERATEUR':
@@ -205,7 +210,9 @@ class ClientViewSet(viewsets.ModelViewSet):
 
     Gère le CRUD complet des clients avec leur profil utilisateur associé.
     """
-    queryset = Client.objects.select_related('utilisateur').all()
+    queryset = Client.objects.select_related('utilisateur').prefetch_related(
+        'utilisateur__roles_utilisateur__role'
+    ).all()
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -812,21 +819,31 @@ class EquipeViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def statut(self, request, pk=None):
         """Retourne le statut opérationnel détaillé de l'équipe."""
+        from django.db.models import Prefetch
         equipe = self.get_object()
         today = timezone.now().date()
 
-        membres = equipe.operateurs.filter(utilisateur__actif=True)
-        total = membres.count()
+        # Prefetch absences en cours pour éviter N+1
+        absences_en_cours = Absence.objects.filter(
+            statut=StatutAbsence.VALIDEE,
+            date_debut__lte=today,
+            date_fin__gte=today
+        )
+        membres = equipe.operateurs.filter(
+            utilisateur__actif=True
+        ).select_related(
+            'utilisateur', 'equipe'
+        ).prefetch_related(
+            Prefetch('absences', queryset=absences_en_cours, to_attr='absences_actuelles')
+        )
 
+        total = membres.count()
         disponibles = []
         absents = []
 
         for membre in membres:
-            absence = membre.absences.filter(
-                statut=StatutAbsence.VALIDEE,
-                date_debut__lte=today,
-                date_fin__gte=today
-            ).first()
+            # Utilise le prefetch au lieu de requête
+            absence = membre.absences_actuelles[0] if membre.absences_actuelles else None
 
             if absence:
                 absents.append({
