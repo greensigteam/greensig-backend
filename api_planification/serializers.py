@@ -1,8 +1,19 @@
 from rest_framework import serializers
 from .models import TypeTache, Tache, ParticipationTache, RatioProductivite
-from api_users.serializers import ClientSerializer, EquipeListSerializer, OperateurListSerializer
-from api_users.models import Equipe
+from api_users.models import Equipe, Client
 from api.models import Objet
+
+
+class ClientLightSerializer(serializers.ModelSerializer):
+    """Serializer allégé pour les clients dans les tâches - évite les N+1."""
+    nom = serializers.CharField(source='utilisateur.nom', read_only=True)
+    prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
+    email = serializers.EmailField(source='utilisateur.email', read_only=True)
+    nom_complet = serializers.CharField(source='utilisateur.get_full_name', read_only=True)
+
+    class Meta:
+        model = Client
+        fields = ['utilisateur', 'nom', 'prenom', 'email', 'nom_complet', 'nom_structure']
 
 class TypeTacheSerializer(serializers.ModelSerializer):
     class Meta:
@@ -20,29 +31,62 @@ class RatioProductiviteSerializer(serializers.ModelSerializer):
                   'unite_mesure', 'ratio', 'description', 'actif']
 
 class ObjetSimpleSerializer(serializers.ModelSerializer):
-    nom_type = serializers.CharField(source='get_nom_type', read_only=True)
-    display = serializers.CharField(source='__str__', read_only=True)
+    """Serializer ultra-léger pour les objets dans les tâches.
+
+    N'utilise PAS get_nom_type() ou __str__() car ils causent des N+1.
+    """
+    site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
 
     class Meta:
         model = Objet
-        fields = ['id', 'site', 'sous_site', 'nom_type', 'display']
+        fields = ['id', 'site', 'site_nom', 'sous_site']
 
 class ParticipationTacheSerializer(serializers.ModelSerializer):
     operateur_nom = serializers.CharField(source='id_operateur.utilisateur.get_full_name', read_only=True)
-    
+
     class Meta:
         model = ParticipationTache
         fields = ['id', 'id_tache', 'id_operateur', 'role', 'heures_travaillees', 'realisation', 'operateur_nom']
         read_only_fields = ['id', 'operateur_nom']
 
+
+class EquipeLightSerializer(serializers.ModelSerializer):
+    """Serializer allégé pour les équipes dans les tâches - évite les N+1 queries.
+
+    Utilise les données prefetchées au lieu des properties coûteuses.
+    """
+    chef_equipe_nom = serializers.CharField(
+        source='chef_equipe.utilisateur.get_full_name',
+        read_only=True,
+        allow_null=True
+    )
+    # Calcul du nombre de membres depuis les données prefetchées
+    nombre_membres = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Equipe
+        fields = [
+            'id', 'nom_equipe', 'chef_equipe', 'chef_equipe_nom',
+            'actif', 'date_creation', 'nombre_membres'
+        ]
+
+    def get_nombre_membres(self, obj):
+        """Compte les membres depuis les données prefetchées."""
+        # Si les opérateurs sont prefetchés, on les compte en mémoire
+        if hasattr(obj, '_prefetched_objects_cache') and 'operateurs' in obj._prefetched_objects_cache:
+            return sum(1 for op in obj.operateurs.all() if op.utilisateur.actif)
+        # Fallback sur la property (génère une requête)
+        return obj.nombre_membres
+
+
 class TacheSerializer(serializers.ModelSerializer):
     """Serializer COMPLET pour GET (lecture)"""
-    client_detail = ClientSerializer(source='id_client', read_only=True)
+    client_detail = ClientLightSerializer(source='id_client', read_only=True)
     type_tache_detail = TypeTacheSerializer(source='id_type_tache', read_only=True)
     # Legacy single team (for backwards compatibility)
-    equipe_detail = EquipeListSerializer(source='id_equipe', read_only=True)
+    equipe_detail = EquipeLightSerializer(source='id_equipe', read_only=True)
     # Multi-teams (US-PLAN-013)
-    equipes_detail = EquipeListSerializer(source='equipes', many=True, read_only=True)
+    equipes_detail = EquipeLightSerializer(source='equipes', many=True, read_only=True)
     participations_detail = ParticipationTacheSerializer(source='participations', many=True, read_only=True)
     objets_detail = ObjetSimpleSerializer(source='objets', many=True, read_only=True)
     reclamation_numero = serializers.CharField(source='reclamation.numero_reclamation', read_only=True, allow_null=True)
@@ -101,16 +145,14 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                 if type_reel:
                     types_objets.add(type_reel)
 
-            # Vérifier que pour chaque type d'objet, un ratio existe
-            types_non_applicables = []
-            for type_objet in types_objets:
-                ratio_exists = RatioProductivite.objects.filter(
-                    id_type_tache=type_tache,
-                    type_objet=type_objet,
-                    actif=True
-                ).exists()
-                if not ratio_exists:
-                    types_non_applicables.append(type_objet)
+            # Vérifier que pour chaque type d'objet, un ratio existe (requête unique)
+            existing_ratios = set(RatioProductivite.objects.filter(
+                id_type_tache=type_tache,
+                type_objet__in=types_objets,
+                actif=True
+            ).values_list('type_objet', flat=True))
+
+            types_non_applicables = [t for t in types_objets if t not in existing_ratios]
 
             if types_non_applicables:
                 raise serializers.ValidationError({

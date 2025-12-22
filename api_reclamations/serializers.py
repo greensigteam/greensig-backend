@@ -99,22 +99,60 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_taches_liees_details(self, obj):
-        """Retourne les infos de base des tâches liées."""
-        taches = obj.taches_correctives.filter(deleted_at__isnull=True)
-        return [{
-            'id': t.id,
-            'type_tache': t.id_type_tache.nom_tache,
-            'statut': t.statut,
-            'date_debut': t.date_debut_planifiee,
-            'equipe': t.id_equipe.nom_equipe if t.id_equipe else (t.equipes.first().nom_equipe if t.equipes.exists() else None)
-        } for t in taches]
+        """Retourne les infos de base des tâches liées.
+
+        Note: Utilise le prefetch 'taches_correctives' avec select_related pour éviter N+1.
+        Le prefetch filtre déjà sur deleted_at__isnull=True dans la view.
+        """
+        # Utilise le cache prefetch si disponible, sinon fallback
+        if hasattr(obj, '_prefetched_objects_cache') and 'taches_correctives' in obj._prefetched_objects_cache:
+            taches = obj._prefetched_objects_cache['taches_correctives']
+        else:
+            # Fallback avec optimisation
+            taches = obj.taches_correctives.filter(deleted_at__isnull=True).select_related(
+                'id_type_tache', 'id_equipe'
+            ).prefetch_related('equipes')
+
+        result = []
+        for t in taches:
+            # Utilise les relations prefetchées
+            equipe_nom = None
+            if t.id_equipe:
+                equipe_nom = t.id_equipe.nom_equipe
+            elif hasattr(t, '_prefetched_objects_cache') and 'equipes' in t._prefetched_objects_cache:
+                equipes_list = t._prefetched_objects_cache['equipes']
+                if equipes_list:
+                    equipe_nom = equipes_list[0].nom_equipe
+            else:
+                first_equipe = t.equipes.first()
+                if first_equipe:
+                    equipe_nom = first_equipe.nom_equipe
+
+            result.append({
+                'id': t.id,
+                'type_tache': t.id_type_tache.nom_tache if t.id_type_tache else None,
+                'statut': t.statut,
+                'date_debut': t.date_debut_planifiee,
+                'equipe': equipe_nom
+            })
+        return result
 
     def get_photos_taches(self, obj):
-        """Retourne les photos liées aux tâches de cette réclamation."""
+        """Retourne les photos liées aux tâches de cette réclamation.
+
+        Optimisé: récupère les IDs des tâches préchargées pour limiter la requête.
+        """
         from api_suivi_taches.models import Photo
-        photos = Photo.objects.filter(tache__reclamation=obj)
-        # On utilise PhotoListSerializer pour avoir un format plus léger si besoin
-        # ou PhotoSerializer pour avoir l'URL complète
+
+        # Récupère les IDs des tâches depuis le cache prefetch si disponible
+        if hasattr(obj, '_prefetched_objects_cache') and 'taches_correctives' in obj._prefetched_objects_cache:
+            tache_ids = [t.id for t in obj._prefetched_objects_cache['taches_correctives']]
+            if not tache_ids:
+                return []
+            photos = Photo.objects.filter(tache_id__in=tache_ids).select_related('tache')
+        else:
+            photos = Photo.objects.filter(tache__reclamation=obj).select_related('tache')
+
         return PhotoSerializer(photos, many=True, context=self.context).data
 
     def get_createur_nom(self, obj):

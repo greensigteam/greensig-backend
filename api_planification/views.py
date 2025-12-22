@@ -75,14 +75,38 @@ class TacheViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        from django.db.models import Q
+        from django.db.models import Q, Prefetch
+        from api_users.models import Equipe
 
         # Exclude soft-deleted tasks
         qs = Tache.objects.filter(deleted_at__isnull=True)
 
-        # Optimiser les requêtes avec prefetch_related pour les M2M
-        qs = qs.select_related('id_client', 'id_type_tache', 'id_equipe', 'reclamation')
-        qs = qs.prefetch_related('equipes', 'objets', 'participations')
+        # Optimiser les requêtes avec prefetch_related pour les M2M et nested relations
+        qs = qs.select_related(
+            'id_client__utilisateur',
+            'id_type_tache',
+            'id_equipe__chef_equipe__utilisateur',
+            'reclamation'
+        )
+
+        # Prefetch optimisé pour les équipes avec leurs opérateurs (pour nombre_membres)
+        equipes_qs = Equipe.objects.select_related(
+            'chef_equipe__utilisateur'
+        ).prefetch_related(
+            'operateurs__utilisateur'
+        )
+
+        qs = qs.prefetch_related(
+            # Prefetch optimisé pour les équipes
+            Prefetch('equipes', queryset=equipes_qs),
+            # Prefetch pour les objets avec site ET sous_site
+            'objets__site',
+            'objets__sous_site',
+            # Prefetch pour les participations
+            'participations__id_operateur__utilisateur',
+            # Prefetch pour les rôles de l'utilisateur client (évite N+1 dans UtilisateurSerializer)
+            'id_client__utilisateur__roles_utilisateur__role'
+        )
 
         # Appliquer les permissions automatiques basées sur le rôle
         user = self.request.user

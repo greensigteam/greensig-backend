@@ -69,6 +69,8 @@ class SiteListCreateView(generics.ListCreateAPIView):
         """
         Récupère les IDs des sites contenant les objets liés aux tâches du chef d'équipe.
         Seuls les sites avec des objets dans les tâches sont retournés.
+
+        OPTIMISÉ: Une seule requête SQL au lieu de N+1.
         """
         from api_users.models import Equipe
         from api_planification.models import Tache
@@ -85,22 +87,20 @@ class SiteListCreateView(generics.ListCreateAPIView):
                 return []
 
             # Tâches assignées à ces équipes (non supprimées)
-            taches = Tache.objects.filter(
+            taches_ids = Tache.objects.filter(
                 deleted_at__isnull=True
             ).filter(
                 Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).prefetch_related('objets').distinct()
+            ).values_list('id', flat=True).distinct()
 
-            # Récupérer les IDs des sites UNIQUEMENT depuis les objets des tâches
-            site_ids = set()
+            # OPTIMISÉ: Récupérer les site_ids en une seule requête via la relation inverse
+            # Au lieu de boucler sur chaque tâche puis chaque objet (N+1)
+            site_ids = list(Objet.objects.filter(
+                taches__id__in=taches_ids,
+                site_id__isnull=False
+            ).values_list('site_id', flat=True).distinct())
 
-            for tache in taches:
-                # Sites des objets directement liés à la tâche
-                for objet in tache.objets.all():
-                    if objet.site_id:
-                        site_ids.add(objet.site_id)
-
-            return list(site_ids)
+            return site_ids
         except Exception:
             return []
 
@@ -1693,6 +1693,9 @@ class MapObjectsView(APIView):
                 # Déterminer quels types charger
                 types_to_load = requested_types if requested_types else list(type_mapping.keys())
 
+                # Types polygones qui nécessitent le calcul de superficie
+                polygon_types = {'gazons', 'arbustes', 'vivaces', 'cactus', 'graminees'}
+
                 # Charger chaque type avec filtrage bbox
                 for type_name in types_to_load:
                     if type_name in type_mapping:
@@ -1702,6 +1705,17 @@ class MapObjectsView(APIView):
                         queryset = Model.objects.filter(
                             geometry__intersects=bbox_polygon
                         ).select_related('site', 'sous_site')
+
+                        # OPTIMISÉ: Pré-calculer la superficie pour les types polygones
+                        # Évite N+1 requêtes ST_Area dans le serializer
+                        if type_name in polygon_types:
+                            from django.db.models.expressions import RawSQL
+                            queryset = queryset.annotate(
+                                _superficie_annotee=RawSQL(
+                                    "ST_Area(geometry::geography)",
+                                    []
+                                )
+                            )
 
                         # Appliquer les filtres de permissions (sauf pour ADMIN)
                         if not is_admin:
@@ -1745,6 +1759,8 @@ class MapObjectsView(APIView):
         Le chef d'équipe voit:
         - Les sites qui contiennent les objets de ses tâches
         - Uniquement les objets directement liés à ses tâches
+
+        OPTIMISÉ: Une seule requête SQL au lieu de N+1.
         """
         from api_users.models import Equipe
         from api_planification.models import Tache
@@ -1760,26 +1776,27 @@ class MapObjectsView(APIView):
             if not equipes_gerees_ids:
                 return ([], [])
 
-            # Tâches assignées à ces équipes (non supprimées)
-            taches = Tache.objects.filter(
+            # Tâches assignées à ces équipes (non supprimées) - juste les IDs
+            taches_ids = Tache.objects.filter(
                 deleted_at__isnull=True
             ).filter(
                 Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).prefetch_related('objets').distinct()
+            ).values_list('id', flat=True).distinct()
 
-            # Récupérer les IDs des sites et objets UNIQUEMENT depuis les objets des tâches
-            site_ids = set()
-            object_ids = set()
+            # OPTIMISÉ: Récupérer les objets en une seule requête via la relation inverse
+            objets_data = Objet.objects.filter(
+                taches__id__in=taches_ids
+            ).values_list('id', 'site_id').distinct()
 
-            for tache in taches:
-                # Objets directement liés aux tâches
-                for objet in tache.objets.all():
-                    object_ids.add(objet.id)
-                    # Site de l'objet (pour afficher le site sur la carte)
-                    if objet.site_id:
-                        site_ids.add(objet.site_id)
+            # Extraire les IDs d'objets et de sites
+            object_ids = []
+            site_ids = []
+            for obj_id, site_id in objets_data:
+                object_ids.append(obj_id)
+                if site_id:
+                    site_ids.append(site_id)
 
-            return (list(site_ids), list(object_ids))
+            return (list(set(site_ids)), object_ids)
         except Exception:
             return ([], [])
 

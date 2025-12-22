@@ -72,6 +72,22 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'equipe_affectee__chef_equipe__utilisateur'
         )
 
+        # Prefetch pour le détail (historique, photos, taches, satisfaction)
+        if self.action in ['retrieve', 'suivi']:
+            from django.db.models import Prefetch
+            from api_planification.models import Tache
+            queryset = queryset.prefetch_related(
+                'historique__auteur',
+                'photos',
+                'satisfaction',
+                Prefetch(
+                    'taches_correctives',
+                    queryset=Tache.objects.filter(deleted_at__isnull=True).select_related(
+                        'id_type_tache', 'id_equipe'
+                    ).prefetch_related('equipes')
+                )
+            )
+
         # Admin / Staff : accès à TOUTES les réclamations
         if user.is_staff or user.is_superuser:
             return queryset

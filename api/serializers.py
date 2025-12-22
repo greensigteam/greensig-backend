@@ -73,7 +73,15 @@ class GazonSerializer(GeoFeatureModelSerializer):
         return obj.sous_site.nom if obj.sous_site else None
     
     def get_superficie_calculee(self, obj):
-        """Calculate area in square meters using PostGIS ST_Area with geography."""
+        """
+        Calculate area in square meters using PostGIS ST_Area with geography.
+        OPTIMISÉ: Utilise l'annotation si disponible, sinon calcule à la volée.
+        """
+        # Si l'annotation existe (pré-calculée par la view), l'utiliser
+        if hasattr(obj, '_superficie_annotee') and obj._superficie_annotee is not None:
+            return round(obj._superficie_annotee, 2)
+
+        # Fallback: calcul à la volée (pour compatibilité)
         if obj.geometry:
             from django.db import connection
             with connection.cursor() as cursor:
@@ -121,7 +129,15 @@ class ArbusteSerializer(GeoFeatureModelSerializer):
         return obj.sous_site.nom if obj.sous_site else None
     
     def get_superficie_calculee(self, obj):
-        """Calculate area in square meters using PostGIS ST_Area with geography."""
+        """
+        Calculate area in square meters using PostGIS ST_Area with geography.
+        OPTIMISÉ: Utilise l'annotation si disponible, sinon calcule à la volée.
+        """
+        # Si l'annotation existe (pré-calculée par la view), l'utiliser
+        if hasattr(obj, '_superficie_annotee') and obj._superficie_annotee is not None:
+            return round(obj._superficie_annotee, 2)
+
+        # Fallback: calcul à la volée (pour compatibilité)
         if obj.geometry:
             from django.db import connection
             with connection.cursor() as cursor:
@@ -152,7 +168,15 @@ class VivaceSerializer(GeoFeatureModelSerializer):
         return obj.sous_site.nom if obj.sous_site else None
     
     def get_superficie_calculee(self, obj):
-        """Calculate area in square meters using PostGIS ST_Area with geography."""
+        """
+        Calculate area in square meters using PostGIS ST_Area with geography.
+        OPTIMISÉ: Utilise l'annotation si disponible, sinon calcule à la volée.
+        """
+        # Si l'annotation existe (pré-calculée par la view), l'utiliser
+        if hasattr(obj, '_superficie_annotee') and obj._superficie_annotee is not None:
+            return round(obj._superficie_annotee, 2)
+
+        # Fallback: calcul à la volée (pour compatibilité)
         if obj.geometry:
             from django.db import connection
             with connection.cursor() as cursor:
@@ -183,7 +207,15 @@ class CactusSerializer(GeoFeatureModelSerializer):
         return obj.sous_site.nom if obj.sous_site else None
     
     def get_superficie_calculee(self, obj):
-        """Calculate area in square meters using PostGIS ST_Area with geography."""
+        """
+        Calculate area in square meters using PostGIS ST_Area with geography.
+        OPTIMISÉ: Utilise l'annotation si disponible, sinon calcule à la volée.
+        """
+        # Si l'annotation existe (pré-calculée par la view), l'utiliser
+        if hasattr(obj, '_superficie_annotee') and obj._superficie_annotee is not None:
+            return round(obj._superficie_annotee, 2)
+
+        # Fallback: calcul à la volée (pour compatibilité)
         if obj.geometry:
             from django.db import connection
             with connection.cursor() as cursor:
@@ -214,7 +246,15 @@ class GramineeSerializer(GeoFeatureModelSerializer):
         return obj.sous_site.nom if obj.sous_site else None
     
     def get_superficie_calculee(self, obj):
-        """Calculate area in square meters using PostGIS ST_Area with geography."""
+        """
+        Calculate area in square meters using PostGIS ST_Area with geography.
+        OPTIMISÉ: Utilise l'annotation si disponible, sinon calcule à la volée.
+        """
+        # Si l'annotation existe (pré-calculée par la view), l'utiliser
+        if hasattr(obj, '_superficie_annotee') and obj._superficie_annotee is not None:
+            return round(obj._superficie_annotee, 2)
+
+        # Fallback: calcul à la volée (pour compatibilité)
         if obj.geometry:
             from django.db import connection
             with connection.cursor() as cursor:
