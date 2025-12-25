@@ -2,7 +2,7 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from django.db.models import Q
+from django.db.models import Q, Count
 from django.contrib.gis.geos import GEOSGeometry
 import json
 
@@ -966,6 +966,610 @@ class ExportDataView(APIView):
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
             return response
+
+
+# ==============================================================================
+# VUE EXPORT EXCEL AMÉLIORÉ POUR INVENTAIRE
+# ==============================================================================
+
+class InventoryExportExcelView(APIView):
+    """
+    Vue spécialisée pour l'export Excel professionnel de l'inventaire.
+    Supporte:
+    - Formatage professionnel (styles, couleurs, filtres Excel)
+    - Export multi-types avec onglets séparés
+    - Filtres passés depuis le frontend
+    - Statistiques par type
+
+    Paramètres de requête:
+    - types: liste de types séparés par virgules (ex: 'Arbre,Palmier,Gazon')
+    - site: ID du site (optionnel)
+    - etat: état des objets (bon, moyen, mauvais, critique)
+    - famille: famille botanique (optionnel)
+    - search: recherche textuelle (optionnel)
+    """
+
+    MODEL_MAPPING = {
+        'Arbre': Arbre,
+        'Palmier': Palmier,
+        'Gazon': Gazon,
+        'Arbuste': Arbuste,
+        'Vivace': Vivace,
+        'Cactus': Cactus,
+        'Graminee': Graminee,
+        'Puit': Puit,
+        'Pompe': Pompe,
+        'Vanne': Vanne,
+        'Clapet': Clapet,
+        'Canalisation': Canalisation,
+        'Aspersion': Aspersion,
+        'Goutte': Goutte,
+        'Ballon': Ballon,
+    }
+
+    # Mapping des champs à exporter par type (colonnes personnalisées)
+    FIELD_MAPPINGS = {
+        'Arbre': ['nom', 'famille', 'taille', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Palmier': ['nom', 'famille', 'taille', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Gazon': ['nom', 'famille', 'area_sqm', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Arbuste': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Vivace': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Cactus': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Graminee': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Puit': ['nom', 'profondeur', 'diametre', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
+        'Pompe': ['nom', 'type', 'diametre', 'puissance', 'debit', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Vanne': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Clapet': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Canalisation': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Aspersion': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Goutte': ['type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Ballon': ['marque', 'pression', 'volume', 'materiau', 'site__nom_site', 'sous_site__nom', 'etat'],
+    }
+
+    # Labels français pour les colonnes
+    FIELD_LABELS = {
+        'nom': 'Nom',
+        'marque': 'Marque',
+        'famille': 'Famille',
+        'taille': 'Taille',
+        'densite': 'Densité',
+        'area_sqm': 'Surface (m²)',
+        'profondeur': 'Profondeur (m)',
+        'diametre': 'Diamètre (cm)',
+        'type': 'Type',
+        'puissance': 'Puissance (kW)',
+        'debit': 'Débit (m³/h)',
+        'materiau': 'Matériau',
+        'pression': 'Pression (bar)',
+        'volume': 'Volume (L)',
+        'site__nom_site': 'Site',
+        'sous_site__nom': 'Sous-site',
+        'etat': 'État',
+        'last_intervention_date': 'Dernière intervention',
+    }
+
+    def get(self, request, *args, **kwargs):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from django.http import HttpResponse
+        from datetime import datetime
+        from io import BytesIO
+
+        # Récupérer les types à exporter
+        types_param = request.query_params.get('types', '')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+        else:
+            # Si aucun type spécifié, exporter tous
+            types_list = list(self.MODEL_MAPPING.keys())
+
+        # Valider les types
+        invalid_types = [t for t in types_list if t not in self.MODEL_MAPPING]
+        if invalid_types:
+            return Response({'error': f'Types invalides: {", ".join(invalid_types)}'}, status=400)
+
+        # Créer le workbook
+        wb = Workbook()
+        wb.remove(wb.active)  # Supprimer la feuille par défaut
+
+        # Styles réutilisables
+        header_font = Font(bold=True, color='FFFFFF', size=11)
+        header_fill = PatternFill(start_color='2E7D32', end_color='2E7D32', fill_type='solid')
+        header_alignment = Alignment(horizontal='center', vertical='center')
+        header_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        stats_font = Font(bold=True, size=10)
+        stats_fill = PatternFill(start_color='E8F5E9', end_color='E8F5E9', fill_type='solid')
+
+        # États et leurs couleurs
+        etat_colors = {
+            'bon': 'C8E6C9',        # Vert clair
+            'moyen': 'FFF9C4',      # Jaune clair
+            'mauvais': 'FFCCBC',    # Orange clair
+            'critique': 'FFCDD2',   # Rouge clair
+        }
+
+        # Pour chaque type, créer un onglet
+        for type_name in types_list:
+            model_class = self.MODEL_MAPPING[type_name]
+
+            # Construire le queryset avec filtres
+            queryset = model_class.objects.select_related('site', 'sous_site').all()
+
+            # Appliquer les filtres
+            site_id = request.query_params.get('site')
+            if site_id:
+                queryset = queryset.filter(site_id=site_id)
+
+            etat = request.query_params.get('etat')
+            if etat:
+                queryset = queryset.filter(etat=etat)
+
+            famille = request.query_params.get('famille')
+            if famille and hasattr(model_class, 'famille'):
+                queryset = queryset.filter(famille__icontains=famille)
+
+            search = request.query_params.get('search')
+            if search:
+                # Recherche dans nom ou marque selon le type
+                if hasattr(model_class, 'nom'):
+                    queryset = queryset.filter(nom__icontains=search)
+                elif hasattr(model_class, 'marque'):
+                    queryset = queryset.filter(marque__icontains=search)
+
+            # Vérifier s'il y a des données
+            if not queryset.exists():
+                continue
+
+            # Créer l'onglet
+            ws = wb.create_sheet(title=type_name[:31])
+
+            # Récupérer les champs à exporter
+            fields = self.FIELD_MAPPINGS.get(type_name, ['nom', 'site__nom_site', 'etat'])
+
+            # Écrire l'en-tête
+            headers = [self.FIELD_LABELS.get(field, field) for field in fields]
+            ws.append(headers)
+
+            # Appliquer le style d'en-tête
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = header_border
+
+            # Récupérer les données
+            data_rows = queryset.values(*fields)
+
+            # Écrire les données avec formatage conditionnel
+            for row_data in data_rows:
+                row_values = []
+                etat_value = None
+
+                for field in fields:
+                    value = row_data.get(field)
+
+                    # Formater les dates
+                    if field == 'last_intervention_date' and value:
+                        value = value.strftime('%d/%m/%Y')
+
+                    # Formater les nombres
+                    elif field in ['area_sqm', 'profondeur', 'diametre', 'puissance', 'debit', 'pression', 'volume']:
+                        if value is not None:
+                            value = round(float(value), 2)
+
+                    # Capturer l'état pour la couleur
+                    if field == 'etat':
+                        etat_value = value
+
+                    row_values.append(value if value is not None else '-')
+
+                ws.append(row_values)
+
+                # Appliquer la couleur de fond selon l'état
+                if etat_value and etat_value.lower() in etat_colors:
+                    fill_color = etat_colors[etat_value.lower()]
+                    for cell in ws[ws.max_row]:
+                        cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
+
+            # Ajouter une ligne de statistiques
+            ws.append([])  # Ligne vide
+            stats_row = ws.max_row + 1
+            ws.append(['STATISTIQUES', '', '', '', '', '', ''])
+
+            # Compter les états
+            etat_counts = queryset.values('etat').annotate(count=Count('id'))
+            etat_summary = {item['etat']: item['count'] for item in etat_counts}
+
+            ws.append(['Total:', queryset.count()])
+            for etat_key, count in etat_summary.items():
+                ws.append([f'{etat_key.capitalize()}:', count])
+
+            # Appliquer le style aux statistiques
+            for row in ws.iter_rows(min_row=stats_row, max_row=ws.max_row):
+                for cell in row:
+                    cell.font = stats_font
+                    cell.fill = stats_fill
+
+            # Ajuster les largeurs de colonnes
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if cell.value and len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 3, 50)
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            # Activer les filtres automatiques
+            ws.auto_filter.ref = ws.dimensions
+
+            # Figer la première ligne
+            ws.freeze_panes = 'A2'
+
+        # Vérifier qu'au moins un onglet a été créé
+        if len(wb.sheetnames) == 0:
+            return Response({'error': 'Aucune donnée à exporter avec les filtres appliqués'}, status=404)
+
+        # Sauvegarder le workbook
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        # Créer la réponse HTTP
+        response = HttpResponse(
+            buffer.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+        filename = f"inventaire_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        return response
+
+
+# ==============================================================================
+# VUE EXPORT PDF POUR INVENTAIRE
+# ==============================================================================
+
+class InventoryExportPDFView(APIView):
+    """
+    Vue pour l'export PDF professionnel de l'inventaire.
+    Génère un document PDF avec:
+    - En-tête avec logo et titre
+    - Tableau formaté des données
+    - Statistiques par type
+    - Pied de page avec numérotation
+
+    Paramètres de requête identiques à InventoryExportExcelView:
+    - types: liste de types séparés par virgules
+    - site: ID du site (optionnel)
+    - etat: état des objets
+    - famille: famille botanique (optionnel)
+    - search: recherche textuelle (optionnel)
+    """
+
+    MODEL_MAPPING = {
+        'Arbre': Arbre,
+        'Palmier': Palmier,
+        'Gazon': Gazon,
+        'Arbuste': Arbuste,
+        'Vivace': Vivace,
+        'Cactus': Cactus,
+        'Graminee': Graminee,
+        'Puit': Puit,
+        'Pompe': Pompe,
+        'Vanne': Vanne,
+        'Clapet': Clapet,
+        'Canalisation': Canalisation,
+        'Aspersion': Aspersion,
+        'Goutte': Goutte,
+        'Ballon': Ballon,
+    }
+
+    FIELD_MAPPINGS = {
+        'Arbre': ['nom', 'famille', 'taille', 'site__nom_site', 'etat'],
+        'Palmier': ['nom', 'famille', 'taille', 'site__nom_site', 'etat'],
+        'Gazon': ['nom', 'famille', 'area_sqm', 'site__nom_site', 'etat'],
+        'Arbuste': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
+        'Vivace': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
+        'Cactus': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
+        'Graminee': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
+        'Puit': ['nom', 'profondeur', 'diametre', 'site__nom_site', 'etat'],
+        'Pompe': ['nom', 'type', 'diametre', 'site__nom_site', 'etat'],
+        'Vanne': ['marque', 'type', 'diametre', 'site__nom_site', 'etat'],
+        'Clapet': ['marque', 'type', 'diametre', 'site__nom_site', 'etat'],
+        'Canalisation': ['marque', 'type', 'diametre', 'site__nom_site', 'etat'],
+        'Aspersion': ['marque', 'type', 'diametre', 'site__nom_site', 'etat'],
+        'Goutte': ['type', 'diametre', 'site__nom_site', 'etat'],
+        'Ballon': ['marque', 'volume', 'site__nom_site', 'etat'],
+    }
+
+    FIELD_LABELS = {
+        'nom': 'Nom',
+        'marque': 'Marque',
+        'famille': 'Famille',
+        'taille': 'Taille',
+        'densite': 'Densité',
+        'area_sqm': 'Surface (m²)',
+        'profondeur': 'Prof. (m)',
+        'diametre': 'Diam. (cm)',
+        'type': 'Type',
+        'volume': 'Vol. (L)',
+        'site__nom_site': 'Site',
+        'etat': 'État',
+    }
+
+    def get(self, request, *args, **kwargs):
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+        from django.http import HttpResponse
+        from datetime import datetime
+        from io import BytesIO
+
+        # Récupérer les types à exporter
+        types_param = request.query_params.get('types', '')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+        else:
+            types_list = list(self.MODEL_MAPPING.keys())
+
+        # Valider les types
+        invalid_types = [t for t in types_list if t not in self.MODEL_MAPPING]
+        if invalid_types:
+            return Response({'error': f'Types invalides: {", ".join(invalid_types)}'}, status=400)
+
+        # Créer le buffer
+        buffer = BytesIO()
+
+        # Créer le document PDF (paysage pour plus de colonnes)
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=landscape(A4),
+            rightMargin=1.5*cm,
+            leftMargin=1.5*cm,
+            topMargin=2*cm,
+            bottomMargin=2*cm
+        )
+
+        # Styles
+        styles = getSampleStyleSheet()
+
+        # Style titre principal
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            textColor=colors.HexColor('#2E7D32'),
+            spaceAfter=12,
+            alignment=TA_CENTER,
+            fontName='Helvetica-Bold'
+        )
+
+        # Style sous-titre
+        subtitle_style = ParagraphStyle(
+            'CustomSubtitle',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor=colors.grey,
+            spaceAfter=20,
+            alignment=TA_CENTER
+        )
+
+        # Style pour les sections
+        section_style = ParagraphStyle(
+            'SectionTitle',
+            parent=styles['Heading2'],
+            fontSize=14,
+            textColor=colors.HexColor('#2E7D32'),
+            spaceAfter=10,
+            spaceBefore=15,
+            fontName='Helvetica-Bold'
+        )
+
+        # Contenu du document
+        story = []
+
+        # En-tête du document
+        story.append(Paragraph("INVENTAIRE - GreenSIG", title_style))
+        story.append(Paragraph(f"Export généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
+        story.append(Spacer(1, 0.5*cm))
+
+        # Couleurs par état
+        etat_colors = {
+            'bon': colors.HexColor('#C8E6C9'),
+            'moyen': colors.HexColor('#FFF9C4'),
+            'mauvais': colors.HexColor('#FFCCBC'),
+            'critique': colors.HexColor('#FFCDD2'),
+        }
+
+        # Pour chaque type
+        total_objects = 0
+        for idx, type_name in enumerate(types_list):
+            model_class = self.MODEL_MAPPING[type_name]
+
+            # Construire le queryset avec filtres
+            queryset = model_class.objects.select_related('site', 'sous_site').all()
+
+            # Appliquer les filtres (même logique que Excel)
+            site_id = request.query_params.get('site')
+            if site_id:
+                queryset = queryset.filter(site_id=site_id)
+
+            etat = request.query_params.get('etat')
+            if etat:
+                queryset = queryset.filter(etat=etat)
+
+            famille = request.query_params.get('famille')
+            if famille and hasattr(model_class, 'famille'):
+                queryset = queryset.filter(famille__icontains=famille)
+
+            search = request.query_params.get('search')
+            if search:
+                if hasattr(model_class, 'nom'):
+                    queryset = queryset.filter(nom__icontains=search)
+                elif hasattr(model_class, 'marque'):
+                    queryset = queryset.filter(marque__icontains=search)
+
+            # Vérifier s'il y a des données
+            if not queryset.exists():
+                continue
+
+            count = queryset.count()
+            total_objects += count
+
+            # Titre de section
+            story.append(Paragraph(f"{type_name} ({count} élément{'s' if count > 1 else ''})", section_style))
+
+            # Récupérer les champs
+            fields = self.FIELD_MAPPINGS.get(type_name, ['nom', 'site__nom_site', 'etat'])
+            headers = [self.FIELD_LABELS.get(field, field) for field in fields]
+
+            # Données
+            data_rows = list(queryset.values(*fields)[:50])  # Limiter à 50 pour ne pas surcharger
+
+            # Construire le tableau
+            table_data = [headers]
+
+            for row_data in data_rows:
+                row = []
+                for field in fields:
+                    value = row_data.get(field)
+
+                    # Formater les valeurs
+                    if value is None:
+                        value = '-'
+                    elif field in ['area_sqm', 'profondeur', 'diametre', 'volume']:
+                        value = f"{round(float(value), 1)}" if value else '-'
+                    else:
+                        value = str(value)
+
+                    row.append(value)
+
+                table_data.append(row)
+
+            # Si plus de 50 éléments, ajouter note
+            if queryset.count() > 50:
+                table_data.append(['...' for _ in fields])
+                table_data.append([f'({queryset.count() - 50} éléments supplémentaires non affichés)'] + ['' for _ in range(len(fields) - 1)])
+
+            # Créer le tableau
+            col_widths = [3*cm] * len(fields)  # Largeur égale pour toutes les colonnes
+            table = Table(table_data, colWidths=col_widths)
+
+            # Style du tableau
+            table_style = TableStyle([
+                # En-tête
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2E7D32')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+
+                # Corps
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
+                ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+
+                # Bordures
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#2E7D32')),
+
+                # Alternance de couleurs
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+            ])
+
+            # Appliquer les couleurs par état si la colonne existe
+            if 'etat' in fields:
+                etat_col = fields.index('etat')
+                for i, row_data in enumerate(data_rows, start=1):
+                    etat_val = row_data.get('etat', '').lower()
+                    if etat_val in etat_colors:
+                        table_style.add('BACKGROUND', (etat_col, i), (etat_col, i), etat_colors[etat_val])
+
+            table.setStyle(table_style)
+            story.append(table)
+
+            # Statistiques pour ce type
+            etat_counts = queryset.values('etat').annotate(count=Count('id'))
+            etat_summary = {item['etat']: item['count'] for item in etat_counts}
+
+            stats_text = " | ".join([f"{k.capitalize()}: {v}" for k, v in etat_summary.items()])
+            stats_para = Paragraph(f"<i>Répartition: {stats_text}</i>", styles['Normal'])
+            story.append(Spacer(1, 0.3*cm))
+            story.append(stats_para)
+
+            # Saut de page entre les types (sauf pour le dernier)
+            if idx < len(types_list) - 1:
+                story.append(PageBreak())
+            else:
+                story.append(Spacer(1, 0.5*cm))
+
+        # Vérifier qu'il y a des données
+        if total_objects == 0:
+            return Response({'error': 'Aucune donnée à exporter avec les filtres appliqués'}, status=404)
+
+        # Résumé final
+        story.append(Spacer(1, 1*cm))
+        story.append(Paragraph("RÉSUMÉ GLOBAL", section_style))
+        summary_table_data = [
+            ['Total d\'objets exportés:', str(total_objects)],
+            ['Nombre de types:', str(len([t for t in types_list if self.MODEL_MAPPING[t].objects.filter(**self._build_filters(request)).exists()]))],
+            ['Date d\'export:', datetime.now().strftime('%d/%m/%Y à %H:%M')],
+        ]
+        summary_table = Table(summary_table_data, colWidths=[6*cm, 4*cm])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#E8F5E9')),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
+            ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        story.append(summary_table)
+
+        # Générer le PDF
+        doc.build(story)
+
+        # Retourner la réponse
+        buffer.seek(0)
+        response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
+        filename = f"inventaire_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        return response
+
+    def _build_filters(self, request):
+        """Construit le dictionnaire de filtres à partir des paramètres de requête"""
+        filters = {}
+
+        site_id = request.query_params.get('site')
+        if site_id:
+            filters['site_id'] = site_id
+
+        etat = request.query_params.get('etat')
+        if etat:
+            filters['etat'] = etat
+
+        return filters
 
 
 # ==============================================================================

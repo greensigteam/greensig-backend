@@ -120,6 +120,17 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
             if end < start:
                 raise serializers.ValidationError({"date_fin_planifiee": "La date de fin ne peut pas être antérieure à la date de début."})
 
+            # RÈGLE D'OR: Une tâche doit avoir lieu sur le MÊME jour calendaire
+            # Pour éviter la confusion entre "Chantier" (macro) et "Intervention" (micro)
+            if start.date() != end.date():
+                raise serializers.ValidationError({
+                    "date_fin_planifiee":
+                        "Une tâche doit obligatoirement avoir lieu sur le même jour calendaire. "
+                        f"Début: {start.date().strftime('%d/%m/%Y')}, "
+                        f"Fin: {end.date().strftime('%d/%m/%Y')}. "
+                        "Pour planifier sur plusieurs jours, créez plusieurs tâches ou utilisez la récurrence."
+                })
+
         # Si une charge est fournie manuellement, activer le flag charge_manuelle
         if 'charge_estimee_heures' in data and data['charge_estimee_heures'] is not None:
             data['charge_manuelle'] = True
@@ -163,17 +174,41 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        # Extract M2M equipes if provided
+        # Extract M2M fields
         equipes = validated_data.pop('equipes', None)
+        objets = validated_data.pop('objets', None)
+
+        # AUTO-ASSIGN CLIENT: Si id_client n'est pas fourni, le déduire des objets
+        if 'id_client' not in validated_data or validated_data.get('id_client') is None:
+            if objets:
+                # Prendre le premier objet et récupérer son client via site
+                for obj in objets:
+                    if hasattr(obj, 'site') and obj.site and hasattr(obj.site, 'client') and obj.site.client:
+                        validated_data['id_client'] = obj.site.client
+                        break
+
         instance = super().create(validated_data)
+
+        # Set M2M relationships
         if equipes is not None:
             instance.equipes.set(equipes)
+        if objets is not None:
+            instance.objets.set(objets)
+
         return instance
 
     def update(self, instance, validated_data):
-        # Extract M2M equipes if provided
+        # Extract M2M fields
         equipes = validated_data.pop('equipes', None)
+        objets = validated_data.pop('objets', None)
+
         instance = super().update(instance, validated_data)
+
+        # Set M2M relationships
         if equipes is not None:
             instance.equipes.set(equipes)
+        if objets is not None:
+            instance.objets.set(objets)
+            # Le signal m2m_changed va automatiquement mettre à jour id_client
+
         return instance

@@ -229,6 +229,108 @@ class ClientViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
 
+    @action(detail=True, methods=['get'], url_path='inventory-stats')
+    def inventory_stats(self, request, pk=None):
+        """
+        Retourne les statistiques d'inventaire pour un client, groupées par site.
+
+        Structure de réponse:
+        {
+            "totalObjets": 350,
+            "vegetation": {"total": 280, "byType": {"arbre": 100, ...}},
+            "hydraulique": {"total": 70, "byType": {"puit": 20, ...}},
+            "bySite": [
+                {
+                    "siteId": "1",
+                    "siteName": "Site Villa 1",
+                    "total": 150,
+                    "vegetation": 120,
+                    "hydraulique": 30,
+                    "byType": {"arbre": 50, "gazon": 70, "puit": 30}
+                },
+                ...
+            ]
+        }
+        """
+        from api.models import Site, Objet
+        from collections import defaultdict
+
+        client = self.get_object()
+
+        # Récupérer tous les sites du client
+        sites = Site.objects.filter(client=client).prefetch_related('objets')
+
+        if not sites.exists():
+            return Response({
+                'totalObjets': 0,
+                'vegetation': {'total': 0, 'byType': {}},
+                'hydraulique': {'total': 0, 'byType': {}},
+                'bySite': []
+            })
+
+        # Types de végétation et hydraulique
+        VEGETATION_TYPES = {'Arbre', 'Palmier', 'Gazon', 'Arbuste', 'Vivace', 'Cactus', 'Graminee'}
+        HYDRAULIQUE_TYPES = {'Puit', 'Pompe', 'Vanne', 'Clapet', 'Ballon', 'Canalisation', 'Aspersion', 'Goutte'}
+
+        # Totaux globaux
+        global_vegetation_counts = defaultdict(int)
+        global_hydraulique_counts = defaultdict(int)
+        global_total_vegetation = 0
+        global_total_hydraulique = 0
+
+        # Stats par site
+        by_site = []
+
+        for site in sites:
+            site_vegetation = 0
+            site_hydraulique = 0
+            site_by_type = defaultdict(int)
+
+            # Compter les objets de ce site
+            objets = site.objets.all()
+
+            for obj in objets:
+                type_name = obj.get_nom_type()
+
+                if type_name in VEGETATION_TYPES:
+                    type_key = type_name.lower()
+                    site_by_type[type_key] += 1
+                    site_vegetation += 1
+                    global_vegetation_counts[type_key] += 1
+                    global_total_vegetation += 1
+
+                elif type_name in HYDRAULIQUE_TYPES:
+                    type_key = type_name.lower()
+                    site_by_type[type_key] += 1
+                    site_hydraulique += 1
+                    global_hydraulique_counts[type_key] += 1
+                    global_total_hydraulique += 1
+
+            # Ajouter les stats de ce site (seulement si le site a des objets)
+            site_total = site_vegetation + site_hydraulique
+            if site_total > 0:
+                by_site.append({
+                    'siteId': str(site.id),
+                    'siteName': site.nom_site or f'Site {site.id}',
+                    'total': site_total,
+                    'vegetation': site_vegetation,
+                    'hydraulique': site_hydraulique,
+                    'byType': dict(site_by_type)
+                })
+
+        return Response({
+            'totalObjets': global_total_vegetation + global_total_hydraulique,
+            'vegetation': {
+                'total': global_total_vegetation,
+                'byType': dict(global_vegetation_counts)
+            },
+            'hydraulique': {
+                'total': global_total_hydraulique,
+                'byType': dict(global_hydraulique_counts)
+            },
+            'bySite': by_site
+        })
+
 
 # ==============================================================================
 # VUES COMPETENCE

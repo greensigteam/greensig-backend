@@ -65,6 +65,32 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
             'types_taches': serializer.data
         })
 
+    @action(detail=True, methods=['get'])
+    def objets_compatibles(self, request, pk=None):
+        """
+        Retourne les types d'objets compatibles avec ce type de tâche.
+        GET /api/planification/types-taches/{id}/objets_compatibles/
+
+        Un type d'objet est compatible s'il existe un RatioProductivite actif
+        pour la combinaison (TypeTache, type_objet).
+        """
+        type_tache = self.get_object()
+
+        # Récupérer tous les ratios actifs pour ce type de tâche
+        ratios = RatioProductivite.objects.filter(
+            id_type_tache=type_tache,
+            actif=True
+        ).values_list('type_objet', flat=True).distinct()
+
+        types_objets_compatibles = list(ratios)
+
+        return Response({
+            'type_tache_id': type_tache.id,
+            'type_tache_nom': type_tache.nom_tache,
+            'nombre_types_objets': len(types_objets_compatibles),
+            'types_objets_compatibles': types_objets_compatibles
+        })
+
 class TacheViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour les tâches avec permissions automatiques:

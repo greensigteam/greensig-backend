@@ -30,6 +30,8 @@ from .views import (
     StatisticsView,
     # Export données
     ExportDataView,
+    InventoryExportExcelView,
+    InventoryExportPDFView,
     # Inventaire unifié
     InventoryListView,
     InventoryFilterOptionsView,
@@ -76,6 +78,8 @@ urlpatterns = [
     # EXPORT DONNÉES
     # ==============================================================================
     path('export/<str:model_name>/', ExportDataView.as_view(), name='export-data'),
+    path('export/inventory/excel/', InventoryExportExcelView.as_view(), name='inventory-export-excel'),
+    path('export/inventory/pdf/', InventoryExportPDFView.as_view(), name='inventory-export-pdf'),
 
     # ==============================================================================
     # IMPORT GÉOGRAPHIQUE (GeoJSON, KML, Shapefile)

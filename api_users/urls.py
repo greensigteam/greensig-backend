@@ -72,6 +72,7 @@ urlpatterns = [
 # GET    /clients/{id}/                    - Detail d'un client
 # PUT    /clients/{id}/                    - Mettre a jour un client
 # DELETE /clients/{id}/                    - Desactiver un client
+# GET    /clients/{id}/inventory-stats/    - Statistiques d'inventaire du client
 #
 # COMPETENCES (/api/users/competences/)
 # -------------------------------------

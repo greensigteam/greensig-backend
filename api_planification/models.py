@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.exceptions import ValidationError
 from api_users.models import Client, Equipe, Operateur
 from api.models import Objet
 from django.utils import timezone
@@ -136,7 +137,27 @@ class Tache(models.Model):
 
     def __str__(self):
         return f"{self.id_type_tache} - {self.date_debut_planifiee}"
-        
+
+    def clean(self):
+        """Validation métier de la tâche"""
+        super().clean()
+
+        # RÈGLE D'OR: Une tâche doit avoir lieu sur le MÊME jour calendaire
+        if self.date_debut_planifiee and self.date_fin_planifiee:
+            if self.date_debut_planifiee.date() != self.date_fin_planifiee.date():
+                raise ValidationError({
+                    'date_fin_planifiee':
+                        f"Une tâche doit obligatoirement avoir lieu sur le même jour calendaire. "
+                        f"Début: {self.date_debut_planifiee.date().strftime('%d/%m/%Y')}, "
+                        f"Fin: {self.date_fin_planifiee.date().strftime('%d/%m/%Y')}. "
+                        f"Pour planifier sur plusieurs jours, créez plusieurs tâches ou utilisez la récurrence."
+                })
+
+            if self.date_fin_planifiee < self.date_debut_planifiee:
+                raise ValidationError({
+                    'date_fin_planifiee': "La date de fin ne peut pas être antérieure à la date de début."
+                })
+
     def delete(self, using=None, keep_parents=False):
         """Soft delete implementation"""
         self.deleted_at = timezone.now()
