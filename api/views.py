@@ -39,7 +39,7 @@ class SiteListCreateView(generics.ListCreateAPIView):
         Filtrage automatique basé sur les permissions utilisateur:
         - ADMIN: voit tous les sites
         - CLIENT: voit uniquement ses sites
-        - CHEF_EQUIPE: voit uniquement les sites liés aux tâches de ses équipes
+        - SUPERVISEUR: voit uniquement les sites liés aux tâches de ses équipes
         """
         queryset = Site.objects.all().order_by('id')
         user = self.request.user
@@ -55,9 +55,9 @@ class SiteListCreateView(generics.ListCreateAPIView):
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
                 return queryset.filter(client=user.client_profile)
 
-            # CHEF_EQUIPE voit uniquement les sites liés à ses tâches
-            if 'CHEF_EQUIPE' in roles:
-                site_ids = self._get_chef_equipe_site_ids(user)
+            # SUPERVISEUR voit uniquement les sites liés à ses tâches
+            if 'SUPERVISEUR' in roles:
+                site_ids = self._get_superviseur_site_ids(user)
                 if site_ids:
                     return queryset.filter(id__in=site_ids)
                 else:
@@ -65,23 +65,20 @@ class SiteListCreateView(generics.ListCreateAPIView):
 
         return queryset
 
-    def _get_chef_equipe_site_ids(self, user):
+    def _get_superviseur_site_ids(self, user):
         """
-        Récupère les IDs des sites contenant les objets liés aux tâches du chef d'équipe.
+        Récupère les IDs des sites contenant les objets liés aux tâches du superviseur.
         Seuls les sites avec des objets dans les tâches sont retournés.
 
         OPTIMISÉ: Une seule requête SQL au lieu de N+1.
         """
-        from api_users.models import Equipe
         from api_planification.models import Tache
 
         try:
-            operateur = user.operateur_profile
-            # Équipes gérées par ce chef d'équipe
-            equipes_gerees_ids = list(Equipe.objects.filter(
-                chef_equipe=operateur,
-                actif=True
-            ).values_list('id', flat=True))
+            superviseur = user.superviseur_profile
+            # Équipes gérées par ce superviseur
+            equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
+            equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
 
             if not equipes_gerees_ids:
                 return []
@@ -620,7 +617,7 @@ class ExportPDFView(APIView):
 class StatisticsView(APIView):
     """
     Vue pour retourner les statistiques globales du système.
-    Retourne des statistiques contextuelles supplémentaires selon le rôle (CHEF_EQUIPE).
+    Retourne des statistiques contextuelles supplémentaires selon le rôle (SUPERVISEUR).
     """
     def get(self, request, *args, **kwargs):
         from django.db.models import Count, Avg, Sum, Max, Min, Q
@@ -721,43 +718,43 @@ class StatisticsView(APIView):
             }
         }
         
-        # --- LOGIQUE SPÉCIFIQUE POUR CHEF D'ÉQUIPE ---
+        # --- LOGIQUE SPÉCIFIQUE POUR SUPERVISEUR ---
         user = request.user
         if user.is_authenticated:
-            is_chef = user.roles_utilisateur.filter(role__nom_role='CHEF_EQUIPE').exists()
-            if is_chef:
+            is_superviseur = user.roles_utilisateur.filter(role__nom_role='SUPERVISEUR').exists()
+            if is_superviseur:
                 try:
                     Tache = apps.get_model('api_planification', 'Tache')
-                    Equipe = apps.get_model('api_users', 'Equipe')
                     Absence = apps.get_model('api_users', 'Absence')
-                    
-                    # Récupérer l'opérateur lié
-                    operateur = getattr(user, 'operateur_profile', None)
-                    if operateur:
-                        # Ses équipes
-                        mes_equipes_ids = Equipe.objects.filter(chef_equipe=operateur, actif=True).values_list('id', flat=True)
-                        
+
+                    # Récupérer le superviseur lié
+                    superviseur = getattr(user, 'superviseur_profile', None)
+                    if superviseur:
+                        # Ses équipes gérées
+                        mes_equipes = superviseur.equipes_gerees.filter(actif=True)
+                        mes_equipes_ids = list(mes_equipes.values_list('id', flat=True))
+
                         # Tâches de ses équipes
                         mes_taches = Tache.objects.filter(
                             Q(equipes__id__in=mes_equipes_ids) | Q(id_equipe__in=mes_equipes_ids),
                             deleted_at__isnull=True
                         ).distinct()
-                        
+
                         # Absences dans ses équipes (membres)
                         # Récupérer tous les membres de ses équipes
                         membres_ids = set()
-                        for eq in Equipe.objects.filter(id__in=mes_equipes_ids):
-                            membres_ids.update(eq.membres.values_list('id', flat=True))
-                        
+                        for eq in mes_equipes:
+                            membres_ids.update(eq.operateurs.values_list('id', flat=True))
+
                         today = timezone.now().date()
                         absences_today = Absence.objects.filter(
-                            employe__id__in=membres_ids,
+                            operateur__id__in=membres_ids,
                             date_debut__lte=today,
                             date_fin__gte=today,
                             statut='VALIDEE'
                         ).count()
-                        
-                        statistics['chef_equipe_stats'] = {
+
+                        statistics['superviseur_stats'] = {
                             'taches_today': mes_taches.filter(date_debut_planifiee__date=today).count(),
                             'taches_en_cours': mes_taches.filter(statut='EN_COURS').count(),
                             'taches_a_faire': mes_taches.filter(statut='A_FAIRE').count(),
@@ -2188,7 +2185,7 @@ class MapObjectsView(APIView):
     Permissions automatiques basées sur le rôle:
     - ADMIN: voit tout
     - CLIENT: voit uniquement ses sites et objets
-    - CHEF_EQUIPE: voit uniquement les sites/objets liés aux tâches de ses équipes
+    - SUPERVISEUR: voit uniquement les sites/objets liés aux tâches de ses équipes
 
     Endpoint: GET /api/map/
 
@@ -2222,7 +2219,7 @@ class MapObjectsView(APIView):
         user = request.user
         is_admin = False
         client_filter = None
-        chef_equipe_filter = None  # (site_ids, object_ids)
+        superviseur_filter = None  # (site_ids, object_ids)
 
         if user.is_authenticated:
             roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
@@ -2231,8 +2228,8 @@ class MapObjectsView(APIView):
                 is_admin = True
             elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
                 client_filter = user.client_profile
-            elif 'CHEF_EQUIPE' in roles:
-                chef_equipe_filter = self._get_chef_equipe_filters(user)
+            elif 'SUPERVISEUR' in roles:
+                superviseur_filter = self._get_superviseur_filters(user)
 
         # ==============================================================================
         # 1. CHARGER LES SITES (toujours tous car peu nombreux)
@@ -2244,8 +2241,8 @@ class MapObjectsView(APIView):
             if not is_admin:
                 if client_filter:
                     sites = sites.filter(client=client_filter)
-                elif chef_equipe_filter:
-                    site_ids, _ = chef_equipe_filter
+                elif superviseur_filter:
+                    site_ids, _ = superviseur_filter
                     if site_ids:
                         sites = sites.filter(id__in=site_ids)
                     else:
@@ -2325,9 +2322,9 @@ class MapObjectsView(APIView):
                         if not is_admin:
                             if client_filter:
                                 queryset = queryset.filter(site__client=client_filter)
-                            elif chef_equipe_filter:
-                                _, object_ids = chef_equipe_filter
-                                # CHEF_EQUIPE: ne voir QUE les objets directement liés aux tâches
+                            elif superviseur_filter:
+                                _, object_ids = superviseur_filter
+                                # SUPERVISEUR: ne voir QUE les objets directement liés aux tâches
                                 if object_ids:
                                     queryset = queryset.filter(objet_ptr_id__in=object_ids)
                                 else:
@@ -2355,27 +2352,24 @@ class MapObjectsView(APIView):
             'zoom': zoom
         })
 
-    def _get_chef_equipe_filters(self, user):
+    def _get_superviseur_filters(self, user):
         """
-        Récupère les IDs des sites et objets liés aux tâches du chef d'équipe.
+        Récupère les IDs des sites et objets liés aux tâches du superviseur.
         Returns: tuple (site_ids, object_ids)
 
-        Le chef d'équipe voit:
+        Le superviseur voit:
         - Les sites qui contiennent les objets de ses tâches
         - Uniquement les objets directement liés à ses tâches
 
         OPTIMISÉ: Une seule requête SQL au lieu de N+1.
         """
-        from api_users.models import Equipe
         from api_planification.models import Tache
 
         try:
-            operateur = user.operateur_profile
-            # Équipes gérées par ce chef d'équipe
-            equipes_gerees_ids = list(Equipe.objects.filter(
-                chef_equipe=operateur,
-                actif=True
-            ).values_list('id', flat=True))
+            superviseur = user.superviseur_profile
+            # Équipes gérées par ce superviseur
+            equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
+            equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
 
             if not equipes_gerees_ids:
                 return ([], [])

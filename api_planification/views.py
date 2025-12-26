@@ -96,7 +96,7 @@ class TacheViewSet(viewsets.ModelViewSet):
     ViewSet pour les tâches avec permissions automatiques:
     - ADMIN: voit toutes les tâches
     - CLIENT: voit uniquement les tâches de ses sites
-    - CHEF_EQUIPE: voit uniquement les tâches assignées à ses équipes
+    - SUPERVISEUR: voit uniquement les tâches assignées à ses équipes
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -111,15 +111,17 @@ class TacheViewSet(viewsets.ModelViewSet):
         qs = qs.select_related(
             'id_client__utilisateur',
             'id_type_tache',
-            'id_equipe__chef_equipe__utilisateur',
+            'id_equipe__chef_equipe',
+            'id_equipe__superviseur__utilisateur',
             'reclamation'
         )
 
         # Prefetch optimisé pour les équipes avec leurs opérateurs (pour nombre_membres)
         equipes_qs = Equipe.objects.select_related(
-            'chef_equipe__utilisateur'
+            'chef_equipe',
+            'superviseur__utilisateur'
         ).prefetch_related(
-            'operateurs__utilisateur'
+            'operateurs'
         )
 
         qs = qs.prefetch_related(
@@ -129,7 +131,7 @@ class TacheViewSet(viewsets.ModelViewSet):
             'objets__site',
             'objets__sous_site',
             # Prefetch pour les participations
-            'participations__id_operateur__utilisateur',
+            'participations__id_operateur',
             # Prefetch pour les rôles de l'utilisateur client (évite N+1 dans UtilisateurSerializer)
             'id_client__utilisateur__roles_utilisateur__role'
         )
@@ -145,21 +147,18 @@ class TacheViewSet(viewsets.ModelViewSet):
                 if 'CLIENT' in roles and hasattr(user, 'client_profile'):
                     qs = qs.filter(id_client=user.client_profile)
 
-                # CHEF_EQUIPE voit uniquement les tâches de ses équipes
-                elif 'CHEF_EQUIPE' in roles:
+                # SUPERVISEUR voit uniquement les tâches de ses équipes
+                elif 'SUPERVISEUR' in roles:
                     try:
-                        from api_users.models import Equipe
-                        operateur = user.operateur_profile
-                        equipes_gerees_ids = list(Equipe.objects.filter(
-                            chef_equipe=operateur,
-                            actif=True
-                        ).values_list('id', flat=True))
+                        superviseur = user.superviseur_profile
+                        equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
+                        equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
 
                         if equipes_gerees_ids:
                             q_filter = Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
                             qs = qs.filter(q_filter).distinct()
                         else:
-                            # Chef d'équipe sans équipes gérées - retourner aucune tâche
+                            # Superviseur sans équipes gérées - retourner aucune tâche
                             qs = qs.none()
                     except Exception:
                         # Si pas d'opérateur profile, retourner aucune tâche

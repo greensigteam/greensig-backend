@@ -16,22 +16,18 @@ class MeView(APIView):
         ).get(pk=request.user.pk)
 
         roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-        # Si l'utilisateur n'a qu'un seul rôle et que c'est OPERATEUR, refuser l'accès
-        if len(roles) == 1 and roles[0] == 'OPERATEUR':
-            return Response({'detail': "Accès refusé : vous n'avez pas les droits nécessaires."}, status=403)
         serializer = UtilisateurSerializer(user)
         data = serializer.data
 
-        # Si l'utilisateur est chef d'équipe, ajouter les équipes qu'il gère
-        if 'CHEF_EQUIPE' in roles:
+        # Si l'utilisateur est superviseur, ajouter les équipes qu'il gère
+        if 'SUPERVISEUR' in roles:
             try:
-                operateur = user.operateur_profile
-                equipes_gerees = Equipe.objects.filter(
-                    chef_equipe=operateur,
+                superviseur = user.superviseur_profile
+                equipes_gerees = superviseur.equipes_gerees.filter(
                     actif=True
                 ).values('id', 'nom_equipe')
                 data['equipes_gerees'] = list(equipes_gerees)
-            except Operateur.DoesNotExist:
+            except AttributeError:  # Pas de profil superviseur
                 data['equipes_gerees'] = []
 
         return Response(data)
@@ -55,7 +51,7 @@ from django.utils import timezone
 from django.db.models import Q, Count
 
 from .models import (
-    Utilisateur, Role, UtilisateurRole, Client, Operateur,
+    Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
     HistoriqueEquipeOperateur, StatutAbsence, NiveauCompetence
 )
@@ -63,6 +59,7 @@ from .serializers import (
     UtilisateurSerializer, UtilisateurCreateSerializer, UtilisateurUpdateSerializer,
     ChangePasswordSerializer, RoleSerializer, UtilisateurRoleSerializer,
     ClientSerializer, ClientCreateSerializer,
+    SuperviseurSerializer, SuperviseurCreateSerializer,
     CompetenceSerializer, CompetenceOperateurSerializer, CompetenceOperateurUpdateSerializer,
     OperateurListSerializer, OperateurDetailSerializer,
     OperateurCreateSerializer, OperateurUpdateSerializer,
@@ -75,6 +72,12 @@ from .filters import (
     UtilisateurFilter, OperateurFilter, EquipeFilter, AbsenceFilter,
     CompetenceFilter, HistoriqueEquipeFilter
 )
+from .permissions import (
+    IsAdmin, IsSuperviseur, IsClient,
+    IsSuperviseurAndOwnsOperateur, IsSuperviseurAndOwnsEquipe,
+    IsAdminOrReadOnly, IsSelfOrAdmin
+)
+from .mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin
 
 
 # ==============================================================================
@@ -333,6 +336,132 @@ class ClientViewSet(viewsets.ModelViewSet):
 
 
 # ==============================================================================
+# VUES SUPERVISEUR
+# ==============================================================================
+
+class SuperviseurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des superviseurs.
+
+    Utilise le système de permissions unifié :
+    - ADMIN : Accès complet (CRUD)
+    - SUPERVISEUR : Lecture seule sur son propre profil
+    - CLIENT : Aucun accès
+
+    Le filtrage automatique est géré par RoleBasedQuerySetMixin.
+    """
+    queryset = Superviseur.objects.select_related('utilisateur').prefetch_related(
+        'utilisateur__roles_utilisateur__role',
+        'equipes_gerees',
+        'operateurs_supervises'
+    ).all()
+
+    # Permissions par action (utilise RoleBasedPermissionMixin)
+    permission_classes_by_action = {
+        'create': [IsAdmin],
+        'update': [IsAdmin | IsSelfOrAdmin],
+        'partial_update': [IsAdmin | IsSelfOrAdmin],
+        'destroy': [IsAdmin],
+        'default': [IsAdmin | IsSuperviseur],  # Lecture pour ADMIN et SUPERVISEUR
+    }
+
+    def get_serializer_class(self):
+        """Retourne le serializer approprié selon l'action."""
+        if self.action == 'create':
+            return SuperviseurCreateSerializer
+        return SuperviseurSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft delete : désactive l'utilisateur superviseur."""
+        instance = self.get_object()
+        instance.utilisateur.actif = False
+        instance.utilisateur.save()
+        return Response(
+            {'message': 'Superviseur désactivé avec succès.'},
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['get'])
+    def equipes(self, request, pk=None):
+        """Liste les équipes gérées par ce superviseur."""
+        superviseur = self.get_object()
+        equipes = superviseur.equipes_gerees.filter(actif=True)
+        serializer = EquipeListSerializer(equipes, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def operateurs(self, request, pk=None):
+        """Liste les opérateurs supervisés par ce superviseur."""
+        superviseur = self.get_object()
+        operateurs = superviseur.operateurs_supervises.filter(statut='ACTIF')
+        serializer = OperateurListSerializer(operateurs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def statistiques(self, request, pk=None):
+        """Retourne les statistiques du superviseur."""
+        superviseur = self.get_object()
+        today = timezone.now().date()
+
+        # Statistiques équipes
+        equipes_actives = superviseur.equipes_gerees.filter(actif=True)
+
+        # Statistiques opérateurs
+        operateurs_actifs = superviseur.operateurs_supervises.filter(statut='ACTIF')
+        operateurs_disponibles = operateurs_actifs.exclude(
+            absences__statut=StatutAbsence.VALIDEE,
+            absences__date_debut__lte=today,
+            absences__date_fin__gte=today
+        ).distinct()
+
+        # Absences en attente de validation
+        absences_en_attente = Absence.objects.filter(
+            operateur__superviseur=superviseur,
+            statut=StatutAbsence.DEMANDEE
+        ).count()
+
+        # Absences en cours
+        absences_en_cours = Absence.objects.filter(
+            operateur__superviseur=superviseur,
+            statut=StatutAbsence.VALIDEE,
+            date_debut__lte=today,
+            date_fin__gte=today
+        ).count()
+
+        return Response({
+            'superviseur': SuperviseurSerializer(superviseur).data,
+            'equipes': {
+                'total': equipes_actives.count(),
+                'actives': equipes_actives.count(),
+            },
+            'operateurs': {
+                'total': operateurs_actifs.count(),
+                'disponibles': operateurs_disponibles.count(),
+                'absents': operateurs_actifs.count() - operateurs_disponibles.count(),
+            },
+            'absences': {
+                'en_attente': absences_en_attente,
+                'en_cours': absences_en_cours,
+            }
+        })
+
+    @action(detail=False, methods=['get'])
+    def me(self, request):
+        """Retourne le profil du superviseur connecté."""
+        user = request.user
+
+        if not hasattr(user, 'superviseur_profile'):
+            return Response(
+                {'error': 'Vous n\'avez pas de profil superviseur.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        superviseur = user.superviseur_profile
+        serializer = SuperviseurSerializer(superviseur)
+        return Response(serializer.data)
+
+
+# ==============================================================================
 # VUES COMPETENCE
 # ==============================================================================
 
@@ -389,38 +518,37 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
     Permissions:
     - ADMIN: accès complet à tous les opérateurs
-    - CHEF_EQUIPE: lecture seule sur les opérateurs de ses équipes
+    - SUPERVISEUR: lecture seule sur les opérateurs de ses équipes
     """
     queryset = Operateur.objects.select_related(
-        'utilisateur', 'equipe'
+        'superviseur__utilisateur', 'equipe'
     ).prefetch_related('competences_operateur__competence').all()
     filterset_class = OperateurFilter
 
-    def _is_chef_equipe_only(self):
-        """Vérifie si l'utilisateur est uniquement CHEF_EQUIPE (pas ADMIN)."""
+    def _is_superviseur_only(self):
+        """Vérifie si l'utilisateur est uniquement SUPERVISEUR (pas ADMIN)."""
         user = self.request.user
         if user.is_authenticated:
             roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-            return 'CHEF_EQUIPE' in roles and 'ADMIN' not in roles
+            return 'SUPERVISEUR' in roles and 'ADMIN' not in roles
         return False
 
     def _get_equipes_gerees_ids(self):
-        """Retourne les IDs des équipes gérées par le CHEF_EQUIPE connecté."""
+        """Retourne les IDs des équipes gérées par le SUPERVISEUR connecté."""
         user = self.request.user
         try:
-            operateur = user.operateur_profile
-            return list(Equipe.objects.filter(
-                chef_equipe=operateur,
+            superviseur = user.superviseur_profile
+            return list(superviseur.equipes_gerees.filter(
                 actif=True
             ).values_list('id', flat=True))
-        except Operateur.DoesNotExist:
+        except AttributeError:  # Pas de profil superviseur
             return []
 
     def get_queryset(self):
         """
         Filtre les opérateurs selon le rôle de l'utilisateur.
         - ADMIN: voit tous les opérateurs
-        - CHEF_EQUIPE: voit uniquement les opérateurs de ses équipes
+        - SUPERVISEUR: voit uniquement les opérateurs de ses équipes
         """
         qs = super().get_queryset()
         user = self.request.user
@@ -432,8 +560,8 @@ class OperateurViewSet(viewsets.ModelViewSet):
             if 'ADMIN' in roles:
                 return qs
 
-            # CHEF_EQUIPE voit uniquement les opérateurs de ses équipes
-            if 'CHEF_EQUIPE' in roles:
+            # SUPERVISEUR voit uniquement les opérateurs de ses équipes
+            if 'SUPERVISEUR' in roles:
                 equipes_ids = self._get_equipes_gerees_ids()
                 if equipes_ids:
                     return qs.filter(equipe_id__in=equipes_ids)
@@ -452,55 +580,28 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         """
-        Liste les opérateurs existants MAIS inclut aussi les `Utilisateur`
-        qui ont le rôle `OPERATEUR` sans profil `Operateur`.
-        Cela permet d'afficher dans la page RH les users qui se sont attribués
-        le rôle sans avoir de profil technique.
+        Liste les opérateurs (table HR uniquement).
 
-        Note: CHEF_EQUIPE ne voit que les opérateurs de ses équipes (via get_queryset).
+        Dans la nouvelle architecture:
+        - Operateur est une table HR sans lien avec Utilisateur
+        - SUPERVISEUR ne voit que les opérateurs de ses équipes (via get_queryset)
+        - ADMIN voit tous les opérateurs
         """
-        # opérateurs avec profil
+        # Liste les opérateurs (table HR uniquement, sans lien avec Utilisateur)
         qs_operateurs = self.filter_queryset(self.get_queryset())
         serializer = OperateurListSerializer(qs_operateurs, many=True)
-        data = list(serializer.data)
 
-        # Pour ADMIN uniquement: inclure les utilisateurs sans profil Operateur
-        # CHEF_EQUIPE ne doit pas voir ces utilisateurs orphelins
-        if not self._is_chef_equipe_only():
-            users_without_profile = Utilisateur.objects.filter(
-                roles_utilisateur__role__nom_role='OPERATEUR',
-                actif=True
-            ).filter(operateur_profile__isnull=True).distinct()
-
-            for u in users_without_profile:
-                data.append({
-                    'utilisateur': u.id,
-                    'email': u.email,
-                    'nom': u.nom,
-                    'prenom': u.prenom,
-                    'full_name': u.get_full_name(),
-                    'actif': u.actif,
-                    'numero_immatriculation': None,
-                    'statut': None,
-                    'equipe': None,
-                    'equipe_nom': None,
-                    'date_embauche': None,
-                    'telephone': None,
-                    'photo': None,
-                    'est_chef_equipe': False,
-                    'est_disponible': False
-                })
-
-        # pagination manuelle si configurée
-        page = self.paginate_queryset(data)
+        # Pagination standard
+        page = self.paginate_queryset(qs_operateurs)
         if page is not None:
-            return self.get_paginated_response(page)
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
 
-        return Response(data)
+        return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas créer d'opérateur."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas créer d'opérateur."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour créer un opérateur.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -508,8 +609,8 @@ class OperateurViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas modifier un opérateur."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas modifier un opérateur."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier un opérateur.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -517,8 +618,8 @@ class OperateurViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas modifier un opérateur."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas modifier un opérateur."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier un opérateur.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -530,9 +631,9 @@ class OperateurViewSet(viewsets.ModelViewSet):
         Soft delete: désactive l'opérateur.
 
         Vérifie s'il est chef d'équipe et avertit si nécessaire.
-        CHEF_EQUIPE ne peut pas supprimer d'opérateur.
+        SUPERVISEUR ne peut pas supprimer d'opérateur.
         """
-        if self._is_chef_equipe_only():
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour supprimer un opérateur.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -563,9 +664,9 @@ class OperateurViewSet(viewsets.ModelViewSet):
             instance.equipe = None
             instance.save()
 
-        # Désactiver l'utilisateur
-        instance.utilisateur.actif = False
-        instance.utilisateur.save()
+        # Désactiver l'opérateur (changer statut)
+        instance.statut = 'INACTIF'
+        instance.save()
 
         return Response(
             {'message': 'Opérateur désactivé avec succès.'},
@@ -584,8 +685,8 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def affecter_competence(self, request, pk=None):
-        """Affecte ou met à jour une compétence pour un opérateur. CHEF_EQUIPE lecture seule."""
-        if self._is_chef_equipe_only():
+        """Affecte ou met à jour une compétence pour un opérateur. SUPERVISEUR lecture seule."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour affecter des compétences.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -621,8 +722,8 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['put'])
     def modifier_niveau_competence(self, request, pk=None):
-        """Modifie le niveau d'une compétence existante. CHEF_EQUIPE lecture seule."""
-        if self._is_chef_equipe_only():
+        """Modifie le niveau d'une compétence existante. SUPERVISEUR lecture seule."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier les compétences.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -678,7 +779,6 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
         # Opérateurs actifs sans absence validée aujourd'hui
         operateurs = self.get_queryset().filter(
-            utilisateur__actif=True,
             statut='ACTIF'
         ).exclude(
             absences__statut=StatutAbsence.VALIDEE,
@@ -693,7 +793,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
     def chefs_potentiels(self, request):
         """Liste les opérateurs pouvant être chef d'équipe."""
         operateurs = self.get_queryset().filter(
-            utilisateur__actif=True,
+            statut='ACTIF',
             competences_operateur__competence__nom_competence="Gestion d'equipe",
             competences_operateur__niveau__in=[
                 NiveauCompetence.INTERMEDIAIRE,
@@ -712,7 +812,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
         niveau_minimum = request.query_params.get('niveau_minimum')
         disponible_uniquement = request.query_params.get('disponible_uniquement', 'false').lower() == 'true'
 
-        queryset = self.get_queryset().filter(utilisateur__actif=True)
+        queryset = self.get_queryset().filter(statut='ACTIF')
 
         # Filtrer par compétence
         if competence_id:
@@ -765,18 +865,18 @@ class EquipeViewSet(viewsets.ModelViewSet):
 
     Permissions:
     - ADMIN: accès complet
-    - CHEF_EQUIPE: lecture seule sur ses équipes uniquement
+    - SUPERVISEUR: lecture seule sur ses équipes uniquement
     """
     queryset = Equipe.objects.select_related(
-        'chef_equipe__utilisateur'
-    ).prefetch_related('operateurs__utilisateur').all()
+        'chef_equipe', 'superviseur__utilisateur'
+    ).prefetch_related('operateurs').all()
     filterset_class = EquipeFilter
 
     def get_queryset(self):
         """
         Filtre les équipes selon le rôle de l'utilisateur.
         - ADMIN: voit toutes les équipes
-        - CHEF_EQUIPE: voit uniquement les équipes qu'il dirige
+        - SUPERVISEUR: voit uniquement les équipes qu'il gère
         """
         qs = super().get_queryset()
         user = self.request.user
@@ -788,27 +888,27 @@ class EquipeViewSet(viewsets.ModelViewSet):
             if 'ADMIN' in roles:
                 return qs
 
-            # CHEF_EQUIPE voit uniquement ses équipes
-            if 'CHEF_EQUIPE' in roles:
+            # SUPERVISEUR voit uniquement ses équipes
+            if 'SUPERVISEUR' in roles:
                 try:
-                    operateur = user.operateur_profile
-                    return qs.filter(chef_equipe=operateur, actif=True)
-                except Operateur.DoesNotExist:
+                    superviseur = user.superviseur_profile
+                    return qs.filter(superviseur=superviseur, actif=True)
+                except AttributeError:  # Pas de profil superviseur
                     return qs.none()
 
         return qs
 
-    def _is_chef_equipe_only(self):
-        """Vérifie si l'utilisateur est uniquement CHEF_EQUIPE (pas ADMIN)."""
+    def _is_superviseur_only(self):
+        """Vérifie si l'utilisateur est uniquement SUPERVISEUR (pas ADMIN)."""
         user = self.request.user
         if user.is_authenticated:
             roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-            return 'CHEF_EQUIPE' in roles and 'ADMIN' not in roles
+            return 'SUPERVISEUR' in roles and 'ADMIN' not in roles
         return False
 
     def create(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas créer d'équipe."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas créer d'équipe."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour créer une équipe.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -816,8 +916,8 @@ class EquipeViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas modifier d'équipe."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas modifier d'équipe."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier une équipe.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -825,8 +925,8 @@ class EquipeViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas modifier d'équipe."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas modifier d'équipe."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier une équipe.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -843,8 +943,8 @@ class EquipeViewSet(viewsets.ModelViewSet):
         return EquipeListSerializer
 
     def destroy(self, request, *args, **kwargs):
-        """Désactive une équipe au lieu de la supprimer. CHEF_EQUIPE ne peut pas supprimer."""
-        if self._is_chef_equipe_only():
+        """Désactive une équipe au lieu de la supprimer. SUPERVISEUR ne peut pas supprimer."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour supprimer une équipe.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -861,14 +961,14 @@ class EquipeViewSet(viewsets.ModelViewSet):
     def membres(self, request, pk=None):
         """Liste les membres d'une équipe."""
         equipe = self.get_object()
-        membres = equipe.operateurs.filter(utilisateur__actif=True)
+        membres = equipe.operateurs.filter(statut='ACTIF')
         serializer = OperateurListSerializer(membres, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def affecter_membres(self, request, pk=None):
-        """Affecte des membres à une équipe. CHEF_EQUIPE ne peut pas affecter."""
-        if self._is_chef_equipe_only():
+        """Affecte des membres à une équipe. SUPERVISEUR ne peut pas affecter."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour affecter des membres.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -883,8 +983,8 @@ class EquipeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def retirer_membre(self, request, pk=None):
-        """Retire un membre d'une équipe. CHEF_EQUIPE ne peut pas retirer."""
-        if self._is_chef_equipe_only():
+        """Retire un membre d'une équipe. SUPERVISEUR ne peut pas retirer."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour retirer des membres.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -932,9 +1032,9 @@ class EquipeViewSet(viewsets.ModelViewSet):
             date_fin__gte=today
         )
         membres = equipe.operateurs.filter(
-            utilisateur__actif=True
+            statut='ACTIF'
         ).select_related(
-            'utilisateur', 'equipe'
+            'equipe'
         ).prefetch_related(
             Prefetch('absences', queryset=absences_en_cours, to_attr='absences_actuelles')
         )
@@ -971,7 +1071,7 @@ class EquipeViewSet(viewsets.ModelViewSet):
         equipe = self.get_object()
         historique = HistoriqueEquipeOperateur.objects.filter(
             equipe=equipe
-        ).select_related('operateur__utilisateur')
+        ).select_related('operateur', 'equipe')
         serializer = HistoriqueEquipeOperateurSerializer(historique, many=True)
         return Response(serializer.data)
 
@@ -990,25 +1090,25 @@ class AbsenceViewSet(viewsets.ModelViewSet):
     - Impact sur les équipes
     """
     queryset = Absence.objects.select_related(
-        'operateur__utilisateur',
+        'operateur',
         'operateur__equipe',
         'validee_par'
     ).all()
     filterset_class = AbsenceFilter
 
-    def _is_chef_equipe_only(self):
-        """Vérifie si l'utilisateur est uniquement CHEF_EQUIPE (pas ADMIN)."""
+    def _is_superviseur_only(self):
+        """Vérifie si l'utilisateur est uniquement SUPERVISEUR (pas ADMIN)."""
         user = self.request.user
         if user.is_authenticated:
             roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-            return 'CHEF_EQUIPE' in roles and 'ADMIN' not in roles
+            return 'SUPERVISEUR' in roles and 'ADMIN' not in roles
         return False
 
     def get_queryset(self):
         """
         Filtre les absences selon le rôle de l'utilisateur.
         - ADMIN: voit toutes les absences
-        - CHEF_EQUIPE: voit uniquement les absences des opérateurs de ses équipes
+        - SUPERVISEUR: voit uniquement les absences des opérateurs de ses équipes
         """
         qs = super().get_queryset()
         user = self.request.user
@@ -1019,14 +1119,14 @@ class AbsenceViewSet(viewsets.ModelViewSet):
             if 'ADMIN' in roles:
                 return qs
 
-            if 'CHEF_EQUIPE' in roles:
+            if 'SUPERVISEUR' in roles:
                 try:
-                    operateur = user.operateur_profile
-                    # Équipes que l'utilisateur dirige
-                    equipes_ids = list(operateur.equipes_dirigees.filter(actif=True).values_list('id', flat=True))
+                    superviseur = user.superviseur_profile
+                    # Équipes que le superviseur gère
+                    equipes_ids = list(superviseur.equipes_gerees.filter(actif=True).values_list('id', flat=True))
                     # Absences d'opérateurs dans ces équipes
                     return qs.filter(operateur__equipe_id__in=equipes_ids)
-                except Operateur.DoesNotExist:
+                except AttributeError:  # Pas de profil superviseur
                     return qs.none()
 
         return qs
@@ -1037,8 +1137,8 @@ class AbsenceViewSet(viewsets.ModelViewSet):
         return AbsenceSerializer
 
     def create(self, request, *args, **kwargs):
-        """CHEF_EQUIPE ne peut pas créer d'absence via ce ViewSet."""
-        if self._is_chef_equipe_only():
+        """SUPERVISEUR ne peut pas créer d'absence via ce ViewSet."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour créer une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1046,7 +1146,7 @@ class AbsenceViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
-        if self._is_chef_equipe_only():
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1054,7 +1154,7 @@ class AbsenceViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        if self._is_chef_equipe_only():
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour modifier une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1062,7 +1162,7 @@ class AbsenceViewSet(viewsets.ModelViewSet):
         return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if self._is_chef_equipe_only():
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour supprimer une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1071,8 +1171,8 @@ class AbsenceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
-        """Valide une absence. CHEF_EQUIPE ne peut pas valider."""
-        if self._is_chef_equipe_only():
+        """Valide une absence. SUPERVISEUR ne peut pas valider."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour valider une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1095,8 +1195,8 @@ class AbsenceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def refuser(self, request, pk=None):
-        """Refuse une absence. CHEF_EQUIPE ne peut pas refuser."""
-        if self._is_chef_equipe_only():
+        """Refuse une absence. SUPERVISEUR ne peut pas refuser."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour refuser une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1118,8 +1218,8 @@ class AbsenceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
-        """Annule une absence. CHEF_EQUIPE ne peut pas annuler."""
-        if self._is_chef_equipe_only():
+        """Annule une absence. SUPERVISEUR ne peut pas annuler."""
+        if self._is_superviseur_only():
             return Response(
                 {'error': 'Vous n\'avez pas les droits pour annuler une absence.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -1194,10 +1294,11 @@ class HistoriqueRHView(APIView):
     """
 
     def _get_equipes_gerees_ids(self, user):
-        """Retourne les IDs des équipes que l'utilisateur dirige."""
+        """Retourne les IDs des équipes que le superviseur gère."""
         try:
-            return list(user.operateur_profile.equipes_dirigees.filter(actif=True).values_list('id', flat=True))
-        except (Operateur.DoesNotExist, AttributeError):
+            superviseur = user.superviseur_profile
+            return list(superviseur.equipes_gerees.filter(actif=True).values_list('id', flat=True))
+        except AttributeError:  # Pas de profil superviseur
             return []
 
     def get(self, request):
@@ -1207,8 +1308,8 @@ class HistoriqueRHView(APIView):
         user = request.user
         roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
         is_admin = 'ADMIN' in roles
-        is_chef = 'CHEF_EQUIPE' in roles
-        equipes_gerees_ids = self._get_equipes_gerees_ids(user) if is_chef else []
+        is_superviseur = 'SUPERVISEUR' in roles
+        equipes_gerees_ids = self._get_equipes_gerees_ids(user) if is_superviseur else []
 
         operateur_id = request.query_params.get('operateur_id')
         equipe_id = request.query_params.get('equipe_id')
@@ -1221,11 +1322,11 @@ class HistoriqueRHView(APIView):
         # Historique des équipes
         if type_historique in ['equipes', 'all']:
             hist_equipes = HistoriqueEquipeOperateur.objects.select_related(
-                'operateur__utilisateur', 'equipe'
+                'operateur', 'equipe'
             )
 
             # Filtrage par rôle
-            if not is_admin and is_chef:
+            if not is_admin and is_superviseur:
                 hist_equipes = hist_equipes.filter(equipe_id__in=equipes_gerees_ids)
             elif not is_admin:
                 hist_equipes = hist_equipes.none()
@@ -1248,11 +1349,11 @@ class HistoriqueRHView(APIView):
         # Historique des absences
         if type_historique in ['absences', 'all']:
             absences = Absence.objects.select_related(
-                'operateur__utilisateur', 'validee_par'
+                'operateur', 'validee_par'
             )
 
             # Filtrage par rôle
-            if not is_admin and is_chef:
+            if not is_admin and is_superviseur:
                 absences = absences.filter(operateur__equipe_id__in=equipes_gerees_ids)
             elif not is_admin:
                 absences = absences.none()
@@ -1269,11 +1370,11 @@ class HistoriqueRHView(APIView):
         # Historique des compétences
         if type_historique in ['competences', 'all']:
             competences = CompetenceOperateur.objects.select_related(
-                'operateur__utilisateur', 'competence'
+                'operateur', 'competence'
             )
 
             # Filtrage par rôle
-            if not is_admin and is_chef:
+            if not is_admin and is_superviseur:
                 competences = competences.filter(operateur__equipe_id__in=equipes_gerees_ids)
             elif not is_admin:
                 competences = competences.none()
@@ -1311,8 +1412,8 @@ class StatistiquesUtilisateursView(APIView):
         }
 
         # Statistiques opérateurs
-        operateurs_actifs = Operateur.objects.filter(utilisateur__actif=True)
-        operateurs_disponibles = operateurs_actifs.filter(statut='ACTIF').exclude(
+        operateurs_actifs = Operateur.objects.filter(statut='ACTIF')
+        operateurs_disponibles = operateurs_actifs.exclude(
             absences__statut=StatutAbsence.VALIDEE,
             absences__date_debut__lte=today,
             absences__date_fin__gte=today
@@ -1324,7 +1425,7 @@ class StatistiquesUtilisateursView(APIView):
             'disponibles_aujourdhui': operateurs_disponibles,
             'par_statut': dict(
                 Operateur.objects.values('statut')
-                .annotate(count=Count('utilisateur'))
+                .annotate(count=Count('id'))
                 .values_list('statut', 'count')
             ),
             'chefs_equipe': Operateur.objects.filter(

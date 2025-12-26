@@ -369,8 +369,8 @@ class AbsenceFilter(django_filters.FilterSet):
         """Recherche dans operateur et motif."""
         if value:
             return queryset.filter(
-                Q(operateur__utilisateur__nom__icontains=value) |
-                Q(operateur__utilisateur__prenom__icontains=value) |
+                Q(operateur__nom__icontains=value) |
+                Q(operateur__prenom__icontains=value) |
                 Q(motif__icontains=value)
             )
         return queryset

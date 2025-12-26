@@ -3,9 +3,10 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    UtilisateurViewSet, RoleViewSet, ClientViewSet,
+    UtilisateurViewSet, RoleViewSet, ClientViewSet, SuperviseurViewSet,
     CompetenceViewSet, OperateurViewSet, EquipeViewSet,
-    AbsenceViewSet, HistoriqueRHView, StatistiquesUtilisateursView
+    AbsenceViewSet, HistoriqueRHView, StatistiquesUtilisateursView,
+    MeView
 )
 
 # Configuration du routeur DRF
@@ -13,22 +14,13 @@ router = DefaultRouter()
 router.register(r'utilisateurs', UtilisateurViewSet, basename='utilisateur')
 router.register(r'roles', RoleViewSet, basename='role')
 router.register(r'clients', ClientViewSet, basename='client')
+router.register(r'superviseurs', SuperviseurViewSet, basename='superviseur')
 router.register(r'competences', CompetenceViewSet, basename='competence')
 router.register(r'operateurs', OperateurViewSet, basename='operateur')
 router.register(r'equipes', EquipeViewSet, basename='equipe')
 router.register(r'absences', AbsenceViewSet, basename='absence')
 
 app_name = 'api_users'
-
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-
-from .views import (
-    UtilisateurViewSet, RoleViewSet, ClientViewSet,
-    CompetenceViewSet, OperateurViewSet, EquipeViewSet,
-    AbsenceViewSet, HistoriqueRHView, StatistiquesUtilisateursView,
-    MeView
-)
 
 urlpatterns = [
     # Routes du routeur DRF
@@ -73,6 +65,18 @@ urlpatterns = [
 # PUT    /clients/{id}/                    - Mettre a jour un client
 # DELETE /clients/{id}/                    - Desactiver un client
 # GET    /clients/{id}/inventory-stats/    - Statistiques d'inventaire du client
+#
+# SUPERVISEURS (/api/users/superviseurs/)
+# ---------------------------------------
+# GET    /superviseurs/                    - Liste des superviseurs
+# POST   /superviseurs/                    - Creer un superviseur (ADMIN uniquement)
+# GET    /superviseurs/{id}/               - Detail d'un superviseur
+# PUT    /superviseurs/{id}/               - Mettre a jour un superviseur (ADMIN ou lui-meme)
+# DELETE /superviseurs/{id}/               - Desactiver un superviseur (ADMIN uniquement)
+# GET    /superviseurs/{id}/equipes/       - Equipes gerees par le superviseur
+# GET    /superviseurs/{id}/operateurs/    - Operateurs supervises
+# GET    /superviseurs/{id}/statistiques/  - Statistiques du superviseur
+# GET    /superviseurs/me/                 - Profil du superviseur connecte
 #
 # COMPETENCES (/api/users/competences/)
 # -------------------------------------
