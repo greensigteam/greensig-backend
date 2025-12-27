@@ -17,6 +17,7 @@ class SiteSerializer(GeoFeatureModelSerializer):
     centroid = GeometryField(read_only=True)  # Auto-calculated from geometrie_emprise
     code_site = serializers.CharField(read_only=True)  # Auto-generated
     client_nom = serializers.SerializerMethodField()
+    superviseur_nom = serializers.SerializerMethodField()
     superficie_calculee = serializers.SerializerMethodField()
 
     class Meta:
@@ -25,12 +26,20 @@ class SiteSerializer(GeoFeatureModelSerializer):
         fields = (
             'id', 'nom_site', 'adresse', 'superficie_totale', 'superficie_calculee', 'code_site',
             'client', 'client_nom',
+            'superviseur', 'superviseur_nom',
             'date_debut_contrat', 'date_fin_contrat', 'actif', 'centroid'
         )
 
     def get_client_nom(self, obj):
         """Return client name or None if no client assigned"""
         return obj.client.nom_structure if obj.client else None
+
+    def get_superviseur_nom(self, obj):
+        """Return superviseur full name or None if no superviseur assigned"""
+        if obj.superviseur and obj.superviseur.utilisateur:
+            user = obj.superviseur.utilisateur
+            return f"{user.prenom} {user.nom}" if user.prenom and user.nom else user.email
+        return None
 
     def get_superficie_calculee(self, obj):
         """Calculate surface area from geometrie_emprise polygon (in square meters)"""
