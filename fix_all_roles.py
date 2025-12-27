@@ -99,23 +99,23 @@ def fix_all_roles():
     
     # Trouver tous les opérateurs qui sont chefs d'équipe
     from api_users.models import Equipe
-    chefs = Operateur.objects.filter(equipes_dirigees__actif=True).distinct()
+    chefs = Operateur.objects.filter(equipe_dirigee__actif=True).distinct()
     print(f"Nombre total de chefs d'équipe: {chefs.count()}")
-    
+
     chef_fixed = 0
     for chef in chefs:
         has_role = UtilisateurRole.objects.filter(
             utilisateur=chef.utilisateur,
             role=role_chef
         ).exists()
-        
+
         if not has_role:
             UtilisateurRole.objects.create(
                 utilisateur=chef.utilisateur,
                 role=role_chef
             )
-            equipes = chef.equipes_dirigees.filter(actif=True)
-            equipes_noms = ", ".join([e.nom_equipe for e in equipes])
+            equipe = chef.equipe_dirigee
+            equipes_noms = equipe.nom_equipe if equipe else ""
             print(f"✓ Rôle CHEF_EQUIPE attribué à: {chef.utilisateur.get_full_name()} ({equipes_noms})")
             chef_fixed += 1
         else:

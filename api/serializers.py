@@ -17,12 +17,13 @@ class SiteSerializer(GeoFeatureModelSerializer):
     centroid = GeometryField(read_only=True)  # Auto-calculated from geometrie_emprise
     code_site = serializers.CharField(read_only=True)  # Auto-generated
     client_nom = serializers.SerializerMethodField()
+    superficie_calculee = serializers.SerializerMethodField()
 
     class Meta:
         model = Site
         geo_field = "geometrie_emprise"
         fields = (
-            'id', 'nom_site', 'adresse', 'superficie_totale', 'code_site',
+            'id', 'nom_site', 'adresse', 'superficie_totale', 'superficie_calculee', 'code_site',
             'client', 'client_nom',
             'date_debut_contrat', 'date_fin_contrat', 'actif', 'centroid'
         )
@@ -30,6 +31,21 @@ class SiteSerializer(GeoFeatureModelSerializer):
     def get_client_nom(self, obj):
         """Return client name or None if no client assigned"""
         return obj.client.nom_structure if obj.client else None
+
+    def get_superficie_calculee(self, obj):
+        """Calculate surface area from geometrie_emprise polygon (in square meters)"""
+        if not obj.geometrie_emprise:
+            return None
+        try:
+            # Transform to projected CRS for accurate area calculation
+            from django.contrib.gis.geos import GEOSGeometry
+            geom = obj.geometrie_emprise
+            # Transform from WGS84 (4326) to Web Mercator (3857) for area calculation
+            geom_projected = geom.transform(3857, clone=True)
+            area_sqm = geom_projected.area  # Area in square meters
+            return round(area_sqm, 2)
+        except Exception:
+            return None
 
 
 class SousSiteSerializer(GeoFeatureModelSerializer):

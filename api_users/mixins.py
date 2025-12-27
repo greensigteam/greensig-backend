@@ -135,9 +135,9 @@ class RoleBasedQuerySetMixin:
         if model_name == 'SousSite':
             return queryset.filter(site__client=client)
 
-        # Tâches : Tâches sur ses sites (lecture seule)
+        # Tâches : Tâches du client (lecture seule)
         if model_name == 'Tache':
-            return queryset.filter(site__client=client)
+            return queryset.filter(id_client=client)
 
         # Réclamations : Ses réclamations
         if model_name == 'Reclamation':

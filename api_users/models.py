@@ -444,7 +444,7 @@ class Equipe(models.Model):
     @property
     def nombre_membres(self):
         """Retourne le nombre d'opérateurs dans l'équipe."""
-        return self.operateurs.filter(utilisateur__actif=True).count()
+        return self.operateurs.filter(statut=StatutOperateur.ACTIF).count()
 
     @property
     def statut_operationnel(self):
@@ -457,7 +457,7 @@ class Equipe(models.Model):
         from django.utils import timezone
         today = timezone.now().date()
 
-        membres = self.operateurs.filter(utilisateur__actif=True)
+        membres = self.operateurs.filter(statut=StatutOperateur.ACTIF)
         total = membres.count()
 
         if total == 0:
@@ -482,19 +482,19 @@ class Equipe(models.Model):
             return StatutEquipe.INDISPONIBLE
 
     def clean(self):
-        """Valide que le chef a la competence 'Gestion d'equipe'."""
+        """Valide que le chef a la competence 'Gestion d'équipe'."""
         # Si aucun chef n'est défini, on autorise la création sans chef.
         if self.chef_equipe_id:
             has_gestion = CompetenceOperateur.objects.filter(
                 operateur=self.chef_equipe,
-                competence__nom_competence="Gestion d'equipe",
+                competence__nom_competence="Gestion d'équipe",
                 niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
             ).exists()
 
             if not has_gestion:
                 raise ValidationError({
-                    'chef_equipe': "Le chef d'equipe doit avoir la competence 'Gestion d'equipe' "
-                                   "avec un niveau Intermediaire ou Expert."
+                    'chef_equipe': "Le chef d'équipe doit avoir la competence 'Gestion d'équipe' "
+                                   "avec un niveau Intermédiaire ou Expert."
                 })
 
     def save(self, *args, **kwargs):
@@ -640,7 +640,7 @@ class Operateur(models.Model):
         """Verifie si l'operateur peut etre chef d'equipe."""
         return CompetenceOperateur.objects.filter(
             operateur=self,
-            competence__nom_competence="Gestion d'equipe",
+            competence__nom_competence="Gestion d'équipe",
             niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
         ).exists()
 

@@ -75,7 +75,8 @@ class OperateurFilter(django_filters.FilterSet):
     # Filtres simples
     statut = django_filters.ChoiceFilter(choices=StatutOperateur.choices)
     actif = django_filters.BooleanFilter(
-        field_name='utilisateur__actif',
+        field_name='statut',
+        method='filter_actif',
         label='Actif'
     )
 
@@ -133,13 +134,20 @@ class OperateurFilter(django_filters.FilterSet):
         model = Operateur
         fields = ['statut', 'equipe']
 
+    def filter_actif(self, queryset, name, value):
+        """Filtre les operateurs actifs ou inactifs."""
+        if value:
+            return queryset.filter(statut=StatutOperateur.ACTIF)
+        else:
+            return queryset.exclude(statut=StatutOperateur.ACTIF)
+
     def filter_search(self, queryset, name, value):
         """Recherche dans nom, prenom, email, matricule."""
         if value:
             return queryset.filter(
-                Q(utilisateur__nom__icontains=value) |
-                Q(utilisateur__prenom__icontains=value) |
-                Q(utilisateur__email__icontains=value) |
+                Q(nom__icontains=value) |
+                Q(prenom__icontains=value) |
+                Q(email__icontains=value) |
                 Q(numero_immatriculation__icontains=value)
             )
         return queryset
@@ -191,7 +199,6 @@ class OperateurFilter(django_filters.FilterSet):
 
         if value:
             return queryset.filter(
-                utilisateur__actif=True,
                 statut=StatutOperateur.ACTIF
             ).exclude(
                 absences__statut=StatutAbsence.VALIDEE,
@@ -201,7 +208,6 @@ class OperateurFilter(django_filters.FilterSet):
         else:
             # Retourne les non-disponibles
             return queryset.filter(
-                Q(utilisateur__actif=False) |
                 Q(statut__in=[StatutOperateur.INACTIF, StatutOperateur.EN_CONGE]) |
                 Q(
                     absences__statut=StatutAbsence.VALIDEE,
@@ -213,8 +219,8 @@ class OperateurFilter(django_filters.FilterSet):
     def filter_est_chef(self, queryset, name, value):
         """Filtre les chefs d'equipe."""
         if value:
-            return queryset.filter(equipes_dirigees__actif=True).distinct()
-        return queryset.exclude(equipes_dirigees__actif=True)
+            return queryset.filter(equipe_dirigee__actif=True).distinct()
+        return queryset.exclude(equipe_dirigee__actif=True)
 
     def filter_peut_etre_chef(self, queryset, name, value):
         """Filtre les operateurs pouvant etre chef."""
@@ -271,8 +277,8 @@ class EquipeFilter(django_filters.FilterSet):
         if value:
             return queryset.filter(
                 Q(nom_equipe__icontains=value) |
-                Q(chef_equipe__utilisateur__nom__icontains=value) |
-                Q(chef_equipe__utilisateur__prenom__icontains=value)
+                Q(superviseur__utilisateur__nom__icontains=value) |
+                Q(superviseur__utilisateur__prenom__icontains=value)
             )
         return queryset
 

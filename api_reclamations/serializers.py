@@ -188,6 +188,8 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
     createur = serializers.PrimaryKeyRelatedField(read_only=True, required=False)
     # Geometry field for GeoJSON format
     localisation = GeometryField(required=False, allow_null=True)
+    # Date de constatation optionnelle (remplie automatiquement si non fournie)
+    date_constatation = serializers.DateTimeField(required=False)
 
     class Meta:
         model = Reclamation

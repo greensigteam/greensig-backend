@@ -68,6 +68,7 @@ class Reclamation(models.Model):
         ('PRISE_EN_COMPTE', 'Prise en compte'),
         ('EN_COURS', 'En cours'),
         ('RESOLUE', 'Résolue'),
+        ('EN_ATTENTE_VALIDATION_CLOTURE', 'En attente de validation de clôture'),
         ('CLOTUREE', 'Clôturée'),
         ('REJETEE', 'Rejetée'),
     ]
@@ -102,7 +103,7 @@ class Reclamation(models.Model):
     description = models.TextField(verbose_name="Description du problème")
     justification_rejet = models.TextField(blank=True, null=True, verbose_name="Justification rejet/retard")
     
-    date_constatation = models.DateTimeField(verbose_name="Date de constatation")
+    date_constatation = models.DateTimeField(default=timezone.now, verbose_name="Date de constatation")
     date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
     
     date_prise_en_compte = models.DateTimeField(null=True, blank=True, verbose_name="Date prise en compte")
@@ -111,8 +112,19 @@ class Reclamation(models.Model):
     
     date_cloture_prevue = models.DateTimeField(null=True, blank=True, verbose_name="Date clôture prévue")
     date_cloture_reelle = models.DateTimeField(null=True, blank=True, verbose_name="Date clôture réelle")
-    
-    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='NOUVELLE', verbose_name="Statut")
+
+    # Workflow de validation de clôture
+    cloture_proposee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='clotures_proposees',
+        verbose_name="Clôture proposée par"
+    )
+    date_proposition_cloture = models.DateTimeField(null=True, blank=True, verbose_name="Date proposition clôture")
+
+    statut = models.CharField(max_length=50, choices=STATUT_CHOICES, default='NOUVELLE', verbose_name="Statut")
     actif = models.BooleanField(default=True, verbose_name="Actif")
     
     class Meta:
@@ -178,8 +190,8 @@ class Reclamation(models.Model):
 
 class HistoriqueReclamation(models.Model):
     reclamation = models.ForeignKey(Reclamation, on_delete=models.CASCADE, related_name='historique', verbose_name="Réclamation")
-    statut_precedent = models.CharField(max_length=20, choices=Reclamation.STATUT_CHOICES, null=True, blank=True, verbose_name="Ancien statut")
-    statut_nouveau = models.CharField(max_length=20, choices=Reclamation.STATUT_CHOICES, verbose_name="Nouveau statut")
+    statut_precedent = models.CharField(max_length=50, choices=Reclamation.STATUT_CHOICES, null=True, blank=True, verbose_name="Ancien statut")
+    statut_nouveau = models.CharField(max_length=50, choices=Reclamation.STATUT_CHOICES, verbose_name="Nouveau statut")
     date_changement = models.DateTimeField(auto_now_add=True, verbose_name="Date du changement")
     auteur = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Modifié par")
     commentaire = models.TextField(blank=True, null=True, verbose_name="Commentaire/Message")

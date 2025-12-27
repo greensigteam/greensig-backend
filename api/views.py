@@ -377,6 +377,11 @@ class SearchView(APIView):
     Vue pour la recherche multicritère sur TOUS les types d'objets.
     Accepte un paramètre de requête `q`.
     Recherche dans Sites, SousSites, et tous les 15 types d'objets (végétation + hydraulique).
+
+    🔒 FILTRAGE PAR RÔLE:
+    - ADMIN: voit tout
+    - CLIENT: voit uniquement ses sites/objets
+    - SUPERVISEUR: voit uniquement les sites liés à ses équipes
     """
     def get(self, request, *args, **kwargs):
         query = request.query_params.get('q', '').strip()
@@ -386,9 +391,33 @@ class SearchView(APIView):
 
         results = []
 
+        # 🔒 Filtrage par rôle utilisateur
+        user = request.user
+        client_filter = None
+        site_ids_filter = None
+
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # CLIENT: uniquement ses sites
+            if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                client_filter = user.client_profile
+
+            # SUPERVISEUR: uniquement les sites de ses équipes
+            elif 'SUPERVISEUR' in roles and not ('ADMIN' in roles):
+                site_ids_filter = self._get_superviseur_site_ids(user)
+
         # Recherche sur les Sites (par nom ou code)
         site_query = Q(nom_site__icontains=query) | Q(code_site__icontains=query)
-        sites = Site.objects.filter(site_query)
+        sites_queryset = Site.objects.filter(site_query)
+
+        # Appliquer le filtrage par rôle
+        if client_filter:
+            sites_queryset = sites_queryset.filter(client=client_filter)
+        elif site_ids_filter is not None:
+            sites_queryset = sites_queryset.filter(id__in=site_ids_filter)
+
+        sites = sites_queryset.distinct()[:10]  # ✅ Limit to 10 unique sites
         for item in sites:
             location = item.centroid
             results.append({
@@ -399,7 +428,15 @@ class SearchView(APIView):
             })
 
         # Recherche sur les Sous-Sites (par nom)
-        sous_sites = SousSite.objects.filter(nom__icontains=query)
+        sous_sites_queryset = SousSite.objects.filter(nom__icontains=query)
+
+        # Appliquer le filtrage par rôle
+        if client_filter:
+            sous_sites_queryset = sous_sites_queryset.filter(site__client=client_filter)
+        elif site_ids_filter is not None:
+            sous_sites_queryset = sous_sites_queryset.filter(site_id__in=site_ids_filter)
+
+        sous_sites = sous_sites_queryset.distinct()[:5]  # ✅ Limit to 5 unique sous-sites
         for item in sous_sites:
             location = item.geometrie
             results.append({
@@ -440,7 +477,15 @@ class SearchView(APIView):
                 if hasattr(Model, 'famille'):
                     query_filter |= Q(famille__icontains=query)
 
-                objects = Model.objects.filter(query_filter).select_related('site')[:5]  # Max 5 par type
+                objects_queryset = Model.objects.filter(query_filter).select_related('site')
+
+                # 🔒 Appliquer le filtrage par rôle
+                if client_filter:
+                    objects_queryset = objects_queryset.filter(site__client=client_filter)
+                elif site_ids_filter is not None:
+                    objects_queryset = objects_queryset.filter(site_id__in=site_ids_filter)
+
+                objects = objects_queryset[:5]  # Max 5 par type
                 for obj in objects:
                     try:
                         location = obj.geometry if hasattr(obj, 'geometry') else None
@@ -471,6 +516,35 @@ class SearchView(APIView):
 
         # Limiter le nombre total de résultats
         return Response(results[:30])
+
+    def _get_superviseur_site_ids(self, user):
+        """
+        Récupère les IDs des sites contenant les objets liés aux tâches du superviseur.
+        """
+        from api_planification.models import Tache
+
+        try:
+            superviseur = user.superviseur_profile
+            equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
+            equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
+
+            if not equipes_gerees_ids:
+                return []
+
+            taches_ids = Tache.objects.filter(
+                deleted_at__isnull=True
+            ).filter(
+                Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
+            ).values_list('id', flat=True).distinct()
+
+            site_ids = list(Objet.objects.filter(
+                taches__id__in=taches_ids,
+                site_id__isnull=False
+            ).values_list('site_id', flat=True).distinct())
+
+            return site_ids
+        except Exception:
+            return []
 
 
 # ==============================================================================
@@ -512,6 +586,20 @@ class ExportPDFView(APIView):
         pdf.setFont("Helvetica", 10)
         date_str = datetime.now().strftime("%d/%m/%Y %H:%M")
         pdf.drawString(2*cm, page_height - 2.8*cm, f"Date d'export: {date_str}")
+
+        # Logo GreenSIG (en haut à droite)
+        try:
+            import os
+            from django.conf import settings
+            logo_path = os.path.join(settings.BASE_DIR, 'static', 'logo.png')
+            if os.path.exists(logo_path):
+                logo_width = 3*cm
+                logo_height = 1.5*cm
+                logo_x = page_width - logo_width - 2*cm
+                logo_y = page_height - 2.5*cm
+                pdf.drawImage(logo_path, logo_x, logo_y, width=logo_width, height=logo_height, preserveAspectRatio=True, mask='auto')
+        except Exception as e:
+            pass  # Si le logo n'est pas disponible, on continue sans
 
         # Image de la carte (si fournie)
         if map_image_base64:
@@ -1048,9 +1136,12 @@ class InventoryExportExcelView(APIView):
     def get(self, request, *args, **kwargs):
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.drawing.image import Image as ExcelImage
         from django.http import HttpResponse
         from datetime import datetime
         from io import BytesIO
+        import os
+        from django.conf import settings
 
         # Récupérer les types à exporter
         types_param = request.query_params.get('types', '')
@@ -1091,12 +1182,24 @@ class InventoryExportExcelView(APIView):
             'critique': 'FFCDD2',   # Rouge clair
         }
 
+        # Filtrer par rôle client si nécessaire
+        user = request.user
+        client_filter = None
+        if user.is_authenticated:
+            has_client_role = user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
+            if has_client_role and hasattr(user, 'client_profile'):
+                client_filter = user.client_profile
+
         # Pour chaque type, créer un onglet
         for type_name in types_list:
             model_class = self.MODEL_MAPPING[type_name]
 
             # Construire le queryset avec filtres
             queryset = model_class.objects.select_related('site', 'sous_site').all()
+
+            # Filtrer par client si nécessaire
+            if client_filter:
+                queryset = queryset.filter(site__client=client_filter)
 
             # Appliquer les filtres
             site_id = request.query_params.get('site')
@@ -1212,6 +1315,21 @@ class InventoryExportExcelView(APIView):
             # Figer la première ligne
             ws.freeze_panes = 'A2'
 
+            # Ajouter le logo GreenSIG en haut à droite
+            try:
+                logo_path = os.path.join(settings.BASE_DIR, 'static', 'logo.png')
+                if os.path.exists(logo_path):
+                    img = ExcelImage(logo_path)
+                    # Redimensionner le logo (largeur en pixels)
+                    img.width = 120
+                    img.height = 60
+                    # Positionner en haut à droite (colonne la plus à droite possible)
+                    # Calculer la position basée sur le nombre de colonnes
+                    last_col = chr(ord('A') + len(headers) - 1)
+                    ws.add_image(img, f'{last_col}1')
+            except Exception as e:
+                pass  # Continuer sans logo si erreur
+
         # Vérifier qu'au moins un onglet a été créé
         if len(wb.sheetnames) == 0:
             return Response({'error': 'Aucune donnée à exporter avec les filtres appliqués'}, status=404)
@@ -1309,12 +1427,14 @@ class InventoryExportPDFView(APIView):
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
         from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
         from django.http import HttpResponse
         from datetime import datetime
         from io import BytesIO
+        import os
+        from django.conf import settings
 
         # Récupérer les types à exporter
         types_param = request.query_params.get('types', '')
@@ -1379,8 +1499,30 @@ class InventoryExportPDFView(APIView):
         # Contenu du document
         story = []
 
-        # En-tête du document
-        story.append(Paragraph("INVENTAIRE - GreenSIG", title_style))
+        # Logo GreenSIG en haut à droite avec titre
+        try:
+            logo_path = os.path.join(settings.BASE_DIR, 'static', 'logo.png')
+            if os.path.exists(logo_path):
+                logo = Image(logo_path, width=4*cm, height=2*cm)
+
+                # Tableau avec titre à gauche et logo à droite
+                header_data = [
+                    [Paragraph("INVENTAIRE - GreenSIG", title_style), logo]
+                ]
+                header_table = Table(header_data, colWidths=[20*cm, 5*cm])
+                header_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+                    ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ]))
+                story.append(header_table)
+            else:
+                # Pas de logo, titre seul
+                story.append(Paragraph("INVENTAIRE - GreenSIG", title_style))
+        except Exception:
+            # En cas d'erreur, titre seul
+            story.append(Paragraph("INVENTAIRE - GreenSIG", title_style))
+
         story.append(Paragraph(f"Export généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
         story.append(Spacer(1, 0.5*cm))
 
@@ -1392,6 +1534,14 @@ class InventoryExportPDFView(APIView):
             'critique': colors.HexColor('#FFCDD2'),
         }
 
+        # Filtrer par rôle client si nécessaire
+        user = request.user
+        client_filter = None
+        if user.is_authenticated:
+            has_client_role = user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
+            if has_client_role and hasattr(user, 'client_profile'):
+                client_filter = user.client_profile
+
         # Pour chaque type
         total_objects = 0
         for idx, type_name in enumerate(types_list):
@@ -1399,6 +1549,10 @@ class InventoryExportPDFView(APIView):
 
             # Construire le queryset avec filtres
             queryset = model_class.objects.select_related('site', 'sous_site').all()
+
+            # Filtrer par client si nécessaire
+            if client_filter:
+                queryset = queryset.filter(site__client=client_filter)
 
             # Appliquer les filtres (même logique que Excel)
             site_id = request.query_params.get('site')

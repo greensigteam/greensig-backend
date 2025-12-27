@@ -30,6 +30,14 @@ class MeView(APIView):
             except AttributeError:  # Pas de profil superviseur
                 data['equipes_gerees'] = []
 
+        # Si l'utilisateur est client, ajouter l'ID du profil client
+        if 'CLIENT' in roles:
+            try:
+                client_profile = user.client_profile
+                data['client_id'] = client_profile.id
+            except AttributeError:  # Pas de profil client
+                data['client_id'] = None
+
         return Response(data)
 
 
@@ -48,12 +56,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.utils import timezone
-from django.db.models import Q, Count
+from django.db.models import Q, Count, Prefetch
 
 from .models import (
     Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
-    HistoriqueEquipeOperateur, StatutAbsence, NiveauCompetence
+    HistoriqueEquipeOperateur, StatutAbsence, StatutOperateur, NiveauCompetence
 )
 from .serializers import (
     UtilisateurSerializer, UtilisateurCreateSerializer, UtilisateurUpdateSerializer,
@@ -94,6 +102,8 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
     update: Met à jour un utilisateur
     destroy: Désactive un utilisateur (soft delete)
     """
+    permission_classes = [IsAdmin]
+
     @action(detail=True, methods=['post'])
     def retirer_role(self, request, pk=None):
         """Retire un rôle à un utilisateur."""
@@ -201,6 +211,7 @@ class RoleViewSet(viewsets.ModelViewSet):
     """ViewSet pour la gestion des rôles."""
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
+    permission_classes = [IsAdminOrReadOnly]
 
 
 # ==============================================================================
@@ -212,10 +223,76 @@ class ClientViewSet(viewsets.ModelViewSet):
     ViewSet pour la gestion des clients.
 
     Gère le CRUD complet des clients avec leur profil utilisateur associé.
+
+    Permissions:
+    - ADMIN: accès complet CRUD
+    - CLIENT: lecture seule sur son propre profil (filtré par get_queryset)
     """
+    permission_classes = [IsAuthenticated]
     queryset = Client.objects.select_related('utilisateur').prefetch_related(
         'utilisateur__roles_utilisateur__role'
     ).all()
+
+    def get_queryset(self):
+        """
+        Filtre les clients selon le rôle de l'utilisateur.
+        - ADMIN: voit tous les clients
+        - CLIENT: voit uniquement son propre profil
+        """
+        qs = super().get_queryset()
+        user = self.request.user
+
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' in roles:
+                return qs
+
+            # CLIENT voit uniquement son propre profil
+            if 'CLIENT' in roles:
+                try:
+                    client_profile = user.client_profile
+                    return qs.filter(id=client_profile.id)
+                except AttributeError:  # Pas de profil client
+                    return qs.none()
+
+        return qs.none()
+
+    def _is_client_only(self):
+        """Vérifie si l'utilisateur est uniquement CLIENT (pas ADMIN)."""
+        user = self.request.user
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+            return 'CLIENT' in roles and 'ADMIN' not in roles
+        return False
+
+    def create(self, request, *args, **kwargs):
+        """CLIENT ne peut pas créer de client."""
+        if self._is_client_only():
+            return Response(
+                {'error': 'Vous n\'avez pas les droits pour créer un client.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """CLIENT ne peut pas modifier de client."""
+        if self._is_client_only():
+            return Response(
+                {'error': 'Vous n\'avez pas les droits pour modifier un client.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """CLIENT ne peut pas modifier de client."""
+        if self._is_client_only():
+            return Response(
+                {'error': 'Vous n\'avez pas les droits pour modifier un client.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().partial_update(request, *args, **kwargs)
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -223,7 +300,12 @@ class ClientViewSet(viewsets.ModelViewSet):
         return ClientSerializer
 
     def destroy(self, request, *args, **kwargs):
-        """Soft delete: désactive l'utilisateur client."""
+        """Soft delete: désactive l'utilisateur client. CLIENT ne peut pas supprimer."""
+        if self._is_client_only():
+            return Response(
+                {'error': 'Vous n\'avez pas les droits pour supprimer un client.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         instance = self.get_object()
         instance.utilisateur.actif = False
         instance.utilisateur.save()
@@ -507,7 +589,7 @@ class CompetenceViewSet(viewsets.ModelViewSet):
 # VUES OPERATEUR
 # ==============================================================================
 
-class OperateurViewSet(viewsets.ModelViewSet):
+class OperateurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des opérateurs (jardiniers).
 
@@ -516,58 +598,27 @@ class OperateurViewSet(viewsets.ModelViewSet):
     - Gestion des compétences (US 5.5.1)
     - Filtrage par compétence/disponibilité
 
-    Permissions:
-    - ADMIN: accès complet à tous les opérateurs
-    - SUPERVISEUR: lecture seule sur les opérateurs de ses équipes
+    Permissions (via RoleBasedPermissionMixin):
+    - ADMIN: accès complet CRUD
+    - SUPERVISEUR: lecture seule sur ses opérateurs
+
+    Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
     queryset = Operateur.objects.select_related(
         'superviseur__utilisateur', 'equipe'
     ).prefetch_related('competences_operateur__competence').all()
     filterset_class = OperateurFilter
 
-    def _is_superviseur_only(self):
-        """Vérifie si l'utilisateur est uniquement SUPERVISEUR (pas ADMIN)."""
-        user = self.request.user
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-            return 'SUPERVISEUR' in roles and 'ADMIN' not in roles
-        return False
-
-    def _get_equipes_gerees_ids(self):
-        """Retourne les IDs des équipes gérées par le SUPERVISEUR connecté."""
-        user = self.request.user
-        try:
-            superviseur = user.superviseur_profile
-            return list(superviseur.equipes_gerees.filter(
-                actif=True
-            ).values_list('id', flat=True))
-        except AttributeError:  # Pas de profil superviseur
-            return []
-
-    def get_queryset(self):
-        """
-        Filtre les opérateurs selon le rôle de l'utilisateur.
-        - ADMIN: voit tous les opérateurs
-        - SUPERVISEUR: voit uniquement les opérateurs de ses équipes
-        """
-        qs = super().get_queryset()
-        user = self.request.user
-
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-
-            # ADMIN voit tout
-            if 'ADMIN' in roles:
-                return qs
-
-            # SUPERVISEUR voit uniquement les opérateurs de ses équipes
-            if 'SUPERVISEUR' in roles:
-                equipes_ids = self._get_equipes_gerees_ids()
-                if equipes_ids:
-                    return qs.filter(equipe_id__in=equipes_ids)
-                return qs.none()
-
-        return qs
+    # Permissions par action
+    permission_classes_by_action = {
+        'create': [IsAdmin],
+        'update': [IsAdmin],
+        'partial_update': [IsAdmin],
+        'destroy': [IsAdmin],
+        'affecter_competence': [IsAdmin],
+        'modifier_niveau_competence': [IsAdmin],
+        'default': [IsAuthenticated],  # Lecture pour tous authentifiés (filtrage via mixin)
+    }
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -584,7 +635,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
         Dans la nouvelle architecture:
         - Operateur est une table HR sans lien avec Utilisateur
-        - SUPERVISEUR ne voit que les opérateurs de ses équipes (via get_queryset)
+        - SUPERVISEUR ne voit que ses opérateurs (via RoleBasedQuerySetMixin)
         - ADMIN voit tous les opérateurs
         """
         # Liste les opérateurs (table HR uniquement, sans lien avec Utilisateur)
@@ -599,55 +650,22 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
         return Response(serializer.data)
 
-    def create(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas créer d'opérateur."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour créer un opérateur.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().create(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas modifier un opérateur."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier un opérateur.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().update(request, *args, **kwargs)
-
-    def partial_update(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas modifier un opérateur."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier un opérateur.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().partial_update(request, *args, **kwargs)
-
     def destroy(self, request, *args, **kwargs):
         """
         Soft delete: désactive l'opérateur.
 
         Vérifie s'il est chef d'équipe et avertit si nécessaire.
-        SUPERVISEUR ne peut pas supprimer d'opérateur.
+        Permission gérée par RoleBasedPermissionMixin (ADMIN only).
         """
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour supprimer un opérateur.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
         instance = self.get_object()
 
         # Vérifier s'il est chef d'équipe
-        equipes_dirigees = instance.equipes_dirigees.filter(actif=True)
-        if equipes_dirigees.exists():
+        if hasattr(instance, 'equipe_dirigee') and instance.equipe_dirigee and instance.equipe_dirigee.actif:
             return Response(
                 {
                     'warning': 'Cet opérateur est chef d\'équipe.',
-                    'equipes': [e.nom_equipe for e in equipes_dirigees],
-                    'message': 'Veuillez d\'abord réassigner le chef des équipes concernées.'
+                    'equipes': [instance.equipe_dirigee.nom_equipe],
+                    'message': 'Veuillez d\'abord réassigner le chef de l\'équipe concernée.'
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -685,12 +703,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def affecter_competence(self, request, pk=None):
-        """Affecte ou met à jour une compétence pour un opérateur. SUPERVISEUR lecture seule."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour affecter des compétences.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Affecte ou met à jour une compétence pour un opérateur. Permission: ADMIN only."""
         operateur = self.get_object()
         competence_id = request.data.get('competence_id')
         niveau = request.data.get('niveau', NiveauCompetence.DEBUTANT)
@@ -722,12 +735,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['put'])
     def modifier_niveau_competence(self, request, pk=None):
-        """Modifie le niveau d'une compétence existante. SUPERVISEUR lecture seule."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier les compétences.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Modifie le niveau d'une compétence existante. Permission: ADMIN only."""
         operateur = self.get_object()
         competence_id = request.data.get('competence_id')
         niveau = request.data.get('niveau')
@@ -794,7 +802,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
         """Liste les opérateurs pouvant être chef d'équipe."""
         operateurs = self.get_queryset().filter(
             statut='ACTIF',
-            competences_operateur__competence__nom_competence="Gestion d'equipe",
+            competences_operateur__competence__nom_competence="Gestion d'équipe",
             competences_operateur__niveau__in=[
                 NiveauCompetence.INTERMEDIAIRE,
                 NiveauCompetence.EXPERT,
@@ -854,7 +862,7 @@ class OperateurViewSet(viewsets.ModelViewSet):
 # VUES EQUIPE
 # ==============================================================================
 
-class EquipeViewSet(viewsets.ModelViewSet):
+class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des équipes (US 5.5.2).
 
@@ -863,75 +871,29 @@ class EquipeViewSet(viewsets.ModelViewSet):
     - Affectation des membres
     - Statut opérationnel dynamique
 
-    Permissions:
-    - ADMIN: accès complet
-    - SUPERVISEUR: lecture seule sur ses équipes uniquement
+    Permissions (via RoleBasedPermissionMixin):
+    - ADMIN: accès complet CRUD
+    - SUPERVISEUR: lecture seule sur ses équipes
+
+    Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
     queryset = Equipe.objects.select_related(
         'chef_equipe', 'superviseur__utilisateur'
-    ).prefetch_related('operateurs').all()
+    ).prefetch_related(
+        Prefetch('operateurs', queryset=Operateur.objects.filter(statut=StatutOperateur.ACTIF))
+    ).all()
     filterset_class = EquipeFilter
 
-    def get_queryset(self):
-        """
-        Filtre les équipes selon le rôle de l'utilisateur.
-        - ADMIN: voit toutes les équipes
-        - SUPERVISEUR: voit uniquement les équipes qu'il gère
-        """
-        qs = super().get_queryset()
-        user = self.request.user
-
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-
-            # ADMIN voit tout
-            if 'ADMIN' in roles:
-                return qs
-
-            # SUPERVISEUR voit uniquement ses équipes
-            if 'SUPERVISEUR' in roles:
-                try:
-                    superviseur = user.superviseur_profile
-                    return qs.filter(superviseur=superviseur, actif=True)
-                except AttributeError:  # Pas de profil superviseur
-                    return qs.none()
-
-        return qs
-
-    def _is_superviseur_only(self):
-        """Vérifie si l'utilisateur est uniquement SUPERVISEUR (pas ADMIN)."""
-        user = self.request.user
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-            return 'SUPERVISEUR' in roles and 'ADMIN' not in roles
-        return False
-
-    def create(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas créer d'équipe."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour créer une équipe.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().create(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas modifier d'équipe."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier une équipe.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().update(request, *args, **kwargs)
-
-    def partial_update(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas modifier d'équipe."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier une équipe.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().partial_update(request, *args, **kwargs)
+    # Permissions par action
+    permission_classes_by_action = {
+        'create': [IsAdmin],
+        'update': [IsAdmin],
+        'partial_update': [IsAdmin],
+        'destroy': [IsAdmin],
+        'affecter_membres': [IsAdmin],
+        'retirer_membre': [IsAdmin],
+        'default': [IsAuthenticated],  # Lecture pour tous authentifiés (filtrage via mixin)
+    }
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -943,12 +905,7 @@ class EquipeViewSet(viewsets.ModelViewSet):
         return EquipeListSerializer
 
     def destroy(self, request, *args, **kwargs):
-        """Désactive une équipe au lieu de la supprimer. SUPERVISEUR ne peut pas supprimer."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour supprimer une équipe.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Désactive une équipe au lieu de la supprimer. Permission: ADMIN only."""
         instance = self.get_object()
         instance.actif = False
         instance.save()
@@ -967,12 +924,7 @@ class EquipeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def affecter_membres(self, request, pk=None):
-        """Affecte des membres à une équipe. SUPERVISEUR ne peut pas affecter."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour affecter des membres.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Affecte des membres à une équipe. Permission: ADMIN only."""
         equipe = self.get_object()
         serializer = AffecterMembresSerializer(data=request.data)
 
@@ -983,12 +935,7 @@ class EquipeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def retirer_membre(self, request, pk=None):
-        """Retire un membre d'une équipe. SUPERVISEUR ne peut pas retirer."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour retirer des membres.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Retire un membre d'une équipe. Permission: ADMIN only."""
         equipe = self.get_object()
         operateur_id = request.data.get('operateur_id')
 
@@ -1080,7 +1027,7 @@ class EquipeViewSet(viewsets.ModelViewSet):
 # VUES ABSENCE
 # ==============================================================================
 
-class AbsenceViewSet(viewsets.ModelViewSet):
+class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des absences (US 5.5.3).
 
@@ -1088,6 +1035,12 @@ class AbsenceViewSet(viewsets.ModelViewSet):
     - CRUD absences
     - Validation/refus
     - Impact sur les équipes
+
+    Permissions (via RoleBasedPermissionMixin):
+    - ADMIN: accès complet CRUD + validation
+    - SUPERVISEUR: lecture seule sur les absences de ses opérateurs
+
+    Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
     queryset = Absence.objects.select_related(
         'operateur',
@@ -1096,87 +1049,26 @@ class AbsenceViewSet(viewsets.ModelViewSet):
     ).all()
     filterset_class = AbsenceFilter
 
-    def _is_superviseur_only(self):
-        """Vérifie si l'utilisateur est uniquement SUPERVISEUR (pas ADMIN)."""
-        user = self.request.user
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-            return 'SUPERVISEUR' in roles and 'ADMIN' not in roles
-        return False
-
-    def get_queryset(self):
-        """
-        Filtre les absences selon le rôle de l'utilisateur.
-        - ADMIN: voit toutes les absences
-        - SUPERVISEUR: voit uniquement les absences des opérateurs de ses équipes
-        """
-        qs = super().get_queryset()
-        user = self.request.user
-
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-
-            if 'ADMIN' in roles:
-                return qs
-
-            if 'SUPERVISEUR' in roles:
-                try:
-                    superviseur = user.superviseur_profile
-                    # Équipes que le superviseur gère
-                    equipes_ids = list(superviseur.equipes_gerees.filter(actif=True).values_list('id', flat=True))
-                    # Absences d'opérateurs dans ces équipes
-                    return qs.filter(operateur__equipe_id__in=equipes_ids)
-                except AttributeError:  # Pas de profil superviseur
-                    return qs.none()
-
-        return qs
+    # Permissions par action
+    permission_classes_by_action = {
+        'create': [IsAdmin],
+        'update': [IsAdmin],
+        'partial_update': [IsAdmin],
+        'destroy': [IsAdmin],
+        'valider': [IsAdmin],
+        'refuser': [IsAdmin],
+        'annuler': [IsAdmin],
+        'default': [IsAuthenticated],  # Lecture pour tous authentifiés (filtrage via mixin)
+    }
 
     def get_serializer_class(self):
         if self.action == 'create':
             return AbsenceCreateSerializer
         return AbsenceSerializer
 
-    def create(self, request, *args, **kwargs):
-        """SUPERVISEUR ne peut pas créer d'absence via ce ViewSet."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour créer une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().create(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().update(request, *args, **kwargs)
-
-    def partial_update(self, request, *args, **kwargs):
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour modifier une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().partial_update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour supprimer une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        return super().destroy(request, *args, **kwargs)
-
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
-        """Valide une absence. SUPERVISEUR ne peut pas valider."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour valider une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Valide une absence. Permission: ADMIN only."""
         absence = self.get_object()
 
         if absence.statut != StatutAbsence.DEMANDEE:
@@ -1195,12 +1087,7 @@ class AbsenceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def refuser(self, request, pk=None):
-        """Refuse une absence. SUPERVISEUR ne peut pas refuser."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour refuser une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Refuse une absence. Permission: ADMIN only."""
         absence = self.get_object()
 
         if absence.statut != StatutAbsence.DEMANDEE:
@@ -1218,12 +1105,7 @@ class AbsenceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
-        """Annule une absence. SUPERVISEUR ne peut pas annuler."""
-        if self._is_superviseur_only():
-            return Response(
-                {'error': 'Vous n\'avez pas les droits pour annuler une absence.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        """Annule une absence. Permission: ADMIN only."""
         absence = self.get_object()
 
         if absence.statut not in [StatutAbsence.DEMANDEE, StatutAbsence.VALIDEE]:
@@ -1429,7 +1311,7 @@ class StatistiquesUtilisateursView(APIView):
                 .values_list('statut', 'count')
             ),
             'chefs_equipe': Operateur.objects.filter(
-                equipes_dirigees__actif=True
+                equipe_dirigee__actif=True
             ).distinct().count()
         }
 

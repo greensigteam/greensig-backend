@@ -335,20 +335,26 @@ class OperateurListSerializer(serializers.ModelSerializer):
 
     ⚠️ REFACTORISATION : Operateur est maintenant standalone (pas de lien utilisateur).
     """
-    nom_complet = serializers.CharField(read_only=True)
+    full_name = serializers.CharField(source='nom_complet', read_only=True)
     equipe_nom = serializers.CharField(source='equipe.nom_equipe', read_only=True, allow_null=True)
     superviseur_nom = serializers.CharField(source='superviseur.utilisateur.get_full_name', read_only=True, allow_null=True)
     est_chef_equipe = serializers.BooleanField(read_only=True)
+    est_disponible = serializers.BooleanField(read_only=True)
+    peut_etre_chef = serializers.SerializerMethodField()
 
     class Meta:
         model = Operateur
         fields = [
-            'id', 'nom', 'prenom', 'nom_complet', 'email',
+            'id', 'nom', 'prenom', 'full_name', 'email',
             'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
             'superviseur', 'superviseur_nom',
             'date_embauche', 'date_sortie', 'telephone', 'photo',
-            'est_chef_equipe'
+            'est_chef_equipe', 'est_disponible', 'peut_etre_chef'
         ]
+
+    def get_peut_etre_chef(self, obj):
+        """Retourne True si l'opérateur a la compétence 'Gestion d'équipe'."""
+        return obj.peut_etre_chef()
 
 
 class OperateurDetailSerializer(serializers.ModelSerializer):
@@ -357,7 +363,7 @@ class OperateurDetailSerializer(serializers.ModelSerializer):
 
     ⚠️ REFACTORISATION : Operateur est maintenant standalone (pas de lien utilisateur).
     """
-    nom_complet = serializers.CharField(read_only=True)
+    full_name = serializers.CharField(source='nom_complet', read_only=True)
     equipe_nom = serializers.CharField(source='equipe.nom_equipe', read_only=True, allow_null=True)
     superviseur_detail = SuperviseurSerializer(source='superviseur', read_only=True)
     competences_detail = CompetenceOperateurSerializer(
@@ -366,17 +372,18 @@ class OperateurDetailSerializer(serializers.ModelSerializer):
         read_only=True
     )
     est_chef_equipe = serializers.BooleanField(read_only=True)
+    est_disponible = serializers.BooleanField(read_only=True)
     peut_etre_chef = serializers.SerializerMethodField()
 
     class Meta:
         model = Operateur
         fields = [
-            'id', 'nom', 'prenom', 'nom_complet', 'email',
+            'id', 'nom', 'prenom', 'full_name', 'email',
             'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
             'superviseur', 'superviseur_detail',
             'date_embauche', 'date_sortie', 'telephone', 'photo',
             'competences_detail',
-            'est_chef_equipe', 'peut_etre_chef'
+            'est_chef_equipe', 'est_disponible', 'peut_etre_chef'
         ]
 
     def get_peut_etre_chef(self, obj):
@@ -578,7 +585,7 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Equipe
-        fields = ['nom_equipe', 'chef_equipe', 'actif']
+        fields = ['nom_equipe', 'chef_equipe', 'superviseur', 'actif']
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""

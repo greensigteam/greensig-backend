@@ -10,11 +10,20 @@ from .serializers import (
 )
 from .services import RecurrenceService, WorkloadCalculationService
 from django.utils import timezone
+from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
+from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur
 
 class TypeTacheViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les types de tâches (ressource système).
+
+    Permissions:
+    - ADMIN: CRUD complet
+    - SUPERVISEUR, CLIENT: Lecture seule
+    """
     queryset = TypeTache.objects.all()
     serializer_class = TypeTacheSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]
 
     @action(detail=False, methods=['get'])
     def applicables(self, request):
@@ -91,23 +100,50 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
             'types_objets_compatibles': types_objets_compatibles
         })
 
-class TacheViewSet(viewsets.ModelViewSet):
+class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin, viewsets.ModelViewSet):
     """
-    ViewSet pour les tâches avec permissions automatiques:
-    - ADMIN: voit toutes les tâches
-    - CLIENT: voit uniquement les tâches de ses sites
-    - SUPERVISEUR: voit uniquement les tâches assignées à ses équipes
+    ViewSet pour les tâches avec permissions automatiques via mixins.
+
+    Permissions (via RoleBasedPermissionMixin):
+    - ADMIN: CRUD complet + validation
+    - SUPERVISEUR: CRUD sur les tâches de ses équipes (filtrage automatique)
+    - CLIENT: Lecture seule sur les tâches de ses sites (filtrage automatique)
+
+    Filtrage automatique: RoleBasedQuerySetMixin filtre selon le rôle
+    Soft delete: SoftDeleteMixin gère la suppression douce
     """
+    queryset = Tache.objects.all()
+    serializer_class = TacheSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    # Permissions par action (RoleBasedPermissionMixin)
+    permission_classes_by_action = {
+        'create': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
+        'update': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
+        'partial_update': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
+        'destroy': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
+        'valider': [permissions.IsAuthenticated, IsAdmin],
+        'default': [permissions.IsAuthenticated],
+    }
+
     def get_queryset(self):
+        """
+        Retourne le queryset des tâches avec filtrage automatique par rôle.
+
+        Le filtrage par rôle est géré par RoleBasedQuerySetMixin:
+        - ADMIN: Toutes les tâches
+        - SUPERVISEUR: Tâches de ses équipes uniquement
+        - CLIENT: Tâches de ses sites uniquement
+
+        Le soft-delete est géré par SoftDeleteMixin (exclut deleted_at != null).
+        """
         from django.db.models import Q, Prefetch
         from api_users.models import Equipe
 
-        # Exclude soft-deleted tasks
-        qs = Tache.objects.filter(deleted_at__isnull=True)
+        # Appeler le mixin pour filtrage par rôle + soft-delete
+        qs = super().get_queryset()
 
-        # Optimiser les requêtes avec prefetch_related pour les M2M et nested relations
+        # Optimisations de requêtes (select_related, prefetch_related)
         qs = qs.select_related(
             'id_client__utilisateur',
             'id_type_tache',
@@ -116,55 +152,21 @@ class TacheViewSet(viewsets.ModelViewSet):
             'reclamation'
         )
 
-        # Prefetch optimisé pour les équipes avec leurs opérateurs (pour nombre_membres)
+        # Prefetch optimisé pour les équipes avec leurs opérateurs
         equipes_qs = Equipe.objects.select_related(
             'chef_equipe',
             'superviseur__utilisateur'
-        ).prefetch_related(
-            'operateurs'
-        )
+        ).prefetch_related('operateurs')
 
         qs = qs.prefetch_related(
-            # Prefetch optimisé pour les équipes
             Prefetch('equipes', queryset=equipes_qs),
-            # Prefetch pour les objets avec site ET sous_site
             'objets__site',
             'objets__sous_site',
-            # Prefetch pour les participations
             'participations__id_operateur',
-            # Prefetch pour les rôles de l'utilisateur client (évite N+1 dans UtilisateurSerializer)
             'id_client__utilisateur__roles_utilisateur__role'
         )
 
-        # Appliquer les permissions automatiques basées sur le rôle
-        user = self.request.user
-        if user.is_authenticated:
-            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-
-            # ADMIN voit tout
-            if 'ADMIN' not in roles:
-                # CLIENT voit uniquement les tâches de ses clients
-                if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                    qs = qs.filter(id_client=user.client_profile)
-
-                # SUPERVISEUR voit uniquement les tâches de ses équipes
-                elif 'SUPERVISEUR' in roles:
-                    try:
-                        superviseur = user.superviseur_profile
-                        equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
-                        equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
-
-                        if equipes_gerees_ids:
-                            q_filter = Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-                            qs = qs.filter(q_filter).distinct()
-                        else:
-                            # Superviseur sans équipes gérées - retourner aucune tâche
-                            qs = qs.none()
-                    except Exception:
-                        # Si pas d'opérateur profile, retourner aucune tâche
-                        qs = qs.none()
-
-        # Filtres optionnels (query params)
+        # Filtres optionnels via query params
         client_id = self.request.query_params.get('client_id')
         if client_id:
             qs = qs.filter(id_client=client_id)
@@ -192,10 +194,7 @@ class TacheViewSet(viewsets.ModelViewSet):
             return TacheCreateUpdateSerializer
         return TacheSerializer
 
-    def perform_destroy(self, instance):
-        # Soft delete
-        instance.deleted_at = timezone.now()
-        instance.save()
+    # perform_destroy() est géré par SoftDeleteMixin
 
     @action(detail=True, methods=['post'])
     def add_participation(self, request, pk=None):
@@ -236,16 +235,9 @@ class TacheViewSet(viewsets.ModelViewSet):
         Valide une tâche terminée (ADMIN uniquement).
         POST /api/planification/taches/{id}/valider/
         Body: { "etat": "VALIDEE" | "REJETEE", "commentaire": "..." }
-        """
-        # Vérifier que l'utilisateur est ADMIN
-        user = request.user
-        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
-        if 'ADMIN' not in roles:
-            return Response(
-                {'error': 'Seul un administrateur peut valider ou rejeter une tâche'},
-                status=status.HTTP_403_FORBIDDEN
-            )
 
+        Permission: IsAdmin (définie dans permission_classes_by_action)
+        """
         tache = self.get_object()
 
         # Vérifier que la tâche est terminée
@@ -268,7 +260,7 @@ class TacheViewSet(viewsets.ModelViewSet):
         # Mettre à jour la tâche
         tache.etat_validation = etat
         tache.date_validation = timezone.now()
-        tache.validee_par = user
+        tache.validee_par = request.user
         tache.commentaire_validation = commentaire
         tache.save()
 
@@ -321,12 +313,16 @@ class TacheViewSet(viewsets.ModelViewSet):
 
 class RatioProductiviteViewSet(viewsets.ModelViewSet):
     """
-    API endpoint pour gérer les ratios de productivité.
+    API endpoint pour gérer les ratios de productivité (ressource système).
     Permet de définir les ratios par combinaison (type de tâche, type d'objet).
+
+    Permissions:
+    - ADMIN: CRUD complet
+    - SUPERVISEUR, CLIENT: Lecture seule
     """
     queryset = RatioProductivite.objects.select_related('id_type_tache').all()
     serializer_class = RatioProductiviteSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]
 
     def get_queryset(self):
         qs = super().get_queryset()
