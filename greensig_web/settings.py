@@ -13,6 +13,25 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 from decouple import config
+import sys
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Configuration GDAL/GEOS pour Windows
+if sys.platform == 'win32':
+    OSGEO4W = r'C:\Program Files\QGIS 3.42.1'
+    if os.path.exists(OSGEO4W):
+        os.environ['OSGEO4W_ROOT'] = OSGEO4W
+        os.environ['GDAL_DATA'] = OSGEO4W + r'\share\gdal'
+        os.environ['PROJ_LIB'] = OSGEO4W + r'\share\proj'
+        # Ajouter bin ET apps\qgis\bin à PATH (apps contient des DLLs nécessaires)
+        os.environ['PATH'] = OSGEO4W + r'\bin;' + OSGEO4W + r'\apps\qgis\bin;' + os.environ['PATH']
+        
+        # Chemins explicites des bibliothèques
+        GDAL_LIBRARY_PATH = OSGEO4W + r'\bin\gdal310.dll'
+        GEOS_LIBRARY_PATH = OSGEO4W + r'\bin\geos_c.dll'
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -174,13 +193,6 @@ REST_FRAMEWORK = {
     ),
 }
 
-# Configuration GDAL/GEOS selon l'environnement
-if os.name == 'nt':
-    # Windows local (QGIS)
-    GDAL_LIBRARY_PATH = r'C:\Program Files\QGIS 3.40.13\bin\gdal311.dll'
-    GEOS_LIBRARY_PATH = r'C:\Program Files\QGIS 3.40.13\bin\geos_c.dll'
-    os.environ['PROJ_LIB'] = r'C:\Program Files\QGIS 3.40.13\share\proj'
-# Linux/Docker : les variables GDAL_LIBRARY_PATH et GEOS_LIBRARY_PATH sont définies via env
 
 # Configuration CSRF pour production
 CSRF_TRUSTED_ORIGINS = config(
