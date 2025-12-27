@@ -4,7 +4,7 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
 
 from .models import (
-    Utilisateur, Role, UtilisateurRole, Client, Operateur,
+    Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
     HistoriqueEquipeOperateur
 )
@@ -40,9 +40,13 @@ class OperateurInline(admin.TabularInline):
     """Inline pour les operateurs d'une equipe."""
     model = Operateur
     extra = 0
-    fields = ['utilisateur', 'numero_immatriculation', 'statut']
-    readonly_fields = ['utilisateur', 'numero_immatriculation']
+    fields = ['nom_complet', 'numero_immatriculation', 'statut']
+    readonly_fields = ['nom_complet', 'numero_immatriculation']
     can_delete = False
+
+    def nom_complet(self, obj):
+        return obj.nom_complet
+    nom_complet.short_description = 'Nom complet'
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -159,6 +163,59 @@ class ClientAdmin(admin.ModelAdmin):
 
 
 # ==============================================================================
+# ADMIN SUPERVISEUR
+# ==============================================================================
+
+@admin.register(Superviseur)
+class SuperviseurAdmin(admin.ModelAdmin):
+    """Admin pour les superviseurs."""
+
+    list_display = [
+        'matricule', 'get_email', 'get_nom_complet',
+        'secteur_geographique', 'get_nombre_equipes',
+        'get_nombre_operateurs', 'get_actif'
+    ]
+    list_filter = ['utilisateur__actif', 'secteur_geographique', 'date_prise_fonction']
+    search_fields = [
+        'matricule', 'utilisateur__email',
+        'utilisateur__nom', 'utilisateur__prenom',
+        'secteur_geographique'
+    ]
+    autocomplete_fields = ['utilisateur']
+    date_hierarchy = 'date_prise_fonction'
+
+    fieldsets = (
+        ('Utilisateur', {'fields': ('utilisateur',)}),
+        ('Information superviseur', {
+            'fields': ('matricule', 'secteur_geographique', 'date_prise_fonction')
+        }),
+        ('Contact', {'fields': ('telephone',)}),
+    )
+
+    def get_email(self, obj):
+        return obj.utilisateur.email
+    get_email.short_description = 'Email'
+    get_email.admin_order_field = 'utilisateur__email'
+
+    def get_nom_complet(self, obj):
+        return obj.utilisateur.get_full_name()
+    get_nom_complet.short_description = 'Nom complet'
+
+    def get_nombre_equipes(self, obj):
+        return obj.nombre_equipes
+    get_nombre_equipes.short_description = 'Équipes'
+
+    def get_nombre_operateurs(self, obj):
+        return obj.nombre_operateurs
+    get_nombre_operateurs.short_description = 'Opérateurs'
+
+    def get_actif(self, obj):
+        return obj.utilisateur.actif
+    get_actif.short_description = 'Actif'
+    get_actif.boolean = True
+
+
+# ==============================================================================
 # ADMIN COMPETENCE
 # ==============================================================================
 
@@ -181,43 +238,29 @@ class OperateurAdmin(admin.ModelAdmin):
     """Admin pour les operateurs."""
 
     list_display = [
-        'numero_immatriculation', 'get_nom_complet', 'get_email',
-        'statut', 'equipe', 'date_embauche', 'get_actif',
+        'numero_immatriculation', 'nom_complet', 'email',
+        'statut', 'superviseur', 'equipe', 'date_embauche',
         'get_est_chef', 'get_disponible'
     ]
-    list_filter = ['statut', 'equipe', 'utilisateur__actif', 'date_embauche']
+    list_filter = ['statut', 'equipe', 'superviseur', 'date_embauche']
     search_fields = [
-        'numero_immatriculation', 'utilisateur__email',
-        'utilisateur__nom', 'utilisateur__prenom'
+        'numero_immatriculation', 'email', 'nom', 'prenom'
     ]
-    autocomplete_fields = ['utilisateur', 'equipe']
+    autocomplete_fields = ['superviseur', 'equipe']
     date_hierarchy = 'date_embauche'
 
     fieldsets = (
-        ('Utilisateur', {'fields': ('utilisateur',)}),
-        ('Information operateur', {
-            'fields': ('numero_immatriculation', 'statut', 'date_embauche')
+        ('Information personnelle', {
+            'fields': ('nom', 'prenom', 'email')
         }),
-        ('Equipe', {'fields': ('equipe',)}),
+        ('Information operateur', {
+            'fields': ('numero_immatriculation', 'statut', 'date_embauche', 'date_sortie')
+        }),
+        ('Organisation', {'fields': ('superviseur', 'equipe')}),
         ('Contact', {'fields': ('telephone', 'photo')}),
     )
 
     inlines = [CompetenceOperateurInline, AbsenceInline]
-
-    def get_nom_complet(self, obj):
-        return obj.utilisateur.get_full_name()
-    get_nom_complet.short_description = 'Nom complet'
-    get_nom_complet.admin_order_field = 'utilisateur__nom'
-
-    def get_email(self, obj):
-        return obj.utilisateur.email
-    get_email.short_description = 'Email'
-    get_email.admin_order_field = 'utilisateur__email'
-
-    def get_actif(self, obj):
-        return obj.utilisateur.actif
-    get_actif.short_description = 'Actif'
-    get_actif.boolean = True
 
     def get_est_chef(self, obj):
         return obj.est_chef_equipe
@@ -245,7 +288,7 @@ class EquipeAdmin(admin.ModelAdmin):
     list_filter = ['actif', 'date_creation']
     search_fields = [
         'nom_equipe',
-        'chef_equipe__utilisateur__nom', 'chef_equipe__utilisateur__prenom'
+        'chef_equipe__nom', 'chef_equipe__prenom'
     ]
     autocomplete_fields = ['chef_equipe']
     date_hierarchy = 'date_creation'
@@ -292,7 +335,7 @@ class AbsenceAdmin(admin.ModelAdmin):
     ]
     list_filter = ['type_absence', 'statut', 'date_debut']
     search_fields = [
-        'operateur__utilisateur__nom', 'operateur__utilisateur__prenom',
+        'operateur__nom', 'operateur__prenom',
         'motif'
     ]
     autocomplete_fields = ['operateur', 'validee_par']
@@ -329,7 +372,7 @@ class HistoriqueEquipeOperateurAdmin(admin.ModelAdmin):
     ]
     list_filter = ['equipe', 'role_dans_equipe', 'date_debut']
     search_fields = [
-        'operateur__utilisateur__nom', 'operateur__utilisateur__prenom',
+        'operateur__nom', 'operateur__prenom',
         'equipe__nom_equipe'
     ]
     autocomplete_fields = ['operateur', 'equipe']
@@ -355,7 +398,7 @@ class CompetenceOperateurAdmin(admin.ModelAdmin):
     ]
     list_filter = ['competence', 'niveau', 'date_acquisition']
     search_fields = [
-        'operateur__utilisateur__nom', 'operateur__utilisateur__prenom',
+        'operateur__nom', 'operateur__prenom',
         'competence__nom_competence'
     ]
     autocomplete_fields = ['operateur', 'competence']

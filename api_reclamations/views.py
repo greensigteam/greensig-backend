@@ -11,14 +11,15 @@ from .models import TypeReclamation, Urgence, Reclamation, HistoriqueReclamation
 from api_users.models import Equipe
 from django.db import transaction
 from .serializers import (
-    TypeReclamationSerializer, 
-    UrgenceSerializer, 
-    ReclamationListSerializer, 
+    TypeReclamationSerializer,
+    UrgenceSerializer,
+    ReclamationListSerializer,
     ReclamationDetailSerializer,
     ReclamationCreateSerializer,
     HistoriqueReclamationSerializer,
     SatisfactionClientSerializer
 )
+from .permissions import IsReclamationCreatorOrTeamReader
 
 class TypeReclamationViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -69,7 +70,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'urgence',
             'type_reclamation',
             'equipe_affectee',
-            'equipe_affectee__chef_equipe__utilisateur'
+            'equipe_affectee__superviseur__utilisateur'
         )
 
         # Prefetch pour le détail (historique, photos, taches, satisfaction)
@@ -92,9 +93,16 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         if user.is_staff or user.is_superuser:
             return queryset
 
-        # Chef d'équipe ou Opérateur : accès uniquement à ses propres réclamations
-        if hasattr(user, 'operateur_profile'):
-            return queryset.filter(createur=user)
+        # Superviseur : accès aux réclamations de ses équipes
+        if hasattr(user, 'superviseur_profile'):
+            try:
+                superviseur = user.superviseur_profile
+                equipes_ids = list(superviseur.equipes_gerees.filter(actif=True).values_list('id', flat=True))
+                if equipes_ids:
+                    return queryset.filter(Q(equipe_affectee_id__in=equipes_ids) | Q(createur=user))
+                return queryset.filter(createur=user)
+            except AttributeError:
+                return queryset.filter(createur=user)
 
         # Client : accès à ses réclamations uniquement (créées par lui ou liées à lui)
         if hasattr(user, 'client_profile'):
@@ -119,6 +127,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         """
         Assigner automatiquement le créateur (utilisateur connecté).
         Si c'est un client, on associe aussi le client_profile.
+        Remplir automatiquement date_constatation si non fournie.
         """
         user = self.request.user
         extra_kwargs = {'createur': user}
@@ -126,6 +135,10 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         # Si l'utilisateur est un client, on associe également le client_profile
         if hasattr(user, 'client_profile'):
             extra_kwargs['client'] = user.client_profile
+
+        # Remplir automatiquement date_constatation avec la date actuelle si non fournie
+        if 'date_constatation' not in serializer.validated_data or not serializer.validated_data['date_constatation']:
+            extra_kwargs['date_constatation'] = timezone.now()
 
         reclamation = serializer.save(**extra_kwargs)
 
@@ -235,34 +248,96 @@ class ReclamationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def cloturer(self, request, pk=None):
         """
-        Endpoint pour clôturer une réclamation (User 6.6.12).
-        Conditions: statut = RESOLUE
+        Endpoint pour proposer la clôture d'une réclamation (ADMIN/SUPERVISEUR).
+
+        Nouveau workflow (validation obligatoire par le créateur):
+        1. Admin/Superviseur propose la clôture → statut EN_ATTENTE_VALIDATION_CLOTURE
+        2. Le créateur valide via /valider_cloture/ → statut CLOTUREE
         """
         reclamation = self.get_object()
-        
-        # T6.6.12.1 - Vérification des conditions
-        # On permet la clôture si l'utilisateur le demande (le frontend vérifie déjà les tâches)
-        # On peut ajouter une sécurité supplémentaire ici si besoin.
-        
+
+        # Vérification: seuls ADMIN/SUPERVISEUR peuvent proposer la clôture
+        user = request.user
+        is_admin = user.is_staff or user.is_superuser
+        is_superviseur = hasattr(user, 'superviseur_profile')
+
+        if not (is_admin or is_superviseur):
+            return Response(
+                {"error": "Seuls les administrateurs et superviseurs peuvent proposer la clôture."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        with transaction.atomic():
+            old_statut = reclamation.statut
+            reclamation.statut = 'EN_ATTENTE_VALIDATION_CLOTURE'
+            reclamation.cloture_proposee_par = user
+            reclamation.date_proposition_cloture = timezone.now()
+            if not reclamation.date_resolution:
+                reclamation.date_resolution = timezone.now()
+            reclamation.save()
+
+            # Historique
+            HistoriqueReclamation.objects.create(
+                reclamation=reclamation,
+                statut_precedent=old_statut,
+                statut_nouveau='EN_ATTENTE_VALIDATION_CLOTURE',
+                auteur=request.user,
+                commentaire=f"Proposition de clôture par {user.get_full_name() or user.email}"
+            )
+
+        serializer = ReclamationDetailSerializer(reclamation)
+        return Response({
+            'message': 'Clôture proposée avec succès. En attente de validation par le créateur.',
+            'reclamation': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def valider_cloture(self, request, pk=None):
+        """
+        Endpoint pour valider la clôture d'une réclamation (CREATEUR uniquement).
+
+        Workflow:
+        - Seul le créateur de la réclamation peut valider la clôture
+        - La réclamation doit être en statut EN_ATTENTE_VALIDATION_CLOTURE
+        - Passage au statut CLOTUREE définitif
+        """
+        reclamation = self.get_object()
+        user = request.user
+
+        # Vérification 1: L'utilisateur doit être le créateur de la réclamation
+        if reclamation.createur != user:
+            return Response(
+                {"error": "Seul le créateur de la réclamation peut valider sa clôture."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérification 2: La réclamation doit être en attente de validation
+        if reclamation.statut != 'EN_ATTENTE_VALIDATION_CLOTURE':
+            return Response(
+                {"error": f"La réclamation doit être en attente de validation de clôture. Statut actuel: {reclamation.get_statut_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         with transaction.atomic():
             old_statut = reclamation.statut
             reclamation.statut = 'CLOTUREE'
-            if not reclamation.date_resolution:
-                reclamation.date_resolution = timezone.now()
             reclamation.date_cloture_reelle = timezone.now()
             reclamation.save()
-            
+
             # Historique
             HistoriqueReclamation.objects.create(
                 reclamation=reclamation,
                 statut_precedent=old_statut,
                 statut_nouveau='CLOTUREE',
-                auteur=request.user,
-                commentaire="Clôture de la réclamation"
+                auteur=user,
+                commentaire=f"Clôture validée par le créateur {user.get_full_name() or user.email}"
             )
-        
+
         serializer = ReclamationDetailSerializer(reclamation)
-        return Response(serializer.data)
+        return Response({
+            'message': 'Clôture validée avec succès. La réclamation est définitivement clôturée.',
+            'reclamation': serializer.data
+        })
 
     @action(detail=False, methods=['post'], url_path='detect-site')
     def detect_site(self, request):
@@ -469,27 +544,80 @@ class ReclamationViewSet(viewsets.ModelViewSet):
 class SatisfactionClientViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des évaluations de satisfaction client.
+
+    Permissions:
+    - **Création/Modification/Suppression**: SEUL le créateur de la réclamation
+    - **Lecture**: Le créateur + superviseur de l'équipe + ADMIN (retour d'expérience)
     """
     queryset = SatisfactionClient.objects.all()
     serializer_class = SatisfactionClientSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    
+    permission_classes = [IsReclamationCreatorOrTeamReader]
+
     def get_queryset(self):
-        queryset = SatisfactionClient.objects.all()
+        """
+        Retourne les évaluations accessibles par l'utilisateur:
+        - Ses propres évaluations (créateur)
+        - Les évaluations des réclamations traitées par ses équipes (superviseur)
+        - Toutes les évaluations (ADMIN/Staff)
+        """
+        user = self.request.user
+
+        # ADMIN/Staff: accès à toutes les évaluations
+        if user.is_staff or user.is_superuser:
+            queryset = SatisfactionClient.objects.all()
+        else:
+            # Filtres cumulatifs (OR)
+            from django.db.models import Q
+
+            filters = Q(reclamation__createur=user)  # Évaluations créées par l'utilisateur
+
+            # Si superviseur: ajouter les évaluations des réclamations de ses équipes
+            if hasattr(user, 'superviseur_profile'):
+                superviseur = user.superviseur_profile
+                # Réclamations traitées par les équipes gérées par ce superviseur
+                filters |= Q(reclamation__equipe_affectee__superviseur=superviseur)
+
+            queryset = SatisfactionClient.objects.filter(filters)
+
+        # Optimisation: select_related pour éviter N+1
+        queryset = queryset.select_related(
+            'reclamation',
+            'reclamation__createur',
+            'reclamation__equipe_affectee',
+            'reclamation__equipe_affectee__superviseur'
+        )
+
+        # Filtre optionnel par reclamation_id
         reclamation_id = self.request.query_params.get('reclamation')
         if reclamation_id:
             queryset = queryset.filter(reclamation_id=reclamation_id)
+
         return queryset
 
     def create(self, request, *args, **kwargs):
         """
         Surcharge du create pour gérer l'unicité (OneToOne) de manière gracieuse.
         Si une évaluation existe déjà, on la met à jour.
+
+        Validation: SEUL le créateur de la réclamation peut créer/modifier son évaluation.
         """
         reclamation_id = request.data.get('reclamation')
         if not reclamation_id:
             return Response({"detail": "Le champ réclamation est requis."}, status=status.HTTP_400_BAD_REQUEST)
-            
+
+        try:
+            # Vérifier que la réclamation existe
+            reclamation = Reclamation.objects.get(pk=reclamation_id)
+        except Reclamation.DoesNotExist:
+            return Response({"detail": "Réclamation non trouvée."}, status=status.HTTP_404_NOT_FOUND)
+
+        # VALIDATION CRITIQUE: Vérifier que l'utilisateur est bien le créateur de la réclamation
+        if reclamation.createur != request.user:
+            return Response(
+                {"detail": "Vous ne pouvez évaluer que vos propres réclamations."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         try:
             # On utilise update_or_create pour éviter les erreurs 400 de doublons
             satisfaction, created = SatisfactionClient.objects.update_or_create(
@@ -501,7 +629,7 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
             )
             serializer = self.get_serializer(satisfaction)
             return Response(
-                serializer.data, 
+                serializer.data,
                 status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
             )
         except Exception as e:

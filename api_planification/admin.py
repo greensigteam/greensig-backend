@@ -55,4 +55,4 @@ class RatioProductiviteAdmin(admin.ModelAdmin):
 class ParticipationTacheAdmin(admin.ModelAdmin):
     list_display = ('id_tache', 'id_operateur', 'role', 'heures_travaillees')
     list_filter = ('role',)
-    search_fields = ('id_tache__id_type_tache__nom_tache', 'id_operateur__utilisateur__nom')
+    search_fields = ('id_tache__id_type_tache__nom_tache', 'id_operateur__nom', 'id_operateur__prenom')

@@ -64,10 +64,10 @@ def seed_users():
 
     # 3. Creer 3 Chefs d'equipe (sont aussi des operateurs)
     print("\n👨‍💼 Creation de 3 Chefs d'equipe...")
-    # Pour que le chef soit valide dans les modeles, il lui faut la competence "Gestion d'equipe"
+    # Pour que le chef soit valide dans les modeles, il lui faut la competence "Gestion d'équipe"
     # On la cree ici rapidement si elle n'existe pas
     comp_gestion, _ = Competence.objects.get_or_create(
-        nom_competence="Gestion d'equipe",
+        nom_competence="Gestion d'équipe",
         defaults={'categorie': 'ORGANISATIONNELLE'}
     )
 

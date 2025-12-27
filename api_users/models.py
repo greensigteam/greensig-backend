@@ -155,16 +155,19 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
 
 class Role(models.Model):
     """
-    Définit les rôles possibles dans le système.
+    Définit les 3 rôles d'utilisateurs de l'application.
+
+    ⚠️ NOUVEAU MODÈLE (Refactorisation Architecture RH) :
+    - Les opérateurs et chefs d'équipe NE sont PAS des utilisateurs
+    - Ce sont des données RH gérées dans l'application
+    - Seuls ADMIN, SUPERVISEUR et CLIENT peuvent se connecter
 
     Les rôles définissent les droits et permissions des utilisateurs.
-    Un utilisateur peut avoir plusieurs rôles (N-N).
     """
     NOM_CHOICES = [
         ('ADMIN', 'Administrateur'),
+        ('SUPERVISEUR', 'Superviseur'),
         ('CLIENT', 'Client'),
-        ('CHEF_EQUIPE', 'Chef d\'équipe'),
-        ('OPERATEUR', 'Opérateur'),
     ]
 
     nom_role = models.CharField(
@@ -274,6 +277,68 @@ class Client(models.Model):
 
 
 # ==============================================================================
+# MODELE SUPERVISEUR
+# ==============================================================================
+
+class Superviseur(models.Model):
+    """
+    Représente un superviseur (encadrant).
+
+    ⚠️ NOUVEAU MODÈLE (Refactorisation Architecture RH) :
+    Le superviseur est un UTILISATEUR qui peut se connecter à l'application.
+    Il supervise les équipes, gère le planning et le suivi des interventions,
+    mais NE va PAS sur le terrain (contrairement au chef d'équipe qui est un opérateur).
+
+    Différences avec Chef d'Équipe (Operateur) :
+    - Superviseur : Utilisateur (se connecte) + gère plusieurs équipes + bureau
+    - Chef d'équipe : Opérateur (données RH) + dirige 1 équipe + terrain
+    """
+    utilisateur = models.OneToOneField(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name='superviseur_profile'
+    )
+    matricule = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name="Matricule superviseur"
+    )
+    secteur_geographique = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name="Secteur géographique",
+        help_text="Zone géographique sous sa responsabilité"
+    )
+    telephone = models.CharField(
+        max_length=20,
+        blank=True,
+        verbose_name="Téléphone professionnel"
+    )
+    date_prise_fonction = models.DateField(
+        verbose_name="Date de prise de fonction"
+    )
+
+    class Meta:
+        verbose_name = "Superviseur"
+        verbose_name_plural = "Superviseurs"
+        ordering = ['utilisateur__nom', 'utilisateur__prenom']
+
+    def __str__(self):
+        return f"{self.utilisateur.get_full_name()} (Superviseur - {self.matricule})"
+
+    @property
+    def nombre_equipes(self):
+        """Retourne le nombre d'équipes gérées par ce superviseur."""
+        return self.equipes_gerees.filter(actif=True).count()
+
+    @property
+    def nombre_operateurs(self):
+        """Retourne le nombre total d'opérateurs sous sa supervision."""
+        return self.operateurs_supervises.filter(statut='ACTIF').count()
+
+
+# ==============================================================================
 # MODELE COMPETENCE
 # ==============================================================================
 
@@ -324,23 +389,39 @@ class Equipe(models.Model):
     """
     Représente une équipe d'opérateurs.
 
+    ⚠️ REFACTORISATION (Architecture RH) :
+    - Une équipe est gérée par un SUPERVISEUR (utilisateur)
+    - Un opérateur peut être désigné comme "chef d'équipe" (attribut, pas rôle)
+    - Le chef d'équipe travaille sur le terrain avec son équipe
+
     Règles métier:
-    - Une équipe doit avoir exactement un chef
-    - Le chef doit avoir la compétence "Gestion d'équipe"
-    - Un opérateur peut être chef de plusieurs équipes
+    - Une équipe PEUT avoir un chef (opérateur avec compétence "Gestion d'équipe")
+    - Un opérateur ne peut être chef que d'UNE SEULE équipe (OneToOne)
+    - Une équipe doit avoir un superviseur responsable
     """
     nom_equipe = models.CharField(
         max_length=100,
         verbose_name="Nom de l'équipe"
     )
-    chef_equipe = models.ForeignKey(
+
+    chef_equipe = models.OneToOneField(
         'Operateur',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='equipes_dirigees',
+        related_name='equipe_dirigee',
         verbose_name="Chef d'équipe",
-        help_text="Doit avoir la compétence 'Gestion d'equipe' (optionnel)"
+        help_text="Opérateur désigné comme chef (doit avoir compétence 'Gestion d\\'équipe')"
+    )
+
+    superviseur = models.ForeignKey(
+        'Superviseur',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='equipes_gerees',
+        verbose_name="Superviseur responsable",
+        help_text="Superviseur qui gère cette équipe"
     )
 
     actif = models.BooleanField(
@@ -363,7 +444,7 @@ class Equipe(models.Model):
     @property
     def nombre_membres(self):
         """Retourne le nombre d'opérateurs dans l'équipe."""
-        return self.operateurs.filter(utilisateur__actif=True).count()
+        return self.operateurs.filter(statut=StatutOperateur.ACTIF).count()
 
     @property
     def statut_operationnel(self):
@@ -376,7 +457,7 @@ class Equipe(models.Model):
         from django.utils import timezone
         today = timezone.now().date()
 
-        membres = self.operateurs.filter(utilisateur__actif=True)
+        membres = self.operateurs.filter(statut=StatutOperateur.ACTIF)
         total = membres.count()
 
         if total == 0:
@@ -401,19 +482,19 @@ class Equipe(models.Model):
             return StatutEquipe.INDISPONIBLE
 
     def clean(self):
-        """Valide que le chef a la competence 'Gestion d'equipe'."""
+        """Valide que le chef a la competence 'Gestion d'équipe'."""
         # Si aucun chef n'est défini, on autorise la création sans chef.
         if self.chef_equipe_id:
             has_gestion = CompetenceOperateur.objects.filter(
                 operateur=self.chef_equipe,
-                competence__nom_competence="Gestion d'equipe",
+                competence__nom_competence="Gestion d'équipe",
                 niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
             ).exists()
 
             if not has_gestion:
                 raise ValidationError({
-                    'chef_equipe': "Le chef d'equipe doit avoir la competence 'Gestion d'equipe' "
-                                   "avec un niveau Intermediaire ou Expert."
+                    'chef_equipe': "Le chef d'équipe doit avoir la competence 'Gestion d'équipe' "
+                                   "avec un niveau Intermédiaire ou Expert."
                 })
 
     def save(self, *args, **kwargs):
@@ -431,17 +512,34 @@ class Equipe(models.Model):
 
 class Operateur(models.Model):
     """
-    Représente un opérateur terrain (jardinier).
+    Représente un opérateur terrain (jardinier) - DONNÉE RH.
 
-    Hérite conceptuellement d'Utilisateur via une relation OneToOne.
-    Un opérateur peut appartenir à une équipe et avoir plusieurs compétences.
+    ⚠️ REFACTORISATION (Architecture RH) :
+    - L'opérateur N'EST PAS un utilisateur de l'application
+    - Il NE peut PAS se connecter
+    - C'est une donnée RH gérée PAR les superviseurs/admins
+    - Il travaille sur le terrain (tonte, taille, arrosage, etc.)
+    - Un opérateur peut être désigné comme "chef d'équipe" (via Equipe.chef_equipe)
+
+    Différence avec Superviseur :
+    - Opérateur : Données RH + terrain + ne se connecte pas
+    - Superviseur : Utilisateur + bureau + se connecte
     """
-    utilisateur = models.OneToOneField(
-        Utilisateur,
-        on_delete=models.CASCADE,
-        primary_key=True,
-        related_name='operateur_profile'
+    # ⚠️ CHANGEMENT MAJEUR : Plus de lien avec Utilisateur
+    # utilisateur = OneToOneField(...)  ← SUPPRIMÉ
+
+    # Identifiant propre
+    id = models.AutoField(primary_key=True)
+    # Informations personnelles
+    nom = models.CharField(max_length=100, verbose_name="Nom")
+    prenom = models.CharField(max_length=100, verbose_name="Prénom")
+    email = models.EmailField(
+        blank=True,
+        verbose_name="Email professionnel",
+        help_text="Pour communication interne uniquement (n'est PAS un compte de connexion)"
     )
+
+    # Informations RH
     numero_immatriculation = models.CharField(
         max_length=50,
         unique=True,
@@ -465,6 +563,24 @@ class Operateur(models.Model):
     date_embauche = models.DateField(
         verbose_name="Date d'embauche"
     )
+    date_sortie = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="Date de sortie",
+        help_text="Date de fin de contrat ou départ"
+    )
+
+    # Lien avec le superviseur
+    superviseur = models.ForeignKey(
+        Superviseur,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='operateurs_supervises',
+        verbose_name="Superviseur responsable",
+        help_text="Superviseur qui gère cet opérateur"
+    )
+
     photo = models.URLField(
         blank=True,
         null=True,
@@ -486,18 +602,24 @@ class Operateur(models.Model):
     class Meta:
         verbose_name = "Opérateur"
         verbose_name_plural = "Opérateurs"
-        ordering = ['utilisateur__nom', 'utilisateur__prenom']
+        ordering = ['nom', 'prenom']
 
     def __str__(self):
-        return f"{self.utilisateur.get_full_name()} ({self.numero_immatriculation})"
+        return f"{self.prenom} {self.nom} ({self.numero_immatriculation})"
+
+    @property
+    def nom_complet(self):
+        """Retourne le nom complet de l'opérateur."""
+        return f"{self.prenom} {self.nom}"
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
 
     @property
     def est_chef_equipe(self):
-        """Vérifie si l'opérateur est chef d'au moins une équipe."""
-        return self.equipes_dirigees.filter(actif=True).exists()
+        """Vérifie si l'opérateur est chef d'une équipe."""
+        # Dans la nouvelle architecture, un opérateur ne peut diriger qu'une seule équipe (OneToOne)
+        return hasattr(self, 'equipe_dirigee') and self.equipe_dirigee is not None and self.equipe_dirigee.actif
 
     @property
     def est_disponible(self):
@@ -518,7 +640,7 @@ class Operateur(models.Model):
         """Verifie si l'operateur peut etre chef d'equipe."""
         return CompetenceOperateur.objects.filter(
             operateur=self,
-            competence__nom_competence="Gestion d'equipe",
+            competence__nom_competence="Gestion d'équipe",
             niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
         ).exists()
 

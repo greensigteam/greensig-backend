@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 
 from .models import (
-    Utilisateur, Role, UtilisateurRole, Client, Operateur,
+    Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
     HistoriqueEquipeOperateur, StatutOperateur,
     NiveauCompetence, StatutAbsence
@@ -193,6 +193,100 @@ class ClientCreateSerializer(serializers.ModelSerializer):
 
 
 # ==============================================================================
+# SERIALIZERS SUPERVISEUR
+# ==============================================================================
+
+class SuperviseurSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les superviseurs.
+
+    ⚠️ NOUVEAU (Refactorisation Architecture RH)
+    Le superviseur est un utilisateur qui se connecte et gère les équipes.
+    """
+    utilisateur_detail = UtilisateurSerializer(source='utilisateur', read_only=True)
+    email = serializers.EmailField(source='utilisateur.email', read_only=True)
+    nom = serializers.CharField(source='utilisateur.nom', read_only=True)
+    prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
+    full_name = serializers.CharField(source='utilisateur.get_full_name', read_only=True)
+    actif = serializers.BooleanField(source='utilisateur.actif', read_only=True)
+
+    # Propriétés calculées
+    nombre_equipes = serializers.IntegerField(read_only=True)
+    nombre_operateurs = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Superviseur
+        fields = [
+            'utilisateur', 'utilisateur_detail', 'email', 'nom', 'prenom', 'full_name', 'actif',
+            'matricule', 'secteur_geographique', 'telephone', 'date_prise_fonction',
+            'nombre_equipes', 'nombre_operateurs'
+        ]
+        read_only_fields = ['utilisateur', 'nombre_equipes', 'nombre_operateurs']
+
+
+class SuperviseurCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour la création d'un superviseur avec son utilisateur.
+
+    Crée automatiquement :
+    1. Un compte utilisateur
+    2. Un profil superviseur
+    3. Attribue le rôle SUPERVISEUR
+    """
+    # Champs utilisateur
+    email = serializers.EmailField(write_only=True)
+    nom = serializers.CharField(write_only=True)
+    prenom = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, validators=[validate_password])
+
+    class Meta:
+        model = Superviseur
+        fields = [
+            'email', 'nom', 'prenom', 'password',
+            'matricule', 'secteur_geographique', 'telephone', 'date_prise_fonction'
+        ]
+
+    def create(self, validated_data):
+        # Extraire les données utilisateur
+        user_data = {
+            'email': validated_data.pop('email'),
+            'nom': validated_data.pop('nom'),
+            'prenom': validated_data.pop('prenom'),
+        }
+        password = validated_data.pop('password')
+
+        # Créer l'utilisateur
+        utilisateur = Utilisateur.objects.create_user(
+            password=password,
+            **user_data
+        )
+
+        # Créer le profil superviseur
+        superviseur = Superviseur.objects.create(
+            utilisateur=utilisateur,
+            **validated_data
+        )
+
+        # Attribuer automatiquement le rôle SUPERVISEUR
+        from .models import Role, UtilisateurRole
+        role_superviseur, _ = Role.objects.get_or_create(nom_role='SUPERVISEUR')
+        UtilisateurRole.objects.get_or_create(
+            utilisateur=utilisateur,
+            role=role_superviseur
+        )
+
+        return superviseur
+
+
+class SuperviseurUpdateSerializer(serializers.ModelSerializer):
+    """Serializer pour la mise à jour d'un superviseur."""
+
+    class Meta:
+        model = Superviseur
+        fields = ['matricule', 'secteur_geographique', 'telephone', 'date_prise_fonction']
+
+
+# ==============================================================================
 # SERIALIZERS COMPETENCE
 # ==============================================================================
 
@@ -212,7 +306,7 @@ class CompetenceOperateurSerializer(serializers.ModelSerializer):
     """Serializer pour les compétences d'un opérateur."""
     competence_detail = CompetenceSerializer(source='competence', read_only=True)
     niveau_display = serializers.CharField(source='get_niveau_display', read_only=True)
-    operateur_nom = serializers.CharField(source='operateur.utilisateur.get_full_name', read_only=True)
+    operateur_nom = serializers.CharField(source='operateur.nom_complet', read_only=True)
 
     class Meta:
         model = CompetenceOperateur
@@ -236,40 +330,14 @@ class CompetenceOperateurUpdateSerializer(serializers.ModelSerializer):
 # ==============================================================================
 
 class OperateurListSerializer(serializers.ModelSerializer):
-    """Serializer pour la liste des opérateurs (vue simplifiée)."""
-    email = serializers.EmailField(source='utilisateur.email', read_only=True)
-    nom = serializers.CharField(source='utilisateur.nom', read_only=True)
-    prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
-    full_name = serializers.CharField(source='utilisateur.get_full_name', read_only=True)
-    actif = serializers.BooleanField(source='utilisateur.actif', read_only=True)
+    """
+    Serializer pour la liste des opérateurs (vue simplifiée).
+
+    ⚠️ REFACTORISATION : Operateur est maintenant standalone (pas de lien utilisateur).
+    """
+    full_name = serializers.CharField(source='nom_complet', read_only=True)
     equipe_nom = serializers.CharField(source='equipe.nom_equipe', read_only=True, allow_null=True)
-    est_chef_equipe = serializers.BooleanField(read_only=True)
-    est_disponible = serializers.BooleanField(read_only=True)
-
-    class Meta:
-        model = Operateur
-        fields = [
-            'utilisateur', 'email', 'nom', 'prenom', 'full_name', 'actif',
-            'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
-            'date_embauche', 'telephone', 'photo',
-            'est_chef_equipe', 'est_disponible'
-        ]
-
-
-class OperateurDetailSerializer(serializers.ModelSerializer):
-    """Serializer détaillé pour un opérateur."""
-    utilisateur_detail = UtilisateurSerializer(source='utilisateur', read_only=True)
-    email = serializers.EmailField(source='utilisateur.email', read_only=True)
-    nom = serializers.CharField(source='utilisateur.nom', read_only=True)
-    prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
-    actif = serializers.BooleanField(source='utilisateur.actif', read_only=True)
-    equipe_nom = serializers.CharField(source='equipe.nom_equipe', read_only=True, allow_null=True)
-    competences_detail = CompetenceOperateurSerializer(
-        source='competences_operateur',
-        many=True,
-        read_only=True
-    )
-    equipes_dirigees_count = serializers.SerializerMethodField()
+    superviseur_nom = serializers.CharField(source='superviseur.utilisateur.get_full_name', read_only=True, allow_null=True)
     est_chef_equipe = serializers.BooleanField(read_only=True)
     est_disponible = serializers.BooleanField(read_only=True)
     peut_etre_chef = serializers.SerializerMethodField()
@@ -277,64 +345,70 @@ class OperateurDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operateur
         fields = [
-            'utilisateur', 'utilisateur_detail', 'email', 'nom', 'prenom', 'actif',
+            'id', 'nom', 'prenom', 'full_name', 'email',
             'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
-            'date_embauche', 'telephone', 'photo',
-            'competences_detail', 'equipes_dirigees_count',
+            'superviseur', 'superviseur_nom',
+            'date_embauche', 'date_sortie', 'telephone', 'photo',
             'est_chef_equipe', 'est_disponible', 'peut_etre_chef'
         ]
 
-    def get_equipes_dirigees_count(self, obj):
-        return obj.equipes_dirigees.filter(actif=True).count()
+    def get_peut_etre_chef(self, obj):
+        """Retourne True si l'opérateur a la compétence 'Gestion d'équipe'."""
+        return obj.peut_etre_chef()
+
+
+class OperateurDetailSerializer(serializers.ModelSerializer):
+    """
+    Serializer détaillé pour un opérateur.
+
+    ⚠️ REFACTORISATION : Operateur est maintenant standalone (pas de lien utilisateur).
+    """
+    full_name = serializers.CharField(source='nom_complet', read_only=True)
+    equipe_nom = serializers.CharField(source='equipe.nom_equipe', read_only=True, allow_null=True)
+    superviseur_detail = SuperviseurSerializer(source='superviseur', read_only=True)
+    competences_detail = CompetenceOperateurSerializer(
+        source='competences_operateur',
+        many=True,
+        read_only=True
+    )
+    est_chef_equipe = serializers.BooleanField(read_only=True)
+    est_disponible = serializers.BooleanField(read_only=True)
+    peut_etre_chef = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Operateur
+        fields = [
+            'id', 'nom', 'prenom', 'full_name', 'email',
+            'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
+            'superviseur', 'superviseur_detail',
+            'date_embauche', 'date_sortie', 'telephone', 'photo',
+            'competences_detail',
+            'est_chef_equipe', 'est_disponible', 'peut_etre_chef'
+        ]
 
     def get_peut_etre_chef(self, obj):
         return obj.peut_etre_chef()
 
 
 class OperateurCreateSerializer(serializers.ModelSerializer):
-    """Serializer pour la création d'un opérateur avec son utilisateur."""
-    email = serializers.EmailField(write_only=True)
-    nom = serializers.CharField(write_only=True)
-    prenom = serializers.CharField(write_only=True)
-    password = serializers.CharField(write_only=True, validators=[validate_password])
+    """
+    Serializer pour la création d'un opérateur (DONNÉE RH).
+
+    ⚠️ REFACTORISATION : Operateur ne crée PLUS de compte utilisateur.
+    C'est une simple donnée RH gérée par les superviseurs/admins.
+    """
 
     class Meta:
         model = Operateur
         fields = [
-            'utilisateur', 'email', 'nom', 'prenom', 'password',
-            'numero_immatriculation', 'statut', 'equipe',
-            'date_embauche', 'telephone', 'photo'
+            'nom', 'prenom', 'email',
+            'numero_immatriculation', 'statut', 'equipe', 'superviseur',
+            'date_embauche', 'date_sortie', 'telephone', 'photo'
         ]
-        read_only_fields = ['utilisateur']
 
     def create(self, validated_data):
-        # Extraire les données utilisateur
-        user_data = {
-            'email': validated_data.pop('email'),
-            'nom': validated_data.pop('nom'),
-            'prenom': validated_data.pop('prenom'),
-        }
-        password = validated_data.pop('password')
-
-        # Créer l'utilisateur
-        utilisateur = Utilisateur.objects.create_user(
-                password=password,
-                **user_data
-            )
-
-        # Créer le profil opérateur
-        operateur = Operateur.objects.create(
-            utilisateur=utilisateur,
-            **validated_data
-        )
-
-        # Attribuer automatiquement le rôle OPERATEUR
-        from .models import Role, UtilisateurRole
-        role_operateur, _ = Role.objects.get_or_create(nom_role='OPERATEUR')
-        UtilisateurRole.objects.get_or_create(
-            utilisateur=utilisateur,
-            role=role_operateur
-        )
+        # Créer l'opérateur (standalone, pas d'utilisateur)
+        operateur = Operateur.objects.create(**validated_data)
 
         # Historiser l'affectation à l'équipe si applicable
         if operateur.equipe:
@@ -349,30 +423,21 @@ class OperateurCreateSerializer(serializers.ModelSerializer):
 
 
 class OperateurUpdateSerializer(serializers.ModelSerializer):
-    """Serializer pour la mise à jour d'un opérateur."""
-    nom = serializers.CharField(write_only=True, required=False)
-    prenom = serializers.CharField(write_only=True, required=False)
-    email = serializers.EmailField(write_only=True, required=False)
-    actif = serializers.BooleanField(write_only=True, required=False)
+    """
+    Serializer pour la mise à jour d'un opérateur.
+
+    ⚠️ REFACTORISATION : Operateur est standalone, mise à jour directe des champs.
+    """
 
     class Meta:
         model = Operateur
         fields = [
-            'nom', 'prenom', 'email', 'actif',
-            'numero_immatriculation', 'statut', 'equipe',
-            'telephone', 'photo'
+            'nom', 'prenom', 'email',
+            'numero_immatriculation', 'statut', 'equipe', 'superviseur',
+            'date_sortie', 'telephone', 'photo'
         ]
 
     def update(self, instance, validated_data):
-        # Mettre à jour l'utilisateur si nécessaire
-        user_fields = ['nom', 'prenom', 'email', 'actif']
-        user_data = {k: validated_data.pop(k) for k in user_fields if k in validated_data}
-
-        if user_data:
-            for attr, value in user_data.items():
-                setattr(instance.utilisateur, attr, value)
-            instance.utilisateur.save()
-
         # Gérer le changement d'équipe pour l'historique
         old_equipe = instance.equipe
         new_equipe = validated_data.get('equipe', old_equipe)
@@ -408,9 +473,18 @@ class OperateurUpdateSerializer(serializers.ModelSerializer):
 # ==============================================================================
 
 class EquipeListSerializer(serializers.ModelSerializer):
-    """Serializer pour la liste des équipes."""
+    """
+    Serializer pour la liste des équipes.
+
+    ⚠️ REFACTORISATION : Equipe a maintenant un superviseur (utilisateur).
+    """
     chef_equipe_nom = serializers.CharField(
-        source='chef_equipe.utilisateur.get_full_name',
+        source='chef_equipe.nom_complet',
+        read_only=True,
+        allow_null=True
+    )
+    superviseur_nom = serializers.CharField(
+        source='superviseur.utilisateur.get_full_name',
         read_only=True,
         allow_null=True
     )
@@ -420,15 +494,22 @@ class EquipeListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipe
         fields = [
-            'id', 'nom_equipe', 'chef_equipe', 'chef_equipe_nom',
+            'id', 'nom_equipe',
+            'chef_equipe', 'chef_equipe_nom',
+            'superviseur', 'superviseur_nom',
             'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel'
         ]
 
 
 class EquipeDetailSerializer(serializers.ModelSerializer):
-    """Serializer détaillé pour une équipe."""
+    """
+    Serializer détaillé pour une équipe.
+
+    ⚠️ REFACTORISATION : Equipe a maintenant un superviseur.
+    """
     chef_equipe_detail = OperateurListSerializer(source='chef_equipe', read_only=True)
+    superviseur_detail = SuperviseurSerializer(source='superviseur', read_only=True)
     membres = OperateurListSerializer(source='operateurs', many=True, read_only=True)
     nombre_membres = serializers.IntegerField(read_only=True)
     statut_operationnel = serializers.CharField(read_only=True)
@@ -436,14 +517,20 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipe
         fields = [
-            'id', 'nom_equipe', 'chef_equipe', 'chef_equipe_detail',
+            'id', 'nom_equipe',
+            'chef_equipe', 'chef_equipe_detail',
+            'superviseur', 'superviseur_detail',
             'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel', 'membres'
         ]
 
 
 class EquipeCreateSerializer(serializers.ModelSerializer):
-    """Serializer pour la création d'une équipe."""
+    """
+    Serializer pour la création d'une équipe.
+
+    ⚠️ REFACTORISATION : Equipe nécessite maintenant un superviseur.
+    """
     membres = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Operateur.objects.all(),
@@ -453,7 +540,7 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Equipe
-        fields = ['id', 'nom_equipe', 'chef_equipe', 'actif', 'membres']
+        fields = ['id', 'nom_equipe', 'chef_equipe', 'superviseur', 'actif', 'membres']
         read_only_fields = ['id']
 
     def validate_chef_equipe(self, value):
@@ -490,14 +577,6 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
                 role_dans_equipe='MEMBRE'
             )
 
-        # Attribuer le rôle CHEF_EQUIPE au chef si fourni
-        if equipe.chef_equipe:
-            role_chef, _ = Role.objects.get_or_create(nom_role='CHEF_EQUIPE')
-            UtilisateurRole.objects.get_or_create(
-                utilisateur=equipe.chef_equipe.utilisateur,
-                role=role_chef
-            )
-
         return equipe
 
 
@@ -506,7 +585,7 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Equipe
-        fields = ['nom_equipe', 'chef_equipe', 'actif']
+        fields = ['nom_equipe', 'chef_equipe', 'superviseur', 'actif']
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""
@@ -522,23 +601,11 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
         return value
 
     def update(self, instance, validated_data):
-        """Met à jour l'équipe et attribue le rôle CHEF_EQUIPE si nécessaire."""
-        # Récupérer l'ancien et le nouveau chef
-        old_chef = instance.chef_equipe
-        new_chef = validated_data.get('chef_equipe', old_chef)
-
+        """Met à jour l'équipe."""
         # Mettre à jour l'équipe
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
-
-        # Si le chef a changé, attribuer le rôle CHEF_EQUIPE au nouveau chef
-        if new_chef and new_chef != old_chef:
-            role_chef, _ = Role.objects.get_or_create(nom_role='CHEF_EQUIPE')
-            UtilisateurRole.objects.get_or_create(
-                utilisateur=new_chef.utilisateur,
-                role=role_chef
-            )
 
         return instance
 
@@ -637,7 +704,7 @@ class AffecterMembresSerializer(serializers.Serializer):
 class AbsenceSerializer(serializers.ModelSerializer):
     """Serializer pour les absences."""
     operateur_nom = serializers.CharField(
-        source='operateur.utilisateur.get_full_name',
+        source='operateur.nom_complet',
         read_only=True
     )
     type_absence_display = serializers.CharField(
@@ -741,7 +808,7 @@ class AbsenceValidationSerializer(serializers.Serializer):
 class HistoriqueEquipeOperateurSerializer(serializers.ModelSerializer):
     """Serializer pour l'historique des équipes."""
     operateur_nom = serializers.CharField(
-        source='operateur.utilisateur.get_full_name',
+        source='operateur.nom_complet',
         read_only=True
     )
     equipe_nom = serializers.CharField(

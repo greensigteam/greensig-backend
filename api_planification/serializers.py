@@ -42,7 +42,7 @@ class ObjetSimpleSerializer(serializers.ModelSerializer):
         fields = ['id', 'site', 'site_nom', 'sous_site']
 
 class ParticipationTacheSerializer(serializers.ModelSerializer):
-    operateur_nom = serializers.CharField(source='id_operateur.utilisateur.get_full_name', read_only=True)
+    operateur_nom = serializers.CharField(source='id_operateur.nom_complet', read_only=True)
 
     class Meta:
         model = ParticipationTache
@@ -56,7 +56,7 @@ class EquipeLightSerializer(serializers.ModelSerializer):
     Utilise les données prefetchées au lieu des properties coûteuses.
     """
     chef_equipe_nom = serializers.CharField(
-        source='chef_equipe.utilisateur.get_full_name',
+        source='chef_equipe.nom_complet',
         read_only=True,
         allow_null=True
     )
@@ -72,9 +72,10 @@ class EquipeLightSerializer(serializers.ModelSerializer):
 
     def get_nombre_membres(self, obj):
         """Compte les membres depuis les données prefetchées."""
+        from api_users.models import StatutOperateur
         # Si les opérateurs sont prefetchés, on les compte en mémoire
         if hasattr(obj, '_prefetched_objects_cache') and 'operateurs' in obj._prefetched_objects_cache:
-            return sum(1 for op in obj.operateurs.all() if op.utilisateur.actif)
+            return sum(1 for op in obj.operateurs.all() if op.statut == StatutOperateur.ACTIF)
         # Fallback sur la property (génère une requête)
         return obj.nombre_membres
 

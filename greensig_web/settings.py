@@ -183,8 +183,7 @@ AUTH_USER_MODEL = 'api_users.Utilisateur'
 
 REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 50,  # Nombre d'éléments par page par défaut
+    'DEFAULT_PAGINATION_CLASS': 'greensig_web.pagination.CustomPageNumberPagination',
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
