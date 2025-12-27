@@ -70,17 +70,13 @@ class RoleBasedQuerySetMixin:
         """
         model_name = queryset.model.__name__
 
-        # Sites : Sites liés aux tâches de ses équipes
+        # Sites : Sites affectés directement au superviseur
         if model_name == 'Site':
-            return queryset.filter(
-                taches__equipes__superviseur=superviseur
-            ).distinct()
+            return queryset.filter(superviseur=superviseur)
 
-        # SousSite : Sous-sites des sites de ses équipes
+        # SousSite : Sous-sites des sites affectés au superviseur
         if model_name == 'SousSite':
-            return queryset.filter(
-                site__taches__equipes__superviseur=superviseur
-            ).distinct()
+            return queryset.filter(site__superviseur=superviseur)
 
         # Opérateurs : Ses opérateurs
         if model_name == 'Operateur':
@@ -98,18 +94,14 @@ class RoleBasedQuerySetMixin:
         if model_name == 'Tache':
             return queryset.filter(equipes__superviseur=superviseur).distinct()
 
-        # Réclamations : Réclamations sur les sites de ses équipes
+        # Réclamations : Réclamations sur les sites affectés au superviseur
         if model_name == 'Reclamation':
-            return queryset.filter(
-                site__taches__equipes__superviseur=superviseur
-            ).distinct()
+            return queryset.filter(site__superviseur=superviseur)
 
-        # Objets GIS (15 types) : Objets sur les sites de ses équipes
+        # Objets GIS (15 types) : Objets sur les sites affectés au superviseur
         # Tous les objets GIS ont un champ 'site'
         if hasattr(queryset.model, 'site'):
-            return queryset.filter(
-                site__taches__equipes__superviseur=superviseur
-            ).distinct()
+            return queryset.filter(site__superviseur=superviseur)
 
         # Par défaut, retourner le queryset complet (au cas où)
         return queryset

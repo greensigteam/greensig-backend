@@ -24,6 +24,17 @@ class Site(models.Model):
         blank=True
     )
 
+    # Superviseur affecté au site (gestion opérationnelle)
+    superviseur = models.ForeignKey(
+        'api_users.Superviseur',
+        on_delete=models.SET_NULL,
+        related_name='sites_affectes',
+        verbose_name="Superviseur affecté",
+        null=True,
+        blank=True,
+        help_text="Superviseur responsable de la gestion de ce site"
+    )
+
     # Dates de contrat
     date_debut_contrat = models.DateField(blank=True, null=True)
     date_fin_contrat = models.DateField(blank=True, null=True)
