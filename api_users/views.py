@@ -434,7 +434,6 @@ class SuperviseurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, views
     """
     queryset = Superviseur.objects.select_related('utilisateur').prefetch_related(
         'utilisateur__roles_utilisateur__role',
-        'equipes_gerees',
         'operateurs_supervises'
     ).all()
 
