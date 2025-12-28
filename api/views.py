@@ -27,6 +27,44 @@ from .site_statistics_view import SiteStatisticsView
 
 
 # ==============================================================================
+# MIXIN POUR LE FILTRAGE DES OBJETS GIS PAR PERMISSIONS
+# ==============================================================================
+
+class GISObjectPermissionMixin:
+    """
+    Mixin pour filtrer automatiquement les objets GIS selon les permissions utilisateur.
+
+    Tous les objets GIS ont un champ 'site' qui permet de filtrer selon:
+    - ADMIN: voit tous les objets
+    - CLIENT: voit uniquement les objets de ses sites
+    - SUPERVISEUR: voit uniquement les objets des sites qui lui sont affectés
+    """
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if not user or not user.is_authenticated:
+            return queryset.none()
+
+        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+        # ADMIN voit tout
+        if 'ADMIN' in roles:
+            return queryset
+
+        # CLIENT voit uniquement les objets de ses sites
+        if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+            return queryset.filter(site__client=user.client_profile)
+
+        # SUPERVISEUR voit uniquement les objets des sites qui lui sont affectés
+        if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+            return queryset.filter(site__superviseur=user.superviseur_profile)
+
+        # Par défaut, aucun accès
+        return queryset.none()
+
+
+# ==============================================================================
 # VUES POUR LA HIÉRARCHIE SPATIALE
 # ==============================================================================
 
@@ -55,13 +93,9 @@ class SiteListCreateView(generics.ListCreateAPIView):
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
                 return queryset.filter(client=user.client_profile)
 
-            # SUPERVISEUR voit uniquement les sites liés à ses tâches
-            if 'SUPERVISEUR' in roles:
-                site_ids = self._get_superviseur_site_ids(user)
-                if site_ids:
-                    return queryset.filter(id__in=site_ids)
-                else:
-                    return queryset.none()
+            # SUPERVISEUR voit uniquement les sites qui lui sont affectés directement
+            if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+                return queryset.filter(superviseur=user.superviseur_profile)
 
         return queryset
 
@@ -107,15 +141,28 @@ class SiteDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         """
-        Filter sites by client if the logged-in user is a CLIENT.
+        Filtrage automatique basé sur les permissions utilisateur:
+        - ADMIN: voit tous les sites
+        - CLIENT: voit uniquement ses sites
+        - SUPERVISEUR: voit uniquement les sites qui lui sont affectés
         """
         queryset = Site.objects.all()
         user = self.request.user
 
         if user.is_authenticated:
-            has_client_role = user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
-            if has_client_role and hasattr(user, 'client_profile'):
-                queryset = queryset.filter(client=user.client_profile)
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' in roles:
+                return queryset
+
+            # CLIENT voit uniquement ses sites
+            if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                return queryset.filter(client=user.client_profile)
+
+            # SUPERVISEUR voit uniquement les sites qui lui sont affectés
+            if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+                return queryset.filter(superviseur=user.superviseur_profile)
 
         return queryset
 
@@ -125,10 +172,64 @@ class SousSiteListCreateView(generics.ListCreateAPIView):
     serializer_class = SousSiteSerializer
     filterset_class = SousSiteFilter
 
+    def get_queryset(self):
+        """
+        Filtrage automatique basé sur les permissions utilisateur:
+        - ADMIN: voit tous les sous-sites
+        - CLIENT: voit uniquement les sous-sites de ses sites
+        - SUPERVISEUR: voit uniquement les sous-sites des sites qui lui sont affectés
+        """
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' in roles:
+                return queryset
+
+            # CLIENT voit uniquement les sous-sites de ses sites
+            if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                return queryset.filter(site__client=user.client_profile)
+
+            # SUPERVISEUR voit uniquement les sous-sites des sites qui lui sont affectés
+            if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+                return queryset.filter(site__superviseur=user.superviseur_profile)
+
+        return queryset
+
 
 class SousSiteDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = SousSite.objects.all()
     serializer_class = SousSiteSerializer
+
+    def get_queryset(self):
+        """
+        Filtrage automatique basé sur les permissions utilisateur:
+        - ADMIN: voit tous les sous-sites
+        - CLIENT: voit uniquement les sous-sites de ses sites
+        - SUPERVISEUR: voit uniquement les sous-sites des sites qui lui sont affectés
+        """
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' in roles:
+                return queryset
+
+            # CLIENT voit uniquement les sous-sites de ses sites
+            if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                return queryset.filter(site__client=user.client_profile)
+
+            # SUPERVISEUR voit uniquement les sous-sites des sites qui lui sont affectés
+            if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+                return queryset.filter(site__superviseur=user.superviseur_profile)
+
+        return queryset
 
 
 class DetectSiteView(APIView):
@@ -200,79 +301,79 @@ class DetectSiteView(APIView):
 # VUES POUR LES VÉGÉTAUX
 # ==============================================================================
 
-class ArbreListCreateView(generics.ListCreateAPIView):
+class ArbreListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Arbre.objects.all().order_by('id')
     serializer_class = ArbreSerializer
     filterset_class = ArbreFilter
 
 
-class ArbreDetailView(generics.RetrieveUpdateDestroyAPIView):
+class ArbreDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Arbre.objects.all()
     serializer_class = ArbreSerializer
 
 
-class GazonListCreateView(generics.ListCreateAPIView):
+class GazonListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Gazon.objects.all().order_by('id')
     serializer_class = GazonSerializer
     filterset_class = GazonFilter
 
 
-class GazonDetailView(generics.RetrieveUpdateDestroyAPIView):
+class GazonDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Gazon.objects.all()
     serializer_class = GazonSerializer
 
 
-class PalmierListCreateView(generics.ListCreateAPIView):
+class PalmierListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Palmier.objects.all().order_by('id')
     serializer_class = PalmierSerializer
     filterset_class = PalmierFilter
 
 
-class PalmierDetailView(generics.RetrieveUpdateDestroyAPIView):
+class PalmierDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Palmier.objects.all()
     serializer_class = PalmierSerializer
 
 
-class ArbusteListCreateView(generics.ListCreateAPIView):
+class ArbusteListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Arbuste.objects.all().order_by('id')
     serializer_class = ArbusteSerializer
     filterset_class = ArbusteFilter
 
 
-class ArbusteDetailView(generics.RetrieveUpdateDestroyAPIView):
+class ArbusteDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Arbuste.objects.all()
     serializer_class = ArbusteSerializer
 
 
-class VivaceListCreateView(generics.ListCreateAPIView):
+class VivaceListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Vivace.objects.all().order_by('id')
     serializer_class = VivaceSerializer
     filterset_class = VivaceFilter
 
 
-class VivaceDetailView(generics.RetrieveUpdateDestroyAPIView):
+class VivaceDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Vivace.objects.all()
     serializer_class = VivaceSerializer
 
 
-class CactusListCreateView(generics.ListCreateAPIView):
+class CactusListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Cactus.objects.all().order_by('id')
     serializer_class = CactusSerializer
     filterset_class = CactusFilter
 
 
-class CactusDetailView(generics.RetrieveUpdateDestroyAPIView):
+class CactusDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Cactus.objects.all()
     serializer_class = CactusSerializer
 
 
-class GramineeListCreateView(generics.ListCreateAPIView):
+class GramineeListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Graminee.objects.all().order_by('id')
     serializer_class = GramineeSerializer
     filterset_class = GramineeFilter
 
 
-class GramineeDetailView(generics.RetrieveUpdateDestroyAPIView):
+class GramineeDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Graminee.objects.all()
     serializer_class = GramineeSerializer
 
@@ -281,84 +382,84 @@ class GramineeDetailView(generics.RetrieveUpdateDestroyAPIView):
 # VUES POUR L'HYDRAULIQUE
 # ==============================================================================
 
-class PuitListCreateView(generics.ListCreateAPIView):
+class PuitListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Puit.objects.all().order_by('id')
     serializer_class = PuitSerializer
     filterset_class = PuitFilter
 
 
-class PuitDetailView(generics.RetrieveUpdateDestroyAPIView):
+class PuitDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Puit.objects.all()
     serializer_class = PuitSerializer
 
 
-class PompeListCreateView(generics.ListCreateAPIView):
+class PompeListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Pompe.objects.all().order_by('id')
     serializer_class = PompeSerializer
     filterset_class = PompeFilter
 
 
-class PompeDetailView(generics.RetrieveUpdateDestroyAPIView):
+class PompeDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Pompe.objects.all()
     serializer_class = PompeSerializer
 
 
-class VanneListCreateView(generics.ListCreateAPIView):
+class VanneListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Vanne.objects.all().order_by('id')
     serializer_class = VanneSerializer
     filterset_class = VanneFilter
 
 
-class VanneDetailView(generics.RetrieveUpdateDestroyAPIView):
+class VanneDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Vanne.objects.all()
     serializer_class = VanneSerializer
 
 
-class ClapetListCreateView(generics.ListCreateAPIView):
+class ClapetListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Clapet.objects.all().order_by('id')
     serializer_class = ClapetSerializer
     filterset_class = ClapetFilter
 
 
-class ClapetDetailView(generics.RetrieveUpdateDestroyAPIView):
+class ClapetDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Clapet.objects.all()
     serializer_class = ClapetSerializer
 
 
-class CanalisationListCreateView(generics.ListCreateAPIView):
+class CanalisationListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Canalisation.objects.all().order_by('id')
     serializer_class = CanalisationSerializer
     filterset_class = CanalisationFilter
 
 
-class CanalisationDetailView(generics.RetrieveUpdateDestroyAPIView):
+class CanalisationDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Canalisation.objects.all()
     serializer_class = CanalisationSerializer
 
 
-class AspersionListCreateView(generics.ListCreateAPIView):
+class AspersionListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Aspersion.objects.all().order_by('id')
     serializer_class = AspersionSerializer
     filterset_class = AspersionFilter
 
 
-class AspersionDetailView(generics.RetrieveUpdateDestroyAPIView):
+class AspersionDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Aspersion.objects.all()
     serializer_class = AspersionSerializer
 
 
-class GoutteListCreateView(generics.ListCreateAPIView):
+class GoutteListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Goutte.objects.all().order_by('id')
     serializer_class = GoutteSerializer
     filterset_class = GoutteFilter
 
 
-class GoutteDetailView(generics.RetrieveUpdateDestroyAPIView):
+class GoutteDetailView(GISObjectPermissionMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Goutte.objects.all()
     serializer_class = GoutteSerializer
 
 
-class BallonListCreateView(generics.ListCreateAPIView):
+class BallonListCreateView(GISObjectPermissionMixin, generics.ListCreateAPIView):
     queryset = Ballon.objects.all().order_by('id')
     serializer_class = BallonSerializer
     filterset_class = BallonFilter
@@ -704,104 +805,160 @@ class ExportPDFView(APIView):
 
 class StatisticsView(APIView):
     """
-    Vue pour retourner les statistiques globales du système.
-    Retourne des statistiques contextuelles supplémentaires selon le rôle (SUPERVISEUR).
+    Vue pour retourner les statistiques contextuelles selon le rôle de l'utilisateur.
+    - ADMIN: statistiques globales de tout le système
+    - CLIENT: statistiques de ses sites uniquement
+    - SUPERVISEUR: statistiques des sites qui lui sont affectés
     """
+
+    def _get_filtered_querysets(self, request):
+        """
+        Retourne un dictionnaire de querysets filtrés selon le rôle de l'utilisateur.
+        Chaque queryset est filtré automatiquement pour respecter les permissions.
+        """
+        user = request.user
+        querysets = {}
+
+        # Déterminer le filtre à appliquer
+        site_filter = None
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            if 'ADMIN' in roles:
+                # ADMIN: pas de filtre, voit tout
+                site_filter = Q()
+            elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                # CLIENT: uniquement ses sites
+                site_filter = Q(site__client=user.client_profile)
+            elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+                # SUPERVISEUR: uniquement les sites qui lui sont affectés
+                site_filter = Q(site__superviseur=user.superviseur_profile)
+            else:
+                # Aucun accès
+                site_filter = Q(pk__in=[])  # Queryset vide
+
+        # Filtrer Sites et SousSites séparément (pas de champ 'site')
+        if user.is_authenticated and 'ADMIN' in [ur.role.nom_role for ur in user.roles_utilisateur.all()]:
+            querysets['Site'] = Site.objects.all()
+            querysets['SousSite'] = SousSite.objects.all()
+        elif user.is_authenticated and 'CLIENT' in [ur.role.nom_role for ur in user.roles_utilisateur.all()]:
+            querysets['Site'] = Site.objects.filter(client=user.client_profile)
+            querysets['SousSite'] = SousSite.objects.filter(site__client=user.client_profile)
+        elif user.is_authenticated and 'SUPERVISEUR' in [ur.role.nom_role for ur in user.roles_utilisateur.all()]:
+            querysets['Site'] = Site.objects.filter(superviseur=user.superviseur_profile)
+            querysets['SousSite'] = SousSite.objects.filter(site__superviseur=user.superviseur_profile)
+        else:
+            querysets['Site'] = Site.objects.none()
+            querysets['SousSite'] = SousSite.objects.none()
+
+        # Appliquer le filtre site à tous les objets GIS
+        for model in [Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee,
+                      Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon]:
+            if site_filter is not None:
+                querysets[model.__name__] = model.objects.filter(site_filter)
+            else:
+                querysets[model.__name__] = model.objects.none()
+
+        return querysets
+
     def get(self, request, *args, **kwargs):
         from django.db.models import Count, Avg, Sum, Max, Min, Q
         from django.apps import apps
         from django.utils import timezone
-        
-        # Statistiques globales (pour tout le monde)
+
+        # Obtenir les querysets filtrés selon le rôle
+        qs = self._get_filtered_querysets(request)
+
+        # Statistiques filtrées selon les permissions
         statistics = {
             # Statistiques de hiérarchie
             'hierarchy': {
-                'total_sites': Site.objects.count(),
-                'total_sous_sites': SousSite.objects.count(),
-                'active_sites': Site.objects.filter(actif=True).count(),
+                'total_sites': qs["Site"].count(),
+                'total_sous_sites': qs["SousSite"].count(),
+                'active_sites': qs["Site"].filter(actif=True).count(),
             },
 
             # Statistiques végétaux
             'vegetation': {
                 'arbres': {
-                    'total': Arbre.objects.count(),
-                    'by_taille': dict(Arbre.objects.values('taille').annotate(count=Count('id')).values_list('taille', 'count')),
-                    'top_families': list(Arbre.objects.values('famille').annotate(count=Count('id')).order_by('-count')[:5].values('famille', 'count'))
+                    'total': qs["Arbre"].count(),
+                    'by_taille': dict(qs["Arbre"].values('taille').annotate(count=Count('id')).values_list('taille', 'count')),
+                    'top_families': list(qs["Arbre"].values('famille').annotate(count=Count('id')).order_by('-count')[:5].values('famille', 'count'))
                 },
                 'gazons': {
-                    'total': Gazon.objects.count(),
-                    'total_area_sqm': Gazon.objects.aggregate(Sum('area_sqm'))['area_sqm__sum'] or 0,
+                    'total': qs["Gazon"].count(),
+                    'total_area_sqm': qs["Gazon"].aggregate(Sum('area_sqm'))['area_sqm__sum'] or 0,
                 },
                 'palmiers': {
-                    'total': Palmier.objects.count(),
-                    'by_taille': dict(Palmier.objects.values('taille').annotate(count=Count('id')).values_list('taille', 'count')),
+                    'total': qs["Palmier"].count(),
+                    'by_taille': dict(qs["Palmier"].values('taille').annotate(count=Count('id')).values_list('taille', 'count')),
                 },
                 'arbustes': {
-                    'total': Arbuste.objects.count(),
-                    'avg_densite': Arbuste.objects.aggregate(Avg('densite'))['densite__avg'] or 0,
+                    'total': qs["Arbuste"].count(),
+                    'avg_densite': qs["Arbuste"].aggregate(Avg('densite'))['densite__avg'] or 0,
                 },
                 'vivaces': {
-                    'total': Vivace.objects.count(),
+                    'total': qs["Vivace"].count(),
                 },
                 'cactus': {
-                    'total': Cactus.objects.count(),
+                    'total': qs["Cactus"].count(),
                 },
                 'graminees': {
-                    'total': Graminee.objects.count(),
+                    'total': qs["Graminee"].count(),
                 }
             },
 
             # Statistiques hydraulique
             'hydraulique': {
                 'puits': {
-                    'total': Puit.objects.count(),
-                    'avg_profondeur': Puit.objects.aggregate(Avg('profondeur'))['profondeur__avg'] or 0,
-                    'max_profondeur': Puit.objects.aggregate(Max('profondeur'))['profondeur__max'] or 0,
+                    'total': qs["Puit"].count(),
+                    'avg_profondeur': qs["Puit"].aggregate(Avg('profondeur'))['profondeur__avg'] or 0,
+                    'max_profondeur': qs["Puit"].aggregate(Max('profondeur'))['profondeur__max'] or 0,
                 },
                 'pompes': {
-                    'total': Pompe.objects.count(),
-                    'avg_puissance': Pompe.objects.aggregate(Avg('puissance'))['puissance__avg'] or 0,
-                    'avg_debit': Pompe.objects.aggregate(Avg('debit'))['debit__avg'] or 0,
+                    'total': qs["Pompe"].count(),
+                    'avg_puissance': qs["Pompe"].aggregate(Avg('puissance'))['puissance__avg'] or 0,
+                    'avg_debit': qs["Pompe"].aggregate(Avg('debit'))['debit__avg'] or 0,
                 },
                 'vannes': {
-                    'total': Vanne.objects.count(),
+                    'total': qs["Vanne"].count(),
                 },
                 'clapets': {
-                    'total': Clapet.objects.count(),
+                    'total': qs["Clapet"].count(),
                 },
                 'canalisations': {
-                    'total': Canalisation.objects.count(),
+                    'total': qs["Canalisation"].count(),
                 },
                 'aspersions': {
-                    'total': Aspersion.objects.count(),
+                    'total': qs["Aspersion"].count(),
                 },
                 'gouttes': {
-                    'total': Goutte.objects.count(),
+                    'total': qs["Goutte"].count(),
                 },
                 'ballons': {
-                    'total': Ballon.objects.count(),
-                    'total_volume': Ballon.objects.aggregate(Sum('volume'))['volume__sum'] or 0,
+                    'total': qs["Ballon"].count(),
+                    'total_volume': qs["Ballon"].aggregate(Sum('volume'))['volume__sum'] or 0,
                 }
             },
 
             # Statistiques globales
             'global': {
                 'total_objets': (
-                    Arbre.objects.count() + Gazon.objects.count() + Palmier.objects.count() +
-                    Arbuste.objects.count() + Vivace.objects.count() + Cactus.objects.count() +
-                    Graminee.objects.count() + Puit.objects.count() + Pompe.objects.count() +
-                    Vanne.objects.count() + Clapet.objects.count() + Canalisation.objects.count() +
-                    Aspersion.objects.count() + Goutte.objects.count() + Ballon.objects.count()
+                    qs["Arbre"].count() + qs["Gazon"].count() + qs["Palmier"].count() +
+                    qs["Arbuste"].count() + qs["Vivace"].count() + qs["Cactus"].count() +
+                    qs["Graminee"].count() + qs["Puit"].count() + qs["Pompe"].count() +
+                    qs["Vanne"].count() + qs["Clapet"].count() + qs["Canalisation"].count() +
+                    qs["Aspersion"].count() + qs["Goutte"].count() + qs["Ballon"].count()
                 ),
                 'total_vegetation': (
-                    Arbre.objects.count() + Gazon.objects.count() + Palmier.objects.count() +
-                    Arbuste.objects.count() + Vivace.objects.count() + Cactus.objects.count() +
-                    Graminee.objects.count()
+                    qs["Arbre"].count() + qs["Gazon"].count() + qs["Palmier"].count() +
+                    qs["Arbuste"].count() + qs["Vivace"].count() + qs["Cactus"].count() +
+                    qs["Graminee"].count()
                 ),
                 'total_hydraulique': (
-                    Puit.objects.count() + Pompe.objects.count() + Vanne.objects.count() +
-                    Clapet.objects.count() + Canalisation.objects.count() + Aspersion.objects.count() +
-                    Goutte.objects.count() + Ballon.objects.count()
+                    qs["Puit"].count() + qs["Pompe"].count() + qs["Vanne"].count() +
+                    qs["Clapet"].count() + qs["Canalisation"].count() + qs["Aspersion"].count() +
+                    qs["Goutte"].count() + qs["Ballon"].count()
                 )
             }
         }
@@ -2253,7 +2410,7 @@ class FilterOptionsView(APIView):
         
         # Surface (Gazon)
         if not object_type or object_type.lower() == 'gazon':
-            surface_range = Gazon.objects.aggregate(
+            surface_range = qs["Gazon"].aggregate(
                 min=Min('area_sqm'),
                 max=Max('area_sqm')
             )
@@ -2283,7 +2440,7 @@ class FilterOptionsView(APIView):
         
         # Profondeur (Puit)
         if not object_type or object_type.lower() == 'puit':
-            depth_range = Puit.objects.aggregate(
+            depth_range = qs["Puit"].aggregate(
                 min=Min('profondeur'),
                 max=Max('profondeur')
             )
@@ -2508,47 +2665,32 @@ class MapObjectsView(APIView):
 
     def _get_superviseur_filters(self, user):
         """
-        Récupère les IDs des sites et objets liés aux tâches du superviseur.
+        Récupère les IDs des sites et objets affectés directement au superviseur.
         Returns: tuple (site_ids, object_ids)
 
         Le superviseur voit:
-        - Les sites qui contiennent les objets de ses tâches
-        - Uniquement les objets directement liés à ses tâches
+        - Les sites qui lui sont affectés directement (via site.superviseur)
+        - Tous les objets de ces sites
 
-        OPTIMISÉ: Une seule requête SQL au lieu de N+1.
+        NOUVEAU SYSTÈME: Affectation directe superviseur → sites (plus simple et plus clair)
         """
-        from api_planification.models import Tache
-
         try:
             superviseur = user.superviseur_profile
-            # Équipes gérées par ce superviseur
-            equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
-            equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
 
-            if not equipes_gerees_ids:
+            # Sites affectés directement au superviseur
+            site_ids = list(
+                Site.objects.filter(superviseur=superviseur).values_list('id', flat=True)
+            )
+
+            if not site_ids:
                 return ([], [])
 
-            # Tâches assignées à ces équipes (non supprimées) - juste les IDs
-            taches_ids = Tache.objects.filter(
-                deleted_at__isnull=True
-            ).filter(
-                Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).values_list('id', flat=True).distinct()
+            # Tous les objets GIS de ces sites
+            object_ids = list(
+                Objet.objects.filter(site_id__in=site_ids).values_list('id', flat=True)
+            )
 
-            # OPTIMISÉ: Récupérer les objets en une seule requête via la relation inverse
-            objets_data = Objet.objects.filter(
-                taches__id__in=taches_ids
-            ).values_list('id', 'site_id').distinct()
-
-            # Extraire les IDs d'objets et de sites
-            object_ids = []
-            site_ids = []
-            for obj_id, site_id in objets_data:
-                object_ids.append(obj_id)
-                if site_id:
-                    site_ids.append(site_id)
-
-            return (list(set(site_ids)), object_ids)
+            return (site_ids, object_ids)
         except Exception:
             return ([], [])
 
@@ -2585,39 +2727,67 @@ class InventoryFilterOptionsView(APIView):
     """
 
     def get(self, request):
-        from django.db.models import Min, Max
+        from django.db.models import Min, Max, Q
 
         type_filter = request.query_params.get('type', None)
+
+        # Obtenir les querysets filtrés selon les permissions de l'utilisateur
+        user = request.user
+        site_filter = Q()  # Par défaut, pas de filtre (ADMIN)
+
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            if 'ADMIN' not in roles:
+                if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+                    # CLIENT: uniquement ses sites
+                    site_filter = Q(client=user.client_profile)
+                    object_filter = Q(site__client=user.client_profile)
+                elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+                    # SUPERVISEUR: uniquement les sites qui lui sont affectés
+                    site_filter = Q(superviseur=user.superviseur_profile)
+                    object_filter = Q(site__superviseur=user.superviseur_profile)
+                else:
+                    # Aucun accès
+                    site_filter = Q(pk__in=[])
+                    object_filter = Q(pk__in=[])
+            else:
+                # ADMIN: pas de filtre
+                object_filter = Q()
+        else:
+            # Non authentifié: aucun accès
+            site_filter = Q(pk__in=[])
+            object_filter = Q(pk__in=[])
 
         # ==============================================================================
         # SITES
         # ==============================================================================
-        sites = Site.objects.filter(actif=True).values('id', 'nom_site').order_by('nom_site')
+        sites = Site.objects.filter(site_filter).filter(actif=True).values('id', 'nom_site').order_by('nom_site')
         sites_list = [{'id': s['id'], 'name': s['nom_site']} for s in sites]
 
         # ==============================================================================
         # ZONES (Sous-sites)
         # ==============================================================================
-        zones = list(SousSite.objects.values_list('nom', flat=True).distinct().order_by('nom'))
+        zones = list(SousSite.objects.filter(object_filter).values_list('nom', flat=True).distinct().order_by('nom'))
 
         # ==============================================================================
         # FAMILLES (végétaux uniquement)
         # ==============================================================================
         families = set()
         if not type_filter or type_filter.lower() in ['arbre', 'arbres']:
-            families.update(Arbre.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Arbre.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['gazon', 'gazons']:
-            families.update(Gazon.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Gazon.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['palmier', 'palmiers']:
-            families.update(Palmier.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Palmier.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['arbuste', 'arbustes']:
-            families.update(Arbuste.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Arbuste.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['vivace', 'vivaces']:
-            families.update(Vivace.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Vivace.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['cactus']:
-            families.update(Cactus.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Cactus.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['graminee', 'graminees']:
-            families.update(Graminee.objects.exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
+            families.update(Graminee.objects.filter(object_filter).exclude(famille__isnull=True).exclude(famille='').values_list('famille', flat=True).distinct())
 
         families_list = sorted(list(families))
 
@@ -2626,17 +2796,17 @@ class InventoryFilterOptionsView(APIView):
         # ==============================================================================
         materials = set()
         if not type_filter or type_filter.lower() in ['vanne', 'vannes']:
-            materials.update(Vanne.objects.exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
+            materials.update(Vanne.objects.filter(object_filter).exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['clapet', 'clapets']:
-            materials.update(Clapet.objects.exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
+            materials.update(Clapet.objects.filter(object_filter).exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['canalisation', 'canalisations']:
-            materials.update(Canalisation.objects.exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
+            materials.update(Canalisation.objects.filter(object_filter).exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['aspersion', 'aspersions']:
-            materials.update(Aspersion.objects.exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
+            materials.update(Aspersion.objects.filter(object_filter).exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['goutte', 'gouttes']:
-            materials.update(Goutte.objects.exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
+            materials.update(Goutte.objects.filter(object_filter).exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['ballon', 'ballons']:
-            materials.update(Ballon.objects.exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
+            materials.update(Ballon.objects.filter(object_filter).exclude(materiau__isnull=True).exclude(materiau='').values_list('materiau', flat=True).distinct())
 
         materials_list = sorted(list(materials))
 
@@ -2645,17 +2815,17 @@ class InventoryFilterOptionsView(APIView):
         # ==============================================================================
         equipment_types = set()
         if not type_filter or type_filter.lower() in ['pompe', 'pompes']:
-            equipment_types.update(Pompe.objects.exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
+            equipment_types.update(Pompe.objects.filter(object_filter).exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['vanne', 'vannes']:
-            equipment_types.update(Vanne.objects.exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
+            equipment_types.update(Vanne.objects.filter(object_filter).exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['clapet', 'clapets']:
-            equipment_types.update(Clapet.objects.exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
+            equipment_types.update(Clapet.objects.filter(object_filter).exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['canalisation', 'canalisations']:
-            equipment_types.update(Canalisation.objects.exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
+            equipment_types.update(Canalisation.objects.filter(object_filter).exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['aspersion', 'aspersions']:
-            equipment_types.update(Aspersion.objects.exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
+            equipment_types.update(Aspersion.objects.filter(object_filter).exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
         if not type_filter or type_filter.lower() in ['goutte', 'gouttes']:
-            equipment_types.update(Goutte.objects.exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
+            equipment_types.update(Goutte.objects.filter(object_filter).exclude(type__isnull=True).exclude(type='').values_list('type', flat=True).distinct())
 
         equipment_types_list = sorted(list(equipment_types))
 
@@ -2675,7 +2845,7 @@ class InventoryFilterOptionsView(APIView):
         ranges = {}
 
         # Surface (gazons)
-        surface_range = Gazon.objects.aggregate(min_val=Min('area_sqm'), max_val=Max('area_sqm'))
+        surface_range = Gazon.objects.filter(object_filter).aggregate(min_val=Min('area_sqm'), max_val=Max('area_sqm'))
         if surface_range['min_val'] is not None:
             ranges['surface'] = [
                 float(surface_range['min_val'] or 0),
@@ -2685,7 +2855,7 @@ class InventoryFilterOptionsView(APIView):
         # Diamètre (puits, pompes, vannes, etc.)
         diameter_values = []
         for Model in [Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte]:
-            agg = Model.objects.aggregate(min_val=Min('diametre'), max_val=Max('diametre'))
+            agg = Model.objects.filter(object_filter).aggregate(min_val=Min('diametre'), max_val=Max('diametre'))
             if agg['min_val'] is not None:
                 diameter_values.append(agg['min_val'])
             if agg['max_val'] is not None:
@@ -2694,7 +2864,7 @@ class InventoryFilterOptionsView(APIView):
             ranges['diameter'] = [float(min(diameter_values)), float(max(diameter_values))]
 
         # Profondeur (puits)
-        depth_range = Puit.objects.aggregate(min_val=Min('profondeur'), max_val=Max('profondeur'))
+        depth_range = Puit.objects.filter(object_filter).aggregate(min_val=Min('profondeur'), max_val=Max('profondeur'))
         if depth_range['min_val'] is not None:
             ranges['depth'] = [
                 float(depth_range['min_val'] or 0),
@@ -2704,7 +2874,7 @@ class InventoryFilterOptionsView(APIView):
         # Densité (arbustes, vivaces, cactus, graminées)
         density_values = []
         for Model in [Arbuste, Vivace, Cactus, Graminee]:
-            agg = Model.objects.aggregate(min_val=Min('densite'), max_val=Max('densite'))
+            agg = Model.objects.filter(object_filter).aggregate(min_val=Min('densite'), max_val=Max('densite'))
             if agg['min_val'] is not None:
                 density_values.append(agg['min_val'])
             if agg['max_val'] is not None:

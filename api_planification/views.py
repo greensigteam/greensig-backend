@@ -148,7 +148,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             'id_client__utilisateur',
             'id_type_tache',
             'id_equipe__chef_equipe',
-            'id_equipe__superviseur__utilisateur',
+            'id_equipe__site__superviseur__utilisateur',
             'reclamation'
         )
 

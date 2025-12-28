@@ -328,6 +328,20 @@ class Superviseur(models.Model):
         return f"{self.utilisateur.get_full_name()} (Superviseur - {self.matricule})"
 
     @property
+    def equipes_gerees(self):
+        """
+        Retourne toutes les équipes gérées par ce superviseur.
+
+        ⚠️ LOGIQUE MÉTIER : Un superviseur gère les équipes affectées aux sites
+        qu'il supervise. Cette propriété remplace l'ancienne relation ForeignKey.
+
+        Returns:
+            QuerySet[Equipe]: Toutes les équipes affectées aux sites du superviseur
+        """
+        from api_users.models import Equipe
+        return Equipe.objects.filter(site__superviseur=self)
+
+    @property
     def nombre_equipes(self):
         """Retourne le nombre d'équipes gérées par ce superviseur."""
         return self.equipes_gerees.filter(actif=True).count()
@@ -390,14 +404,15 @@ class Equipe(models.Model):
     Représente une équipe d'opérateurs.
 
     ⚠️ REFACTORISATION (Architecture RH) :
-    - Une équipe est gérée par un SUPERVISEUR (utilisateur)
+    - Une équipe est affectée à un SITE
+    - Le superviseur de l'équipe est automatiquement celui du site (propriété calculée)
     - Un opérateur peut être désigné comme "chef d'équipe" (attribut, pas rôle)
     - Le chef d'équipe travaille sur le terrain avec son équipe
 
     Règles métier:
     - Une équipe PEUT avoir un chef (opérateur avec compétence "Gestion d'équipe")
     - Un opérateur ne peut être chef que d'UNE SEULE équipe (OneToOne)
-    - Une équipe doit avoir un superviseur responsable
+    - Une équipe est affectée à un site, son superviseur est celui du site
     """
     nom_equipe = models.CharField(
         max_length=100,
@@ -414,14 +429,17 @@ class Equipe(models.Model):
         help_text="Opérateur désigné comme chef (doit avoir compétence 'Gestion d\\'équipe')"
     )
 
-    superviseur = models.ForeignKey(
-        'Superviseur',
+    # ⚠️ SUPPRIMÉ : Le superviseur est désormais automatiquement déduit du site
+    # superviseur = models.ForeignKey(...) - Voir @property superviseur ci-dessous
+
+    site = models.ForeignKey(
+        'api.Site',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='equipes_gerees',
-        verbose_name="Superviseur responsable",
-        help_text="Superviseur qui gère cette équipe"
+        related_name='equipes_affectees',
+        verbose_name="Site d'affectation contractuelle",
+        help_text="Site auquel l'équipe est affectée de manière contractuelle (affectation de base)"
     )
 
     actif = models.BooleanField(
@@ -445,6 +463,19 @@ class Equipe(models.Model):
     def nombre_membres(self):
         """Retourne le nombre d'opérateurs dans l'équipe."""
         return self.operateurs.filter(statut=StatutOperateur.ACTIF).count()
+
+    @property
+    def superviseur(self):
+        """
+        Retourne le superviseur de l'équipe, automatiquement déduit du site.
+
+        ⚠️ LOGIQUE MÉTIER : Le superviseur d'une équipe est celui qui supervise
+        le site sur lequel l'équipe est affectée.
+
+        Returns:
+            Superviseur | None: Le superviseur du site, ou None si pas de site
+        """
+        return self.site.superviseur if self.site else None
 
     @property
     def statut_operationnel(self):

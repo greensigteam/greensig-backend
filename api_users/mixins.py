@@ -84,7 +84,7 @@ class RoleBasedQuerySetMixin:
 
         # Équipes : Ses équipes
         if model_name == 'Equipe':
-            return queryset.filter(superviseur=superviseur)
+            return queryset.filter(site__superviseur=superviseur)
 
         # Absences : Absences de ses opérateurs
         if model_name == 'Absence':
@@ -92,7 +92,7 @@ class RoleBasedQuerySetMixin:
 
         # Tâches : Tâches assignées à ses équipes
         if model_name == 'Tache':
-            return queryset.filter(equipes__superviseur=superviseur).distinct()
+            return queryset.filter(equipes__site__superviseur=superviseur).distinct()
 
         # Réclamations : Réclamations sur les sites affectés au superviseur
         if model_name == 'Reclamation':

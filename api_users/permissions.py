@@ -145,7 +145,7 @@ class IsSuperviseurAndOwnsSite(permissions.BasePermission):
                 from api_planification.models import Tache
                 return Tache.objects.filter(
                     site=obj,
-                    equipes__superviseur=request.user.superviseur_profile
+                    equipes__site__superviseur=request.user.superviseur_profile
                 ).exists()
 
         return False
@@ -215,7 +215,7 @@ class CanManageReclamation(permissions.BasePermission):
                 from api_planification.models import Tache
                 return Tache.objects.filter(
                     site=obj.site,
-                    equipes__superviseur=request.user.superviseur_profile
+                    equipes__site__superviseur=request.user.superviseur_profile
                 ).exists()
 
         # CLIENT peut lire uniquement ses réclamations

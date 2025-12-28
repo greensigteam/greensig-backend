@@ -70,7 +70,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'urgence',
             'type_reclamation',
             'equipe_affectee',
-            'equipe_affectee__superviseur__utilisateur'
+            'equipe_affectee__site__superviseur__utilisateur'
         )
 
         # Prefetch pour le détail (historique, photos, taches, satisfaction)
@@ -575,7 +575,7 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
             if hasattr(user, 'superviseur_profile'):
                 superviseur = user.superviseur_profile
                 # Réclamations traitées par les équipes gérées par ce superviseur
-                filters |= Q(reclamation__equipe_affectee__superviseur=superviseur)
+                filters |= Q(reclamation__equipe_affectee__site__superviseur=superviseur)
 
             queryset = SatisfactionClient.objects.filter(filters)
 
@@ -584,7 +584,7 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
             'reclamation',
             'reclamation__createur',
             'reclamation__equipe_affectee',
-            'reclamation__equipe_affectee__superviseur'
+            'reclamation__equipe_affectee__site__superviseur'
         )
 
         # Filtre optionnel par reclamation_id
