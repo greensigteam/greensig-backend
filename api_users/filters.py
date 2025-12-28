@@ -248,6 +248,9 @@ class EquipeFilter(django_filters.FilterSet):
     # Filtres simples
     actif = django_filters.BooleanFilter()
 
+    # Filtre par site
+    site = django_filters.NumberFilter(field_name='site_id')
+
     # Filtre par chef
     chef_equipe = django_filters.NumberFilter(field_name='chef_equipe_id')
 
@@ -270,15 +273,15 @@ class EquipeFilter(django_filters.FilterSet):
 
     class Meta:
         model = Equipe
-        fields = ['actif', 'chef_equipe']
+        fields = ['actif', 'site', 'chef_equipe']
 
     def filter_search(self, queryset, name, value):
         """Recherche dans nom equipe."""
         if value:
             return queryset.filter(
                 Q(nom_equipe__icontains=value) |
-                Q(superviseur__utilisateur__nom__icontains=value) |
-                Q(superviseur__utilisateur__prenom__icontains=value)
+                Q(site__superviseur__utilisateur__nom__icontains=value) |
+                Q(site__superviseur__utilisateur__prenom__icontains=value)
             )
         return queryset
 

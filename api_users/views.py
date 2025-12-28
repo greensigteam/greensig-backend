@@ -878,7 +878,7 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
     Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
     queryset = Equipe.objects.select_related(
-        'chef_equipe', 'superviseur__utilisateur'
+        'chef_equipe', 'site__superviseur__utilisateur'
     ).prefetch_related(
         Prefetch('operateurs', queryset=Operateur.objects.filter(statut=StatutOperateur.ACTIF))
     ).all()
@@ -894,6 +894,23 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
         'retirer_membre': [IsAdmin],
         'default': [IsAuthenticated],  # Lecture pour tous authentifiés (filtrage via mixin)
     }
+
+    def filter_queryset(self, queryset):
+        """Override pour debug et s'assurer que le filtrage django-filter est appliqué."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Log avant filtrage
+        logger.info(f"[EquipeViewSet] AVANT filtrage: {queryset.count()} équipes")
+        logger.info(f"[EquipeViewSet] Query params: {self.request.query_params}")
+
+        # Appliquer le filtrage (django-filter + autres)
+        filtered = super().filter_queryset(queryset)
+
+        # Log après filtrage
+        logger.info(f"[EquipeViewSet] APRÈS filtrage: {filtered.count()} équipes")
+
+        return filtered
 
     def get_serializer_class(self):
         if self.action == 'create':

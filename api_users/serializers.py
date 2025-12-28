@@ -476,20 +476,32 @@ class EquipeListSerializer(serializers.ModelSerializer):
     """
     Serializer pour la liste des équipes.
 
-    ⚠️ REFACTORISATION : Equipe a maintenant un superviseur (utilisateur).
+    ⚠️ REFACTORISATION : Le superviseur est déduit du site (propriété calculée).
     """
     chef_equipe_nom = serializers.CharField(
         source='chef_equipe.nom_complet',
         read_only=True,
         allow_null=True
     )
-    superviseur_nom = serializers.CharField(
-        source='superviseur.utilisateur.get_full_name',
+    superviseur_nom = serializers.SerializerMethodField(read_only=True)
+    superviseur = serializers.SerializerMethodField(read_only=True)
+    site_nom = serializers.CharField(
+        source='site.nom_site',
         read_only=True,
         allow_null=True
     )
     nombre_membres = serializers.IntegerField(read_only=True)
     statut_operationnel = serializers.CharField(read_only=True)
+
+    def get_superviseur_nom(self, obj):
+        """Retourne le nom complet du superviseur (déduit du site)."""
+        if obj.superviseur and hasattr(obj.superviseur, 'utilisateur'):
+            return obj.superviseur.utilisateur.get_full_name()
+        return None
+
+    def get_superviseur(self, obj):
+        """Retourne l'ID du superviseur (déduit du site)."""
+        return obj.superviseur.utilisateur_id if obj.superviseur else None
 
     class Meta:
         model = Equipe
@@ -497,6 +509,7 @@ class EquipeListSerializer(serializers.ModelSerializer):
             'id', 'nom_equipe',
             'chef_equipe', 'chef_equipe_nom',
             'superviseur', 'superviseur_nom',
+            'site', 'site_nom',
             'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel'
         ]
@@ -506,13 +519,25 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
     """
     Serializer détaillé pour une équipe.
 
-    ⚠️ REFACTORISATION : Equipe a maintenant un superviseur.
+    ⚠️ REFACTORISATION : Le superviseur est déduit du site (propriété calculée).
     """
     chef_equipe_detail = OperateurListSerializer(source='chef_equipe', read_only=True)
-    superviseur_detail = SuperviseurSerializer(source='superviseur', read_only=True)
+    superviseur_detail = serializers.SerializerMethodField(read_only=True)
+    superviseur = serializers.SerializerMethodField(read_only=True)
+    site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
     membres = OperateurListSerializer(source='operateurs', many=True, read_only=True)
     nombre_membres = serializers.IntegerField(read_only=True)
     statut_operationnel = serializers.CharField(read_only=True)
+
+    def get_superviseur_detail(self, obj):
+        """Retourne les détails du superviseur (déduit du site)."""
+        if obj.superviseur:
+            return SuperviseurSerializer(obj.superviseur).data
+        return None
+
+    def get_superviseur(self, obj):
+        """Retourne l'ID du superviseur (déduit du site)."""
+        return obj.superviseur.utilisateur_id if obj.superviseur else None
 
     class Meta:
         model = Equipe
@@ -520,6 +545,7 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
             'id', 'nom_equipe',
             'chef_equipe', 'chef_equipe_detail',
             'superviseur', 'superviseur_detail',
+            'site', 'site_nom',
             'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel', 'membres'
         ]
@@ -529,7 +555,7 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
     """
     Serializer pour la création d'une équipe.
 
-    ⚠️ REFACTORISATION : Equipe nécessite maintenant un superviseur.
+    ⚠️ REFACTORISATION : Le superviseur est déduit automatiquement du site.
     """
     membres = serializers.PrimaryKeyRelatedField(
         many=True,
@@ -540,7 +566,7 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Equipe
-        fields = ['id', 'nom_equipe', 'chef_equipe', 'superviseur', 'actif', 'membres']
+        fields = ['id', 'nom_equipe', 'chef_equipe', 'site', 'actif', 'membres']
         read_only_fields = ['id']
 
     def validate_chef_equipe(self, value):
@@ -581,11 +607,15 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
 
 
 class EquipeUpdateSerializer(serializers.ModelSerializer):
-    """Serializer pour la mise à jour d'une équipe."""
+    """
+    Serializer pour la mise à jour d'une équipe.
+
+    ⚠️ Le superviseur est déduit automatiquement du site (non modifiable directement).
+    """
 
     class Meta:
         model = Equipe
-        fields = ['nom_equipe', 'chef_equipe', 'superviseur', 'actif']
+        fields = ['nom_equipe', 'chef_equipe', 'site', 'actif']
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""
