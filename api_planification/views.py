@@ -148,14 +148,14 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             'id_client__utilisateur',
             'id_type_tache',
             'id_equipe__chef_equipe',
-            'id_equipe__site__superviseur__utilisateur',
+            'id_equipe__site',
             'reclamation'
         )
 
         # Prefetch optimisé pour les équipes avec leurs opérateurs
         equipes_qs = Equipe.objects.select_related(
             'chef_equipe',
-            'superviseur__utilisateur'
+            'site__superviseur__utilisateur'  # Site → Superviseur → Utilisateur
         ).prefetch_related('operateurs')
 
         qs = qs.prefetch_related(

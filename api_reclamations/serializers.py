@@ -32,6 +32,7 @@ class ReclamationListSerializer(serializers.ModelSerializer):
     site_nom = serializers.CharField(source='site.nom_site', read_only=True)
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     createur_nom = serializers.SerializerMethodField()
+    localisation = GeometryField(read_only=True, allow_null=True)
 
     class Meta:
         model = Reclamation
@@ -48,7 +49,8 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'date_cloture_prevue',
             'date_cloture_reelle',
             'description',
-            'createur', 'createur_nom'
+            'createur', 'createur_nom',
+            'localisation'
         ]
 
     def get_createur_nom(self, obj):
@@ -93,6 +95,7 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
     taches_liees_details = serializers.SerializerMethodField()
     historique = HistoriqueReclamationSerializer(many=True, read_only=True)
     satisfaction = serializers.SerializerMethodField()
+    localisation = GeometryField(read_only=True, allow_null=True)
 
     class Meta:
         model = Reclamation
@@ -213,8 +216,10 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
         """
         Validation: si une localisation est fournie sans site,
         on vérifie qu'un site peut être détecté automatiquement.
+        Validation de la date de constatation (horodatage).
         """
         from api.models import Site, SousSite
+        from django.utils import timezone
 
         localisation = attrs.get('localisation')
         site = attrs.get('site')
@@ -234,31 +239,62 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
                         "localisation": "La zone indiquée ne correspond à aucun site connu. Veuillez dessiner la zone à l'intérieur d'un site."
                     })
 
+        # Validation de la date de constatation (horodatage)
+        date_constatation = attrs.get('date_constatation')
+        if date_constatation:
+            now = timezone.now()
+
+            # La date de constatation ne peut pas être dans le futur
+            if date_constatation > now:
+                raise serializers.ValidationError({
+                    "date_constatation": "La date de constatation ne peut pas être dans le futur."
+                })
+
+            # La date de constatation ne peut pas être trop ancienne (plus de 90 jours)
+            days_ago = (now - date_constatation).days
+            if days_ago > 90:
+                raise serializers.ValidationError({
+                    "date_constatation": f"La date de constatation ne peut pas dépasser 90 jours ({days_ago} jours). Veuillez contacter un administrateur pour les cas exceptionnels."
+                })
+
         return attrs
 
     def create(self, validated_data):
         photos_data = validated_data.pop('photos', [])
-        reclamation = Reclamation.objects.create(**validated_data)
-        
+
+        # Créer l'instance sans sauvegarder
+        reclamation = Reclamation(**validated_data)
+
+        # Appeler la validation complète du modèle (inclut clean())
+        reclamation.full_clean()
+
+        # Sauvegarder après validation
+        reclamation.save()
+
         # Gestion des photos si envoyées
         for photo_data in photos_data:
             Photo.objects.create(reclamation=reclamation, **photo_data)
-            
+
         return reclamation
 
     def update(self, instance, validated_data):
         """Mettre à jour la réclamation et ajouter de nouvelles photos."""
         photos_data = validated_data.pop('photos', [])
-        
+
         # Mise à jour des champs standards
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+
+        # Appeler la validation complète du modèle (inclut clean())
+        instance.full_clean()
+
+        # Sauvegarder après validation
         instance.save()
 
         # Ajout des nouvelles photos
         for photo_data in photos_data:
             Photo.objects.create(reclamation=instance, **photo_data)
-            
+
         return instance
 
 

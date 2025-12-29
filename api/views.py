@@ -1008,7 +1008,7 @@ class StatisticsView(APIView):
                             'equipes_count': len(mes_equipes_ids)
                         }
                 except Exception as e:
-                    print(f"Error calculating chef equipe stats: {e}")
+                    print(f"Error calculating superviseur stats: {e}")
                     # Ne pas bloquer la réponse si erreur dans les stats spécifiques
 
         return Response(statistics)

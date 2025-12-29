@@ -135,6 +135,29 @@ class Reclamation(models.Model):
     def __str__(self):
         return f"{self.numero_reclamation} - {self.type_reclamation} ({self.statut})"
 
+    def clean(self):
+        """
+        Validation métier pour les réclamations.
+        """
+        from django.core.exceptions import ValidationError
+
+        # Validation de la date de constatation
+        if self.date_constatation:
+            now = timezone.now()
+
+            # La date de constatation ne peut pas être dans le futur
+            if self.date_constatation > now:
+                raise ValidationError({
+                    'date_constatation': "La date de constatation ne peut pas être dans le futur."
+                })
+
+            # La date de constatation ne peut pas être trop ancienne (plus de 90 jours)
+            days_ago = (now - self.date_constatation).days
+            if days_ago > 90:
+                raise ValidationError({
+                    'date_constatation': f"La date de constatation ne peut pas dépasser 90 jours ({days_ago} jours). Veuillez contacter un administrateur pour les cas exceptionnels."
+                })
+
     def save(self, *args, **kwargs):
         # Génération automatique du numéro de réclamation
         if not self.numero_reclamation:

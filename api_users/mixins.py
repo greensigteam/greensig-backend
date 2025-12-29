@@ -78,21 +78,84 @@ class RoleBasedQuerySetMixin:
         if model_name == 'SousSite':
             return queryset.filter(site__superviseur=superviseur)
 
-        # Opérateurs : Ses opérateurs
+        # Opérateurs : Ses opérateurs + opérateurs des équipes intervenant sur ses sites
         if model_name == 'Operateur':
-            return queryset.filter(superviseur=superviseur)
+            # 1. Opérateurs directement supervisés
+            operateurs_directs = Q(superviseur=superviseur)
 
-        # Équipes : Ses équipes
+            # 2. Opérateurs des équipes intervenant sur ses sites
+            # (soit affectées, soit avec tâches)
+            from api_planification.models import Tache
+
+            # Équipes affectées à ses sites
+            equipes_ids = set()
+            equipes_ids.update(
+                superviseur.equipes_gerees.values_list('id', flat=True)
+            )
+
+            # Équipes avec tâches sur ses sites
+            taches_sur_mes_sites = Tache.objects.filter(
+                deleted_at__isnull=True,
+                objets__site__superviseur=superviseur
+            ).distinct()
+
+            # M2M relation
+            equipes_ids.update(
+                taches_sur_mes_sites.values_list('equipes__id', flat=True)
+            )
+            # Legacy FK
+            equipes_ids.update(
+                taches_sur_mes_sites.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
+            )
+            equipes_ids.discard(None)
+
+            operateurs_des_equipes = Q(equipe__id__in=equipes_ids)
+
+            # Combiner avec OR
+            return queryset.filter(operateurs_directs | operateurs_des_equipes).distinct()
+
+        # Équipes : Ses équipes + équipes avec tâches sur ses sites
         if model_name == 'Equipe':
-            return queryset.filter(site__superviseur=superviseur)
+            # 1. Équipes affectées à ses sites
+            equipes_affectees = Q(site__superviseur=superviseur)
+
+            # 2. Équipes ayant des tâches sur les sites du superviseur
+            # Via Tache.equipes (M2M) ou Tache.id_equipe (legacy)
+            from api_planification.models import Tache
+            sites_superviseur_ids = superviseur.equipes_gerees.values_list('site_id', flat=True).distinct()
+
+            taches_sur_mes_sites = Tache.objects.filter(
+                deleted_at__isnull=True,
+                objets__site__superviseur=superviseur
+            ).distinct()
+
+            equipes_ids_avec_taches = set()
+            # M2M relation (multi-équipes)
+            equipes_ids_avec_taches.update(
+                taches_sur_mes_sites.values_list('equipes__id', flat=True)
+            )
+            # Legacy FK relation
+            equipes_ids_avec_taches.update(
+                taches_sur_mes_sites.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
+            )
+            equipes_ids_avec_taches.discard(None)  # Retirer None
+
+            equipes_avec_taches = Q(id__in=equipes_ids_avec_taches)
+
+            # Combiner les deux critères avec OR
+            return queryset.filter(equipes_affectees | equipes_avec_taches).distinct()
 
         # Absences : Absences de ses opérateurs
         if model_name == 'Absence':
             return queryset.filter(operateur__superviseur=superviseur)
 
-        # Tâches : Tâches assignées à ses équipes
+        # Tâches : Tâches assignées à ses équipes OU tâches sur ses sites sans équipe
         if model_name == 'Tache':
-            return queryset.filter(equipes__site__superviseur=superviseur).distinct()
+            # Tâches avec objets sur les sites du superviseur
+            # Cela inclut automatiquement les tâches avec ou sans équipe
+            return queryset.filter(
+                objets__site__superviseur=superviseur
+            ).distinct()
 
         # Réclamations : Réclamations sur les sites affectés au superviseur
         if model_name == 'Reclamation':

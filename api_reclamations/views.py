@@ -93,14 +93,20 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         if user.is_staff or user.is_superuser:
             return queryset
 
-        # Superviseur : accès aux réclamations de ses équipes
+        # Superviseur : accès aux réclamations de ses sites
         if hasattr(user, 'superviseur_profile'):
             try:
                 superviseur = user.superviseur_profile
-                equipes_ids = list(superviseur.equipes_gerees.filter(actif=True).values_list('id', flat=True))
-                if equipes_ids:
-                    return queryset.filter(Q(equipe_affectee_id__in=equipes_ids) | Q(createur=user))
-                return queryset.filter(createur=user)
+
+                # Le superviseur voit:
+                # 1. Les réclamations sur les sites qu'il supervise
+                # 2. Les réclamations affectées à ses équipes
+                # 3. Les réclamations qu'il a créées lui-même
+                return queryset.filter(
+                    Q(site__superviseur=superviseur) |  # Sites supervisés
+                    Q(equipe_affectee__site__superviseur=superviseur) |  # Équipes de ses sites
+                    Q(createur=user)  # Ses propres réclamations
+                ).distinct()
             except AttributeError:
                 return queryset.filter(createur=user)
 

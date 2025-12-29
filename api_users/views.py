@@ -1292,25 +1292,93 @@ class HistoriqueRHView(APIView):
 # ==============================================================================
 
 class StatistiquesUtilisateursView(APIView):
-    """Vue pour les statistiques du module utilisateurs."""
+    """
+    Vue pour les statistiques du module utilisateurs.
 
-    def get(self, request):
-        """Retourne les statistiques globales."""
-        today = timezone.now().date()
+    Applique automatiquement le filtrage selon le rôle de l'utilisateur :
+    - ADMIN : Toutes les statistiques
+    - SUPERVISEUR : Statistiques de ses équipes/opérateurs/sites
+    - CLIENT : Aucun accès (devrait retourner 0)
+    """
 
-        # Statistiques utilisateurs
-        stats_utilisateurs = {
-            'total': Utilisateur.objects.count(),
-            'actifs': Utilisateur.objects.filter(actif=True).count(),
-                # 'par_type': dict(
-                #     Utilisateur.objects.values('type_utilisateur')
-                #     .annotate(count=Count('id'))
-                #     .values_list('type_utilisateur', 'count')
-                # )
+    def _get_filtered_querysets(self, user):
+        """Applique le même filtrage que RoleBasedQuerySetMixin."""
+        if not user or not user.is_authenticated:
+            return {
+                'Operateur': Operateur.objects.none(),
+                'Equipe': Equipe.objects.none(),
+                'Absence': Absence.objects.none(),
+            }
+
+        # ADMIN : Tout voir
+        if user.roles_utilisateur.filter(role__nom_role='ADMIN').exists():
+            return {
+                'Operateur': Operateur.objects.all(),
+                'Equipe': Equipe.objects.all(),
+                'Absence': Absence.objects.all(),
+            }
+
+        # SUPERVISEUR : Filtre selon ses sites
+        if user.roles_utilisateur.filter(role__nom_role='SUPERVISEUR').exists():
+            if hasattr(user, 'superviseur_profile'):
+                superviseur = user.superviseur_profile
+
+                # Opérateurs : directs + équipes intervenant sur ses sites
+                from api_planification.models import Tache
+
+                equipes_ids = set()
+                equipes_ids.update(superviseur.equipes_gerees.values_list('id', flat=True))
+
+                taches_sur_mes_sites = Tache.objects.filter(
+                    deleted_at__isnull=True,
+                    objets__site__superviseur=superviseur
+                ).distinct()
+
+                equipes_ids.update(taches_sur_mes_sites.values_list('equipes__id', flat=True))
+                equipes_ids.update(
+                    taches_sur_mes_sites.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
+                )
+                equipes_ids.discard(None)
+
+                operateurs_qs = Operateur.objects.filter(
+                    Q(superviseur=superviseur) | Q(equipe__id__in=equipes_ids)
+                ).distinct()
+
+                equipes_qs = Equipe.objects.filter(
+                    Q(site__superviseur=superviseur) | Q(id__in=equipes_ids)
+                ).distinct()
+
+                absences_qs = Absence.objects.filter(operateur__in=operateurs_qs)
+
+                return {
+                    'Operateur': operateurs_qs,
+                    'Equipe': equipes_qs,
+                    'Absence': absences_qs,
+                }
+
+        # CLIENT ou autre : Aucun accès
+        return {
+            'Operateur': Operateur.objects.none(),
+            'Equipe': Equipe.objects.none(),
+            'Absence': Absence.objects.none(),
         }
 
-        # Statistiques opérateurs
-        operateurs_actifs = Operateur.objects.filter(statut='ACTIF')
+    def get(self, request):
+        """Retourne les statistiques filtrées selon le rôle."""
+        today = timezone.now().date()
+
+        # Obtenir les querysets filtrés
+        qs = self._get_filtered_querysets(request.user)
+
+        # Statistiques utilisateurs (ADMIN uniquement)
+        is_admin = request.user.roles_utilisateur.filter(role__nom_role='ADMIN').exists()
+        stats_utilisateurs = {
+            'total': Utilisateur.objects.count() if is_admin else 0,
+            'actifs': Utilisateur.objects.filter(actif=True).count() if is_admin else 0,
+        }
+
+        # Statistiques opérateurs (filtrées)
+        operateurs_actifs = qs['Operateur'].filter(statut='ACTIF')
         operateurs_disponibles = operateurs_actifs.exclude(
             absences__statut=StatutAbsence.VALIDEE,
             absences__date_debut__lte=today,
@@ -1318,23 +1386,23 @@ class StatistiquesUtilisateursView(APIView):
         ).distinct().count()
 
         stats_operateurs = {
-            'total': Operateur.objects.count(),
+            'total': qs['Operateur'].count(),
             'actifs': operateurs_actifs.count(),
             'disponibles_aujourdhui': operateurs_disponibles,
             'par_statut': dict(
-                Operateur.objects.values('statut')
+                qs['Operateur'].values('statut')
                 .annotate(count=Count('id'))
                 .values_list('statut', 'count')
             ),
-            'chefs_equipe': Operateur.objects.filter(
+            'chefs_equipe': qs['Operateur'].filter(
                 equipe_dirigee__actif=True
             ).distinct().count()
         }
 
-        # Statistiques équipes
-        equipes_actives = Equipe.objects.filter(actif=True)
+        # Statistiques équipes (filtrées)
+        equipes_actives = qs['Equipe'].filter(actif=True)
         stats_equipes = {
-            'total': Equipe.objects.count(),
+            'total': qs['Equipe'].count(),
             'actives': equipes_actives.count(),
             'statuts_operationnels': {
                 'completes': sum(1 for e in equipes_actives if e.statut_operationnel == 'COMPLETE'),
@@ -1343,16 +1411,16 @@ class StatistiquesUtilisateursView(APIView):
             }
         }
 
-        # Statistiques absences
+        # Statistiques absences (filtrées)
         stats_absences = {
-            'en_attente': Absence.objects.filter(statut=StatutAbsence.DEMANDEE).count(),
-            'en_cours': Absence.objects.filter(
+            'en_attente': qs['Absence'].filter(statut=StatutAbsence.DEMANDEE).count(),
+            'en_cours': qs['Absence'].filter(
                 statut=StatutAbsence.VALIDEE,
                 date_debut__lte=today,
                 date_fin__gte=today
             ).count(),
             'par_type': dict(
-                Absence.objects.filter(statut=StatutAbsence.VALIDEE)
+                qs['Absence'].filter(statut=StatutAbsence.VALIDEE)
                 .values('type_absence')
                 .annotate(count=Count('id'))
                 .values_list('type_absence', 'count')
