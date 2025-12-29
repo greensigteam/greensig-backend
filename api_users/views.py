@@ -101,8 +101,70 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
     retrieve: Détail d'un utilisateur
     update: Met à jour un utilisateur
     destroy: Désactive un utilisateur (soft delete)
+
+    Permissions:
+    - ADMIN: accès complet CRUD
+    - SUPERVISEUR: lecture seule (utilisateurs de leurs sites)
     """
-    permission_classes = [IsAdmin]
+    queryset = Utilisateur.objects.all().order_by('nom', 'prenom')
+    filterset_class = UtilisateurFilter
+
+    def get_permissions(self):
+        """
+        Permissions dynamiques selon l'action.
+        """
+        if self.action in ['list', 'retrieve']:
+            # SUPERVISEUR peut lire
+            return [IsAuthenticated()]
+        else:
+            # Seul ADMIN peut créer/modifier/supprimer
+            return [IsAdmin()]
+
+    def get_queryset(self):
+        """
+        Filtre les utilisateurs selon le rôle.
+        - ADMIN: voit tous les utilisateurs
+        - SUPERVISEUR: voit les utilisateurs de ses sites (superviseurs, clients)
+        """
+        qs = super().get_queryset()
+        user = self.request.user
+
+        if not user or not user.is_authenticated:
+            return qs.none()
+
+        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+        # ADMIN voit tout
+        if 'ADMIN' in roles:
+            return qs
+
+        # SUPERVISEUR voit les utilisateurs de ses sites
+        if 'SUPERVISEUR' in roles:
+            try:
+                superviseur = user.superviseur_profile
+                from api.models import Site
+
+                # Sites supervisés
+                mes_sites = Site.objects.filter(superviseur=superviseur)
+
+                # IDs des clients et superviseurs de ces sites
+                client_ids = mes_sites.values_list('client__utilisateur_id', flat=True)
+                superviseur_ids = mes_sites.values_list('superviseur__utilisateur_id', flat=True)
+
+                # Le superviseur peut voir:
+                # - Lui-même
+                # - Les clients de ses sites
+                # - Les autres superviseurs de ses sites
+                return qs.filter(
+                    Q(id=user.id) |  # Lui-même
+                    Q(id__in=client_ids) |  # Clients de ses sites
+                    Q(id__in=superviseur_ids)  # Superviseurs de ses sites
+                ).distinct()
+            except AttributeError:
+                return qs.filter(id=user.id)
+
+        # CLIENT ou autre : Seulement lui-même
+        return qs.filter(id=user.id)
 
     @action(detail=True, methods=['post'])
     def retirer_role(self, request, pk=None):
@@ -123,9 +185,7 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             ur.delete()
             return Response({'message': f'Rôle {role.nom_role} retiré avec succès.'})
         except UtilisateurRole.DoesNotExist:
-            return Response({'error': 'L’utilisateur ne possède pas ce rôle.'}, status=status.HTTP_400_BAD_REQUEST)
-    queryset = Utilisateur.objects.all().order_by('nom', 'prenom')
-    filterset_class = UtilisateurFilter
+            return Response({'error': "L'utilisateur ne possède pas ce rôle."}, status=status.HTTP_400_BAD_REQUEST)
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -899,15 +959,43 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
         import logging
         logger = logging.getLogger(__name__)
 
-        # Log avant filtrage
-        logger.info(f"[EquipeViewSet] AVANT filtrage: {queryset.count()} équipes")
-        logger.info(f"[EquipeViewSet] Query params: {self.request.query_params}")
+        # Log utilisateur et rôle
+        user = self.request.user
+        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()] if user.is_authenticated else []
+        logger.info(f"[EquipeViewSet] 👤 User: {user.email}, Roles: {roles}")
 
-        # Appliquer le filtrage (django-filter + autres)
+        # Log avant filtrage
+        total_equipes = queryset.count()
+        logger.info(f"[EquipeViewSet] 📊 AVANT filtrage: {total_equipes} équipes totales")
+
+        # Si SUPERVISEUR, afficher des infos de debug
+        if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+            superviseur = user.superviseur_profile
+            logger.info(f"[EquipeViewSet] 🔍 Superviseur ID: {superviseur.utilisateur_id}")
+
+            # Vérifier les sites du superviseur
+            from api.models import Site
+            mes_sites = Site.objects.filter(superviseur=superviseur)
+            logger.info(f"[EquipeViewSet] 🏢 Sites supervisés: {mes_sites.count()}")
+            for site in mes_sites:
+                logger.info(f"[EquipeViewSet]    - Site: {site.nom_site} (ID: {site.id})")
+
+            # Vérifier les équipes sur ces sites
+            equipes_sur_mes_sites = queryset.filter(site__superviseur=superviseur)
+            logger.info(f"[EquipeViewSet] 👥 Équipes sur mes sites: {equipes_sur_mes_sites.count()}")
+            for eq in equipes_sur_mes_sites:
+                logger.info(f"[EquipeViewSet]    - Équipe: {eq.nom_equipe}, Site: {eq.site.nom_site if eq.site else 'AUCUN'}")
+
+        logger.info(f"[EquipeViewSet] 🔧 Query params: {self.request.query_params}")
+
+        # Appliquer le filtrage (django-filter + RoleBasedQuerySetMixin)
         filtered = super().filter_queryset(queryset)
 
         # Log après filtrage
-        logger.info(f"[EquipeViewSet] APRÈS filtrage: {filtered.count()} équipes")
+        logger.info(f"[EquipeViewSet] ✅ APRÈS filtrage: {filtered.count()} équipes")
+        if filtered.count() > 0:
+            for eq in filtered[:5]:  # Log les 5 premières
+                logger.info(f"[EquipeViewSet]    - {eq.nom_equipe}")
 
         return filtered
 
@@ -1298,7 +1386,7 @@ class StatistiquesUtilisateursView(APIView):
     Applique automatiquement le filtrage selon le rôle de l'utilisateur :
     - ADMIN : Toutes les statistiques
     - SUPERVISEUR : Statistiques de ses équipes/opérateurs/sites
-    - CLIENT : Aucun accès (devrait retourner 0)
+    - CLIENT : Statistiques des équipes/opérateurs de ses sites (lecture seule)
     """
 
     def _get_filtered_querysets(self, user):
@@ -1356,7 +1444,27 @@ class StatistiquesUtilisateursView(APIView):
                     'Absence': absences_qs,
                 }
 
-        # CLIENT ou autre : Aucun accès
+        # CLIENT : Filtre selon ses sites (lecture seule)
+        if user.roles_utilisateur.filter(role__nom_role='CLIENT').exists():
+            if hasattr(user, 'client_profile'):
+                client = user.client_profile
+
+                # Équipes travaillant sur ses sites
+                equipes_qs = Equipe.objects.filter(site__client=client)
+
+                # Opérateurs des équipes de ses sites
+                operateurs_qs = Operateur.objects.filter(equipe__site__client=client)
+
+                # Absences des opérateurs de ses équipes
+                absences_qs = Absence.objects.filter(operateur__equipe__site__client=client)
+
+                return {
+                    'Operateur': operateurs_qs,
+                    'Equipe': equipes_qs,
+                    'Absence': absences_qs,
+                }
+
+        # Autre rôle : Aucun accès
         return {
             'Operateur': Operateur.objects.none(),
             'Equipe': Equipe.objects.none(),

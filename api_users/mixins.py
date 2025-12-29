@@ -198,6 +198,22 @@ class RoleBasedQuerySetMixin:
         if model_name == 'Reclamation':
             return queryset.filter(site__client=client)
 
+        # Équipes : Équipes travaillant sur ses sites (lecture seule)
+        if model_name == 'Equipe':
+            return queryset.filter(site__client=client)
+
+        # Opérateurs : Opérateurs des équipes travaillant sur ses sites (lecture seule)
+        if model_name == 'Operateur':
+            return queryset.filter(equipe__site__client=client)
+
+        # Absences : Absences des opérateurs de ses équipes (lecture seule)
+        if model_name == 'Absence':
+            return queryset.filter(operateur__equipe__site__client=client)
+
+        # Compétences : Toutes les compétences (référentiel, lecture seule)
+        if model_name == 'Competence':
+            return queryset.all()
+
         # Objets GIS (15 types) : Objets sur ses sites
         # Tous les objets GIS ont un champ 'site'
         if hasattr(queryset.model, 'site'):
