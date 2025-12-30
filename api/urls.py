@@ -51,6 +51,7 @@ from .views import (
 )
 from .site_statistics_view import SiteStatisticsView
 from .reporting_view import ReportingView
+from .monthly_report_view import MonthlyReportView
 
 urlpatterns = [
     # ==============================================================================
@@ -73,6 +74,7 @@ urlpatterns = [
     # ==============================================================================
     path('statistics/', StatisticsView.as_view(), name='statistics'),
     path('reporting/', ReportingView.as_view(), name='reporting'),
+    path('monthly-report/', MonthlyReportView.as_view(), name='monthly-report'),
 
     # ==============================================================================
     # EXPORT DONNÉES
