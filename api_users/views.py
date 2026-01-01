@@ -59,14 +59,16 @@ from django.utils import timezone
 from django.db.models import Q, Count, Prefetch
 
 from .models import (
-    Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
+    Utilisateur, Role, UtilisateurRole, StructureClient, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
     HistoriqueEquipeOperateur, StatutAbsence, StatutOperateur, NiveauCompetence
 )
 from .serializers import (
     UtilisateurSerializer, UtilisateurCreateSerializer, UtilisateurUpdateSerializer,
     ChangePasswordSerializer, RoleSerializer, UtilisateurRoleSerializer,
-    ClientSerializer, ClientCreateSerializer,
+    StructureClientSerializer, StructureClientDetailSerializer,
+    StructureClientCreateSerializer, StructureClientUpdateSerializer,
+    ClientSerializer, ClientCreateSerializer, ClientWithStructureCreateSerializer,
     SuperviseurSerializer, SuperviseurCreateSerializer,
     CompetenceSerializer, CompetenceOperateurSerializer, CompetenceOperateurUpdateSerializer,
     OperateurListSerializer, OperateurDetailSerializer,
@@ -275,7 +277,149 @@ class RoleViewSet(viewsets.ModelViewSet):
 
 
 # ==============================================================================
-# VUES CLIENT
+# VUES STRUCTURE CLIENT
+# ==============================================================================
+
+class StructureClientViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des structures clientes.
+
+    Une structure cliente représente une organisation (entreprise, mairie, etc.)
+    qui peut avoir plusieurs utilisateurs (comptes de connexion).
+
+    Permissions:
+    - ADMIN: accès complet CRUD
+    - CLIENT: lecture seule sur sa propre structure
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = StructureClient.objects.all()
+
+    def get_queryset(self):
+        """
+        Filtre les structures selon le rôle de l'utilisateur.
+        - ADMIN: voit toutes les structures
+        - CLIENT: voit uniquement sa propre structure
+        """
+        qs = super().get_queryset()
+        user = self.request.user
+
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+            # ADMIN voit tout
+            if 'ADMIN' in roles:
+                return qs
+
+            # CLIENT voit uniquement sa propre structure
+            if 'CLIENT' in roles:
+                try:
+                    client_profile = user.client_profile
+                    if client_profile.structure:
+                        return qs.filter(id=client_profile.structure.id)
+                except AttributeError:
+                    pass
+
+        return qs.none()
+
+    def get_serializer_class(self):
+        """Retourne le serializer approprié selon l'action."""
+        if self.action == 'create':
+            return StructureClientCreateSerializer
+        elif self.action in ['update', 'partial_update']:
+            return StructureClientUpdateSerializer
+        elif self.action == 'retrieve':
+            return StructureClientDetailSerializer
+        return StructureClientSerializer
+
+    def _is_client_only(self):
+        """Vérifie si l'utilisateur est uniquement CLIENT (pas ADMIN)."""
+        user = self.request.user
+        if user.is_authenticated:
+            roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+            return 'CLIENT' in roles and 'ADMIN' not in roles
+        return False
+
+    def create(self, request, *args, **kwargs):
+        """CLIENT ne peut pas créer de structure."""
+        if self._is_client_only():
+            return Response(
+                {"detail": "Les clients ne peuvent pas créer de structures."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """CLIENT ne peut pas modifier une structure."""
+        if self._is_client_only():
+            return Response(
+                {"detail": "Les clients ne peuvent pas modifier les structures."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """CLIENT ne peut pas supprimer une structure."""
+        if self._is_client_only():
+            return Response(
+                {"detail": "Les clients ne peuvent pas supprimer les structures."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Soft delete: désactive la structure et tous ses utilisateurs
+        structure = self.get_object()
+        structure.actif = False
+        structure.save()
+
+        # Désactiver tous les utilisateurs de la structure
+        for client in structure.utilisateurs.all():
+            client.utilisateur.actif = False
+            client.utilisateur.save()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get'])
+    def utilisateurs(self, request, pk=None):
+        """
+        Liste les utilisateurs d'une structure.
+        GET /api/users/structures/{id}/utilisateurs/
+        """
+        structure = self.get_object()
+        clients = structure.utilisateurs.select_related('utilisateur').all()
+        serializer = ClientSerializer(clients, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def ajouter_utilisateur(self, request, pk=None):
+        """
+        Ajoute un utilisateur à cette structure.
+        POST /api/users/structures/{id}/ajouter_utilisateur/
+
+        Body: { email, nom, prenom, password }
+        """
+        if self._is_client_only():
+            return Response(
+                {"detail": "Les clients ne peuvent pas ajouter d'utilisateurs."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        structure = self.get_object()
+
+        # Ajouter l'ID de la structure aux données
+        data = request.data.copy()
+        data['structure_id'] = structure.id
+
+        serializer = ClientCreateSerializer(data=data)
+        if serializer.is_valid():
+            client = serializer.save()
+            return Response(
+                ClientSerializer(client).data,
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ==============================================================================
+# VUES CLIENT (Utilisateur d'une Structure)
 # ==============================================================================
 
 class ClientViewSet(viewsets.ModelViewSet):
@@ -334,6 +478,16 @@ class ClientViewSet(viewsets.ModelViewSet):
                 {'error': 'Vous n\'avez pas les droits pour créer un client.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Si on utilise ClientWithStructureCreateSerializer, gérer manuellement la réponse
+        if 'nom_structure' in request.data:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            client = serializer.save()
+            # Utiliser ClientSerializer pour la réponse
+            response_serializer = ClientSerializer(client)
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
@@ -356,6 +510,10 @@ class ClientViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action == 'create':
+            # Si nom_structure est présent, créer structure + utilisateur ensemble
+            if self.request and hasattr(self.request, 'data'):
+                if 'nom_structure' in self.request.data:
+                    return ClientWithStructureCreateSerializer
             return ClientCreateSerializer
         return ClientSerializer
 
@@ -858,16 +1016,8 @@ class OperateurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewset
 
     @action(detail=False, methods=['get'])
     def chefs_potentiels(self, request):
-        """Liste les opérateurs pouvant être chef d'équipe."""
-        operateurs = self.get_queryset().filter(
-            statut='ACTIF',
-            competences_operateur__competence__nom_competence="Gestion d'équipe",
-            competences_operateur__niveau__in=[
-                NiveauCompetence.INTERMEDIAIRE,
-                NiveauCompetence.EXPERT,
-            ]
-        ).distinct()
-
+        """Liste les opérateurs pouvant être chef d'équipe (tout opérateur actif)."""
+        operateurs = self.get_queryset().filter(statut='ACTIF')
         serializer = OperateurListSerializer(operateurs, many=True)
         return Response(serializer.data)
 
@@ -1444,19 +1594,27 @@ class StatistiquesUtilisateursView(APIView):
                     'Absence': absences_qs,
                 }
 
-        # CLIENT : Filtre selon ses sites (lecture seule)
+        # CLIENT : Filtre selon ses sites (lecture seule, via structure_client)
         if user.roles_utilisateur.filter(role__nom_role='CLIENT').exists():
             if hasattr(user, 'client_profile'):
                 client = user.client_profile
 
-                # Équipes travaillant sur ses sites
-                equipes_qs = Equipe.objects.filter(site__client=client)
+                # Vérifier que le client a une structure
+                if not client.structure:
+                    return {
+                        'Operateur': Operateur.objects.none(),
+                        'Equipe': Equipe.objects.none(),
+                        'Absence': Absence.objects.none(),
+                    }
 
-                # Opérateurs des équipes de ses sites
-                operateurs_qs = Operateur.objects.filter(equipe__site__client=client)
+                # Équipes travaillant sur ses sites (via structure_client)
+                equipes_qs = Equipe.objects.filter(site__structure_client=client.structure)
 
-                # Absences des opérateurs de ses équipes
-                absences_qs = Absence.objects.filter(operateur__equipe__site__client=client)
+                # Opérateurs des équipes de ses sites (via structure_client)
+                operateurs_qs = Operateur.objects.filter(equipe__site__structure_client=client.structure)
+
+                # Absences des opérateurs de ses équipes (via structure_client)
+                absences_qs = Absence.objects.filter(operateur__equipe__site__structure_client=client.structure)
 
                 return {
                     'Operateur': operateurs_qs,

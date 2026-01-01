@@ -110,9 +110,9 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             except AttributeError:
                 return queryset.filter(createur=user)
 
-        # Client : accès à ses réclamations uniquement (créées par lui ou liées à lui)
+        # Client : accès à ses réclamations uniquement (créées par lui ou liées à sa structure)
         if hasattr(user, 'client_profile'):
-            return queryset.filter(Q(client=user.client_profile) | Q(createur=user))
+            return queryset.filter(Q(structure_client=user.client_profile.structure) | Q(createur=user))
 
         # Tout autre utilisateur : réclamations qu'il a créées
         return queryset.filter(createur=user)
@@ -470,6 +470,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                     'urgence': rec.urgence.niveau_urgence if rec.urgence else None,
                     'urgence_couleur': rec.urgence.couleur if rec.urgence else None,
                     'type_reclamation': rec.type_reclamation.nom_reclamation if rec.type_reclamation else None,
+                    'type_reclamation_symbole': rec.type_reclamation.symbole if rec.type_reclamation else None,
+                    'type_reclamation_categorie': rec.type_reclamation.categorie if rec.type_reclamation else None,
                     'description': rec.description[:100] + '...' if rec.description and len(rec.description) > 100 else rec.description,
                     'site_nom': rec.site.nom_site if rec.site else None,
                     'zone_nom': rec.zone.nom if rec.zone else None,

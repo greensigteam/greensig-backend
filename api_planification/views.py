@@ -187,6 +187,11 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         if has_reclamation == 'true':
             qs = qs.filter(reclamation__isnull=False)
 
+        # Filtre par objet (pour afficher l'historique des tâches d'un objet)
+        objet_id = self.request.query_params.get('objet_id')
+        if objet_id:
+            qs = qs.filter(objets__id=objet_id).distinct()
+
         return qs
 
     def get_serializer_class(self):
