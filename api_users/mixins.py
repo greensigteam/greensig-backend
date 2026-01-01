@@ -12,7 +12,10 @@ Usage:
         role_filter_field = 'site'  # Optionnel, par défaut détecté automatiquement
 """
 
+import logging
 from django.db.models import Q
+
+logger = logging.getLogger(__name__)
 
 
 class RoleBasedQuerySetMixin:
@@ -36,25 +39,52 @@ class RoleBasedQuerySetMixin:
         """
         queryset = super().get_queryset()
         user = self.request.user
+        model_name = queryset.model.__name__
 
         if not user or not user.is_authenticated:
+            logger.debug(f"[RoleBasedQuerySetMixin] {model_name}: Utilisateur non authentifié")
             return queryset.none()
 
+        # Récupérer tous les rôles de l'utilisateur
+        roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
+        logger.info(f"[RoleBasedQuerySetMixin] {model_name}: User={user.email}, Roles={roles}")
+
         # ADMIN : Aucun filtre, voit tout
-        if user.roles_utilisateur.filter(role__nom_role='ADMIN').exists():
+        if 'ADMIN' in roles:
+            logger.info(f"[RoleBasedQuerySetMixin] {model_name}: ADMIN → pas de filtrage")
             return queryset
 
         # SUPERVISEUR : Filtrage selon le type de ressource
-        if user.roles_utilisateur.filter(role__nom_role='SUPERVISEUR').exists():
-            if hasattr(user, 'superviseur_profile'):
-                return self._filter_for_superviseur(queryset, user.superviseur_profile)
+        if 'SUPERVISEUR' in roles:
+            has_profile = hasattr(user, 'superviseur_profile')
+            logger.info(f"[RoleBasedQuerySetMixin] {model_name}: SUPERVISEUR, has_profile={has_profile}")
+            if has_profile:
+                try:
+                    superviseur = user.superviseur_profile
+                    logger.info(f"[RoleBasedQuerySetMixin] {model_name}: Superviseur ID={superviseur.utilisateur_id}")
+                    result = self._filter_for_superviseur(queryset, superviseur)
+                    logger.info(f"[RoleBasedQuerySetMixin] {model_name}: Après filtrage SUPERVISEUR: {result.count()} résultats")
+                    return result
+                except Exception as e:
+                    logger.error(f"[RoleBasedQuerySetMixin] {model_name}: Erreur profil superviseur: {e}")
+            else:
+                logger.warning(f"[RoleBasedQuerySetMixin] {model_name}: SUPERVISEUR sans profil superviseur_profile!")
 
         # CLIENT : Filtrage selon le type de ressource
-        if user.roles_utilisateur.filter(role__nom_role='CLIENT').exists():
-            if hasattr(user, 'client_profile'):
-                return self._filter_for_client(queryset, user.client_profile)
+        if 'CLIENT' in roles:
+            has_profile = hasattr(user, 'client_profile')
+            logger.info(f"[RoleBasedQuerySetMixin] {model_name}: CLIENT, has_profile={has_profile}")
+            if has_profile:
+                try:
+                    client = user.client_profile
+                    result = self._filter_for_client(queryset, client)
+                    logger.info(f"[RoleBasedQuerySetMixin] {model_name}: Après filtrage CLIENT: {result.count()} résultats")
+                    return result
+                except Exception as e:
+                    logger.error(f"[RoleBasedQuerySetMixin] {model_name}: Erreur profil client: {e}")
 
         # Par défaut, aucun accès
+        logger.warning(f"[RoleBasedQuerySetMixin] {model_name}: Aucun rôle valide → queryset.none()")
         return queryset.none()
 
     def _filter_for_superviseur(self, queryset, superviseur):
@@ -182,42 +212,84 @@ class RoleBasedQuerySetMixin:
         """
         model_name = queryset.model.__name__
 
-        # Sites : Uniquement ses sites
+        # Vérifier que le client a une structure assignée
+        if not client.structure:
+            # Pas de structure = pas d'accès (sauf son propre profil)
+            if model_name == 'Client':
+                return queryset.filter(pk=client.pk)
+            if model_name == 'Competence':
+                return queryset.all()  # Compétences accessibles à tous
+            return queryset.none()
+
+        # Sites : Uniquement ses sites (via structure_client)
         if model_name == 'Site':
-            return queryset.filter(client=client)
+            return queryset.filter(structure_client=client.structure)
 
-        # SousSite : Sous-sites de ses sites
+        # SousSite : Sous-sites de ses sites (via structure_client)
         if model_name == 'SousSite':
-            return queryset.filter(site__client=client)
+            return queryset.filter(site__structure_client=client.structure)
 
-        # Tâches : Tâches du client (lecture seule)
+        # Tâches : Tâches du client (lecture seule, via id_structure_client)
         if model_name == 'Tache':
-            return queryset.filter(id_client=client)
+            return queryset.filter(id_structure_client=client.structure)
 
-        # Réclamations : Ses réclamations
+        # Réclamations : Ses réclamations (via structure_client)
         if model_name == 'Reclamation':
-            return queryset.filter(site__client=client)
+            return queryset.filter(structure_client=client.structure)
 
-        # Équipes : Équipes travaillant sur ses sites (lecture seule)
+        # Équipes : Équipes travaillant sur ses sites (via structure_client)
         if model_name == 'Equipe':
-            return queryset.filter(site__client=client)
+            return queryset.filter(site__structure_client=client.structure)
 
-        # Opérateurs : Opérateurs des équipes travaillant sur ses sites (lecture seule)
+        # Opérateurs : Opérateurs des équipes travaillant sur ses sites (via structure_client)
         if model_name == 'Operateur':
-            return queryset.filter(equipe__site__client=client)
+            from api_planification.models import Tache
 
-        # Absences : Absences des opérateurs de ses équipes (lecture seule)
+            # 1. Opérateurs dont l'équipe est affectée aux sites du client
+            equipes_affectees_ids = set()
+            from api.models import Site
+            sites_client = Site.objects.filter(structure_client=client.structure)
+            equipes_affectees_ids.update(
+                sites_client.values_list('equipes_affectees__id', flat=True)
+            )
+
+            # 2. Opérateurs dont l'équipe a des tâches sur les sites du client
+            taches_sur_sites_client = Tache.objects.filter(
+                deleted_at__isnull=True,
+                objets__site__structure_client=client.structure
+            ).distinct()
+
+            # M2M relation
+            equipes_ids_avec_taches = set()
+            equipes_ids_avec_taches.update(
+                taches_sur_sites_client.values_list('equipes__id', flat=True)
+            )
+            # Legacy FK
+            equipes_ids_avec_taches.update(
+                taches_sur_sites_client.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
+            )
+
+            # Combiner tous les IDs d'équipes
+            all_equipes_ids = equipes_affectees_ids | equipes_ids_avec_taches
+            all_equipes_ids.discard(None)
+
+            if not all_equipes_ids:
+                return queryset.none()
+
+            return queryset.filter(equipe__id__in=all_equipes_ids).distinct()
+
+        # Absences : Absences des opérateurs de ses équipes (via structure_client)
         if model_name == 'Absence':
-            return queryset.filter(operateur__equipe__site__client=client)
+            return queryset.filter(operateur__equipe__site__structure_client=client.structure)
 
         # Compétences : Toutes les compétences (référentiel, lecture seule)
         if model_name == 'Competence':
             return queryset.all()
 
-        # Objets GIS (15 types) : Objets sur ses sites
+        # Objets GIS (15 types) : Objets sur ses sites (via structure_client)
         # Tous les objets GIS ont un champ 'site'
         if hasattr(queryset.model, 'site'):
-            return queryset.filter(site__client=client)
+            return queryset.filter(site__structure_client=client.structure)
 
         # Client : Son profil uniquement
         if model_name == 'Client':

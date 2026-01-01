@@ -79,9 +79,10 @@ urlpatterns = [
     # ==============================================================================
     # EXPORT DONNÉES
     # ==============================================================================
-    path('export/<str:model_name>/', ExportDataView.as_view(), name='export-data'),
+    # Routes spécifiques AVANT la route générique
     path('export/inventory/excel/', InventoryExportExcelView.as_view(), name='inventory-export-excel'),
     path('export/inventory/pdf/', InventoryExportPDFView.as_view(), name='inventory-export-pdf'),
+    path('export/<str:model_name>/', ExportDataView.as_view(), name='export-data'),
 
     # ==============================================================================
     # IMPORT GÉOGRAPHIQUE (GeoJSON, KML, Shapefile)

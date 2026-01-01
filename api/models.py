@@ -14,12 +14,23 @@ class Site(models.Model):
     superficie_totale = models.FloatField(verbose_name="Surface totale m²", blank=True, null=True)
     code_site = models.CharField(max_length=50, unique=True, verbose_name="Code unique", blank=True)
 
-    # Client propriétaire du site
+    # Structure cliente propriétaire du site
+    structure_client = models.ForeignKey(
+        'api_users.StructureClient',
+        on_delete=models.CASCADE,
+        related_name='sites',
+        verbose_name="Structure cliente",
+        null=True,
+        blank=True,
+        help_text="Structure/organisation propriétaire du site"
+    )
+
+    # LEGACY: Ancien champ client (à supprimer après migration)
     client = models.ForeignKey(
         'api_users.Client',
         on_delete=models.CASCADE,
-        related_name='sites',
-        verbose_name="Client propriétaire",
+        related_name='sites_legacy',
+        verbose_name="[LEGACY] Client propriétaire",
         null=True,
         blank=True
     )

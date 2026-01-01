@@ -17,8 +17,10 @@ class SiteSerializer(GeoFeatureModelSerializer):
     centroid = GeometryField(read_only=True)  # Auto-calculated from geometrie_emprise
     code_site = serializers.CharField(read_only=True)  # Auto-generated
     client_nom = serializers.SerializerMethodField()
+    structure_client_nom = serializers.SerializerMethodField()
     superviseur_nom = serializers.SerializerMethodField()
     superficie_calculee = serializers.SerializerMethodField()
+    superviseur_id = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Site
@@ -26,13 +28,24 @@ class SiteSerializer(GeoFeatureModelSerializer):
         fields = (
             'id', 'nom_site', 'adresse', 'superficie_totale', 'superficie_calculee', 'code_site',
             'client', 'client_nom',
-            'superviseur', 'superviseur_nom',
+            'structure_client', 'structure_client_nom',
+            'superviseur', 'superviseur_id', 'superviseur_nom',
             'date_debut_contrat', 'date_fin_contrat', 'actif', 'centroid'
         )
 
+    def get_superviseur_id(self, obj):
+        """Return superviseur ID (utilisateur PK)"""
+        return obj.superviseur_id if obj.superviseur else None
+
     def get_client_nom(self, obj):
-        """Return client name or None if no client assigned"""
+        """Return client name or None if no client assigned (legacy)"""
+        if obj.structure_client:
+            return obj.structure_client.nom
         return obj.client.nom_structure if obj.client else None
+
+    def get_structure_client_nom(self, obj):
+        """Return structure client name or None if no structure assigned"""
+        return obj.structure_client.nom if obj.structure_client else None
 
     def get_superviseur_nom(self, obj):
         """Return superviseur full name or None if no superviseur assigned"""
@@ -55,6 +68,86 @@ class SiteSerializer(GeoFeatureModelSerializer):
             return round(area_sqm, 2)
         except Exception:
             return None
+
+    def to_internal_value(self, data):
+        """
+        Handle superviseur field: accept user ID and convert to Superviseur.
+        Creates Superviseur record if user has SUPERVISEUR role but no record exists.
+        """
+        # Get superviseur from properties (GeoJSON format)
+        superviseur_id = None
+        if 'properties' in data and 'superviseur' in data['properties']:
+            superviseur_id = data['properties'].get('superviseur')
+        elif 'superviseur' in data:
+            superviseur_id = data.get('superviseur')
+
+        # Process superviseur if provided
+        if superviseur_id is not None:
+            from api_users.models import Utilisateur, Superviseur, UtilisateurRole
+            from django.utils import timezone
+
+            if superviseur_id == '' or superviseur_id is None:
+                # Allow setting superviseur to null
+                if 'properties' in data:
+                    data['properties']['superviseur'] = None
+                else:
+                    data['superviseur'] = None
+            else:
+                try:
+                    superviseur_id = int(superviseur_id)
+
+                    # Check if Superviseur record exists
+                    try:
+                        superviseur = Superviseur.objects.get(pk=superviseur_id)
+                    except Superviseur.DoesNotExist:
+                        # Check if user exists and has SUPERVISEUR role
+                        try:
+                            user = Utilisateur.objects.get(pk=superviseur_id)
+                        except Utilisateur.DoesNotExist:
+                            raise serializers.ValidationError({
+                                'superviseur': f"Utilisateur {superviseur_id} n'existe pas."
+                            })
+
+                        # Check if user has SUPERVISEUR role
+                        has_role = UtilisateurRole.objects.filter(
+                            utilisateur=user,
+                            role__nom_role='SUPERVISEUR'
+                        ).exists()
+
+                        if not has_role:
+                            raise serializers.ValidationError({
+                                'superviseur': f"L'utilisateur {user.email} n'a pas le rôle SUPERVISEUR."
+                            })
+
+                        # Create Superviseur record for this user
+                        superviseur = Superviseur.objects.create(
+                            utilisateur=user,
+                            matricule=f"SUP-{user.id}",
+                            date_prise_fonction=timezone.now().date()
+                        )
+
+                    # Update data with valid superviseur PK
+                    if 'properties' in data:
+                        data['properties']['superviseur'] = superviseur.pk
+                    else:
+                        data['superviseur'] = superviseur.pk
+
+                except ValueError:
+                    raise serializers.ValidationError({
+                        'superviseur': "L'ID du superviseur doit être un entier."
+                    })
+
+        return super().to_internal_value(data)
+
+    def to_representation(self, instance):
+        """Override to return superviseur as user ID"""
+        ret = super().to_representation(instance)
+        # Return superviseur as the user ID (Superviseur PK)
+        if instance.superviseur:
+            ret['superviseur'] = instance.superviseur_id
+        else:
+            ret['superviseur'] = None
+        return ret
 
 
 class SousSiteSerializer(GeoFeatureModelSerializer):

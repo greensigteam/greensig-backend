@@ -223,15 +223,9 @@ class OperateurFilter(django_filters.FilterSet):
         return queryset.exclude(equipe_dirigee__actif=True)
 
     def filter_peut_etre_chef(self, queryset, name, value):
-        """Filtre les operateurs pouvant etre chef."""
+        """Filtre les operateurs pouvant etre chef (tout opérateur actif)."""
         if value:
-            return queryset.filter(
-                competences_operateur__competence__nom_competence='Gestion d\'equipe',
-                competences_operateur__niveau__in=[
-                    NiveauCompetence.INTERMEDIAIRE,
-                    NiveauCompetence.EXPERT
-                ]
-            ).distinct()
+            return queryset.filter(statut=StatutOperateur.ACTIF)
         return queryset
 
 

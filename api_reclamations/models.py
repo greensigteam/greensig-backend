@@ -1,6 +1,6 @@
 from django.contrib.gis.db import models
 from django.conf import settings
-from api_users.models import Client, Equipe, Utilisateur
+from api_users.models import Client, StructureClient, Equipe, Utilisateur
 from api.models import Site, SousSite
 from django.utils import timezone
 import datetime
@@ -88,8 +88,25 @@ class Reclamation(models.Model):
         verbose_name="Créateur"
     )
 
-    # Client concerné (optionnel - peut être déduit ou assigné)
-    client = models.ForeignKey(Client, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Client")
+    # Structure cliente concernée
+    structure_client = models.ForeignKey(
+        StructureClient,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reclamations',
+        verbose_name="Structure cliente"
+    )
+
+    # LEGACY: Ancien champ client (à supprimer après migration)
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reclamations_legacy',
+        verbose_name="[LEGACY] Client"
+    )
 
     # Zone correspond à un SousSite dans notre architecture
     zone = models.ForeignKey(SousSite, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Zone")
