@@ -90,6 +90,7 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
     site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     equipe_nom = serializers.CharField(source='equipe_affectee.nom_equipe', read_only=True, allow_null=True)
+    createur_nom = serializers.SerializerMethodField()
     photos = PhotoSerializer(many=True, read_only=True)
     photos_taches = serializers.SerializerMethodField()
     taches_liees_details = serializers.SerializerMethodField()
@@ -260,10 +261,13 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        current_user = validated_data.pop('_current_user', None)
         photos_data = validated_data.pop('photos', [])
 
         # Créer l'instance sans sauvegarder
         reclamation = Reclamation(**validated_data)
+        if current_user:
+            reclamation._current_user = current_user
 
         # Appeler la validation complète du modèle (inclut clean())
         reclamation.full_clean()
@@ -279,6 +283,10 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         """Mettre à jour la réclamation et ajouter de nouvelles photos."""
+        current_user = validated_data.pop('_current_user', None)
+        if current_user:
+            instance._current_user = current_user
+            
         photos_data = validated_data.pop('photos', [])
 
         # Mise à jour des champs standards

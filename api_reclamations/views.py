@@ -146,7 +146,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         if 'date_constatation' not in serializer.validated_data or not serializer.validated_data['date_constatation']:
             extra_kwargs['date_constatation'] = timezone.now()
 
-        reclamation = serializer.save(**extra_kwargs)
+        reclamation = serializer.save(**extra_kwargs, _current_user=user)
 
         # Création de l'historique initial
         HistoriqueReclamation.objects.create(
@@ -174,7 +174,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             elif new_statut == 'CLOTUREE' and not instance.date_cloture_reelle:
                 serializer.validated_data['date_cloture_reelle'] = timezone.now()
 
-        updated_instance = serializer.save()
+        updated_instance = serializer.save(_current_user=self.request.user)
         
         # Si le statut a changé, on ajoute une entrée dans l'historique
         if old_statut != updated_instance.statut:
@@ -226,6 +226,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                  reclamation.statut = 'PRISE_EN_COMPTE'
                  if not reclamation.date_prise_en_compte:
                      reclamation.date_prise_en_compte = timezone.now()
+             
+             reclamation._current_user = request.user
              reclamation.save()
              
              # 2. Propagation aux Tâches (via le related_name 'taches_correctives')
@@ -280,6 +282,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             reclamation.date_proposition_cloture = timezone.now()
             if not reclamation.date_resolution:
                 reclamation.date_resolution = timezone.now()
+            
+            reclamation._current_user = user
             reclamation.save()
 
             # Historique
@@ -328,6 +332,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             old_statut = reclamation.statut
             reclamation.statut = 'CLOTUREE'
             reclamation.date_cloture_reelle = timezone.now()
+            
+            reclamation._current_user = user
             reclamation.save()
 
             # Historique

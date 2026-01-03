@@ -1320,6 +1320,9 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
             return AbsenceCreateSerializer
         return AbsenceSerializer
 
+    def perform_create(self, serializer):
+        serializer.save(_current_user=self.request.user)
+
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
         """Valide une absence. Permission: ADMIN only."""
@@ -1335,7 +1338,7 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
         if serializer.is_valid():
             # Utiliser l'utilisateur connecté ou un admin par défaut
             user = request.user if request.user.is_authenticated else None
-            absence = serializer.update_absence(absence, user)
+            absence = serializer.update_absence(absence, user, _current_user=request.user)
             return Response(AbsenceSerializer(absence).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1353,7 +1356,7 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
         serializer = AbsenceValidationSerializer(data={'action': 'refuser', **request.data})
         if serializer.is_valid():
             user = request.user if request.user.is_authenticated else None
-            absence = serializer.update_absence(absence, user)
+            absence = serializer.update_absence(absence, user, _current_user=request.user)
             return Response(AbsenceSerializer(absence).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1369,6 +1372,7 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
             )
 
         absence.statut = StatutAbsence.ANNULEE
+        absence._current_user = request.user
         absence.save()
         return Response(AbsenceSerializer(absence).data)
 
