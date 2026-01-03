@@ -431,11 +431,18 @@ class ClientViewSet(viewsets.ModelViewSet):
     Permissions:
     - ADMIN: accès complet CRUD
     - CLIENT: lecture seule sur son propre profil (filtré par get_queryset)
+
+    Filtres disponibles:
+    - structure: filtre par ID de structure
+    - structure__isnull: filtre les clients sans structure (orphelins)
     """
     permission_classes = [IsAuthenticated]
-    queryset = Client.objects.select_related('utilisateur').prefetch_related(
+    queryset = Client.objects.select_related('utilisateur', 'structure').prefetch_related(
         'utilisateur__roles_utilisateur__role'
     ).all()
+    filterset_fields = {
+        'structure': ['exact', 'isnull'],
+    }
 
     def get_queryset(self):
         """
@@ -560,8 +567,16 @@ class ClientViewSet(viewsets.ModelViewSet):
 
         client = self.get_object()
 
-        # Récupérer tous les sites du client
-        sites = Site.objects.filter(client=client).prefetch_related('objets')
+        # Récupérer tous les sites du client via structure_client
+        if not client.structure:
+            return Response({
+                'totalObjets': 0,
+                'vegetation': {'total': 0, 'byType': {}},
+                'hydraulique': {'total': 0, 'byType': {}},
+                'bySite': []
+            })
+
+        sites = Site.objects.filter(structure_client=client.structure).prefetch_related('objets')
 
         if not sites.exists():
             return Response({

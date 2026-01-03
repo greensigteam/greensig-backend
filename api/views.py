@@ -52,9 +52,12 @@ class GISObjectPermissionMixin:
         if 'ADMIN' in roles:
             return queryset
 
-        # CLIENT voit uniquement les objets de ses sites
+        # CLIENT voit uniquement les objets des sites de sa structure
         if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-            return queryset.filter(site__client=user.client_profile)
+            structure = user.client_profile.structure
+            if structure:
+                return queryset.filter(site__structure_client=structure)
+            return queryset.none()
 
         # SUPERVISEUR voit uniquement les objets des sites qui lui sont affectés
         if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
@@ -89,9 +92,12 @@ class SiteListCreateView(generics.ListCreateAPIView):
             if 'ADMIN' in roles:
                 return queryset
 
-            # CLIENT voit uniquement ses sites
+            # CLIENT voit uniquement les sites de sa structure
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                return queryset.filter(client=user.client_profile)
+                structure = user.client_profile.structure
+                if structure:
+                    return queryset.filter(structure_client=structure)
+                return queryset.none()
 
             # SUPERVISEUR voit uniquement les sites qui lui sont affectés directement
             if 'SUPERVISEUR' in roles:
@@ -161,9 +167,12 @@ class SiteDetailView(generics.RetrieveUpdateDestroyAPIView):
             if 'ADMIN' in roles:
                 return queryset
 
-            # CLIENT voit uniquement ses sites
+            # CLIENT voit uniquement les sites de sa structure
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                return queryset.filter(client=user.client_profile)
+                structure = user.client_profile.structure
+                if structure:
+                    return queryset.filter(structure_client=structure)
+                return queryset.none()
 
             # SUPERVISEUR voit uniquement les sites qui lui sont affectés
             if 'SUPERVISEUR' in roles:
@@ -197,9 +206,12 @@ class SousSiteListCreateView(generics.ListCreateAPIView):
             if 'ADMIN' in roles:
                 return queryset
 
-            # CLIENT voit uniquement les sous-sites de ses sites
+            # CLIENT voit uniquement les sous-sites des sites de sa structure
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                return queryset.filter(site__client=user.client_profile)
+                structure = user.client_profile.structure
+                if structure:
+                    return queryset.filter(site__structure_client=structure)
+                return queryset.none()
 
             # SUPERVISEUR voit uniquement les sous-sites des sites qui lui sont affectés
             if 'SUPERVISEUR' in roles:
@@ -232,9 +244,12 @@ class SousSiteDetailView(generics.RetrieveUpdateDestroyAPIView):
             if 'ADMIN' in roles:
                 return queryset
 
-            # CLIENT voit uniquement les sous-sites de ses sites
+            # CLIENT voit uniquement les sous-sites des sites de sa structure
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                return queryset.filter(site__client=user.client_profile)
+                structure = user.client_profile.structure
+                if structure:
+                    return queryset.filter(site__structure_client=structure)
+                return queryset.none()
 
             # SUPERVISEUR voit uniquement les sous-sites des sites qui lui sont affectés
             if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
@@ -505,15 +520,15 @@ class SearchView(APIView):
 
         # 🔒 Filtrage par rôle utilisateur
         user = request.user
-        client_filter = None
+        structure_filter = None
         site_ids_filter = None
 
         if user.is_authenticated:
             roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
 
-            # CLIENT: uniquement ses sites
+            # CLIENT: uniquement les sites de sa structure
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                client_filter = user.client_profile
+                structure_filter = user.client_profile.structure
 
             # SUPERVISEUR: uniquement les sites de ses équipes
             elif 'SUPERVISEUR' in roles and not ('ADMIN' in roles):
@@ -524,8 +539,8 @@ class SearchView(APIView):
         sites_queryset = Site.objects.filter(site_query)
 
         # Appliquer le filtrage par rôle
-        if client_filter:
-            sites_queryset = sites_queryset.filter(client=client_filter)
+        if structure_filter:
+            sites_queryset = sites_queryset.filter(structure_client=structure_filter)
         elif site_ids_filter is not None:
             sites_queryset = sites_queryset.filter(id__in=site_ids_filter)
 
@@ -543,8 +558,8 @@ class SearchView(APIView):
         sous_sites_queryset = SousSite.objects.filter(nom__icontains=query)
 
         # Appliquer le filtrage par rôle
-        if client_filter:
-            sous_sites_queryset = sous_sites_queryset.filter(site__client=client_filter)
+        if structure_filter:
+            sous_sites_queryset = sous_sites_queryset.filter(site__structure_client=structure_filter)
         elif site_ids_filter is not None:
             sous_sites_queryset = sous_sites_queryset.filter(site_id__in=site_ids_filter)
 
@@ -592,8 +607,8 @@ class SearchView(APIView):
                 objects_queryset = Model.objects.filter(query_filter).select_related('site')
 
                 # 🔒 Appliquer le filtrage par rôle
-                if client_filter:
-                    objects_queryset = objects_queryset.filter(site__client=client_filter)
+                if structure_filter:
+                    objects_queryset = objects_queryset.filter(site__structure_client=structure_filter)
                 elif site_ids_filter is not None:
                     objects_queryset = objects_queryset.filter(site_id__in=site_ids_filter)
 
@@ -839,8 +854,12 @@ class StatisticsView(APIView):
                 # ADMIN: pas de filtre, voit tout
                 site_filter = Q()
             elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                # CLIENT: uniquement ses sites
-                site_filter = Q(site__client=user.client_profile)
+                # CLIENT: uniquement les sites de sa structure
+                structure = user.client_profile.structure
+                if structure:
+                    site_filter = Q(site__structure_client=structure)
+                else:
+                    site_filter = Q(pk__in=[])  # Queryset vide
             elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
                 # SUPERVISEUR: uniquement les sites qui lui sont affectés
                 site_filter = Q(site__superviseur=user.superviseur_profile)
@@ -853,8 +872,13 @@ class StatisticsView(APIView):
             querysets['Site'] = Site.objects.all()
             querysets['SousSite'] = SousSite.objects.all()
         elif user.is_authenticated and 'CLIENT' in [ur.role.nom_role for ur in user.roles_utilisateur.all()]:
-            querysets['Site'] = Site.objects.filter(client=user.client_profile)
-            querysets['SousSite'] = SousSite.objects.filter(site__client=user.client_profile)
+            structure = user.client_profile.structure if hasattr(user, 'client_profile') else None
+            if structure:
+                querysets['Site'] = Site.objects.filter(structure_client=structure)
+                querysets['SousSite'] = SousSite.objects.filter(site__structure_client=structure)
+            else:
+                querysets['Site'] = Site.objects.none()
+                querysets['SousSite'] = SousSite.objects.none()
         elif user.is_authenticated and 'SUPERVISEUR' in [ur.role.nom_role for ur in user.roles_utilisateur.all()]:
             querysets['Site'] = Site.objects.filter(superviseur=user.superviseur_profile)
             querysets['SousSite'] = SousSite.objects.filter(site__superviseur=user.superviseur_profile)
@@ -1352,7 +1376,7 @@ class InventoryExportExcelView(APIView):
 
         # Filtrer par rôle (ADMIN, CLIENT, SUPERVISEUR)
         user = request.user
-        client_filter = None
+        structure_filter = None
         superviseur_filter = None
         if user.is_authenticated:
             roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
@@ -1360,7 +1384,7 @@ class InventoryExportExcelView(APIView):
             if 'ADMIN' in roles:
                 pass  # ADMIN voit tout
             elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                client_filter = user.client_profile
+                structure_filter = user.client_profile.structure
             elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
                 superviseur_filter = user.superviseur_profile
 
@@ -1372,8 +1396,8 @@ class InventoryExportExcelView(APIView):
             queryset = model_class.objects.select_related('site', 'sous_site').all()
 
             # Filtrer par rôle
-            if client_filter:
-                queryset = queryset.filter(site__client=client_filter)
+            if structure_filter:
+                queryset = queryset.filter(site__structure_client=structure_filter)
             elif superviseur_filter:
                 queryset = queryset.filter(site__superviseur=superviseur_filter)
 
@@ -1712,7 +1736,7 @@ class InventoryExportPDFView(APIView):
 
         # Filtrer par rôle (ADMIN, CLIENT, SUPERVISEUR)
         user = request.user
-        client_filter = None
+        structure_filter = None
         superviseur_filter = None
         if user.is_authenticated:
             roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
@@ -1720,7 +1744,7 @@ class InventoryExportPDFView(APIView):
             if 'ADMIN' in roles:
                 pass  # ADMIN voit tout
             elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                client_filter = user.client_profile
+                structure_filter = user.client_profile.structure
             elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
                 superviseur_filter = user.superviseur_profile
 
@@ -1733,8 +1757,8 @@ class InventoryExportPDFView(APIView):
             queryset = model_class.objects.select_related('site', 'sous_site').all()
 
             # Filtrer par rôle
-            if client_filter:
-                queryset = queryset.filter(site__client=client_filter)
+            if structure_filter:
+                queryset = queryset.filter(site__structure_client=structure_filter)
             elif superviseur_filter:
                 queryset = queryset.filter(site__superviseur=superviseur_filter)
 
@@ -2005,7 +2029,7 @@ class InventoryListView(APIView):
 
         # Filtrer par rôle (ADMIN, CLIENT, SUPERVISEUR)
         user = request.user
-        client_filter = None
+        structure_filter = None
         superviseur_filter = None
         if user.is_authenticated:
             roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
@@ -2013,9 +2037,9 @@ class InventoryListView(APIView):
             # ADMIN voit tout - pas de filtre
             if 'ADMIN' in roles:
                 pass
-            # CLIENT voit uniquement ses sites
+            # CLIENT voit uniquement les sites de sa structure
             elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                client_filter = user.client_profile
+                structure_filter = user.client_profile.structure
             # SUPERVISEUR voit uniquement les sites qui lui sont affectés
             elif 'SUPERVISEUR' in roles:
                 if hasattr(user, 'superviseur_profile'):
@@ -2042,8 +2066,8 @@ class InventoryListView(APIView):
             qs = model_class.objects.select_related('site', 'sous_site')
 
             # Appliquer les filtres de rôle
-            if client_filter:
-                qs = qs.filter(site__client=client_filter)
+            if structure_filter:
+                qs = qs.filter(site__structure_client=structure_filter)
             elif superviseur_filter:
                 qs = qs.filter(site__superviseur=superviseur_filter)
 
@@ -2576,7 +2600,7 @@ class MapObjectsView(APIView):
         # Déterminer les permissions basées sur le rôle
         user = request.user
         is_admin = False
-        client_filter = None
+        structure_filter = None
         superviseur_filter = None  # (site_ids, object_ids)
 
         if user.is_authenticated:
@@ -2585,7 +2609,7 @@ class MapObjectsView(APIView):
             if 'ADMIN' in roles:
                 is_admin = True
             elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                client_filter = user.client_profile
+                structure_filter = user.client_profile.structure
             elif 'SUPERVISEUR' in roles:
                 superviseur_filter = self._get_superviseur_filters(user)
 
@@ -2597,8 +2621,8 @@ class MapObjectsView(APIView):
 
             # Appliquer les filtres de permissions
             if not is_admin:
-                if client_filter:
-                    sites = sites.filter(client=client_filter)
+                if structure_filter:
+                    sites = sites.filter(structure_client=structure_filter)
                 elif superviseur_filter:
                     site_ids, _ = superviseur_filter
                     if site_ids:
@@ -2678,8 +2702,8 @@ class MapObjectsView(APIView):
 
                         # Appliquer les filtres de permissions (sauf pour ADMIN)
                         if not is_admin:
-                            if client_filter:
-                                queryset = queryset.filter(site__client=client_filter)
+                            if structure_filter:
+                                queryset = queryset.filter(site__structure_client=structure_filter)
                             elif superviseur_filter:
                                 _, object_ids = superviseur_filter
                                 # SUPERVISEUR: ne voir QUE les objets directement liés aux tâches
@@ -2787,9 +2811,14 @@ class InventoryFilterOptionsView(APIView):
 
             if 'ADMIN' not in roles:
                 if 'CLIENT' in roles and hasattr(user, 'client_profile'):
-                    # CLIENT: uniquement ses sites
-                    site_filter = Q(client=user.client_profile)
-                    object_filter = Q(site__client=user.client_profile)
+                    # CLIENT: uniquement les sites de sa structure
+                    structure = user.client_profile.structure
+                    if structure:
+                        site_filter = Q(structure_client=structure)
+                        object_filter = Q(site__structure_client=structure)
+                    else:
+                        site_filter = Q(pk__in=[])
+                        object_filter = Q(pk__in=[])
                 elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
                     # SUPERVISEUR: uniquement les sites qui lui sont affectés
                     site_filter = Q(superviseur=user.superviseur_profile)

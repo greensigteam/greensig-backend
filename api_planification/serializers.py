@@ -192,14 +192,19 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         equipes = validated_data.pop('equipes', None)
         objets = validated_data.pop('objets', None)
 
-        # AUTO-ASSIGN CLIENT: Si id_client n'est pas fourni, le déduire des objets
-        if 'id_client' not in validated_data or validated_data.get('id_client') is None:
-            if objets:
-                # Prendre le premier objet et récupérer son client via site
-                for obj in objets:
-                    if hasattr(obj, 'site') and obj.site and hasattr(obj.site, 'client') and obj.site.client:
-                        validated_data['id_client'] = obj.site.client
-                        break
+        # AUTO-ASSIGN CLIENT & STRUCTURE: Si non fournis, les déduire des objets
+        if objets:
+            for obj in objets:
+                if hasattr(obj, 'site') and obj.site:
+                    # Assigner id_structure_client si non fourni
+                    if ('id_structure_client' not in validated_data or validated_data.get('id_structure_client') is None):
+                        if obj.site.structure_client:
+                            validated_data['id_structure_client'] = obj.site.structure_client
+                    # Legacy: Assigner id_client si non fourni
+                    if ('id_client' not in validated_data or validated_data.get('id_client') is None):
+                        if hasattr(obj.site, 'client') and obj.site.client:
+                            validated_data['id_client'] = obj.site.client
+                    break
 
         instance = super().create(validated_data)
         if current_user:

@@ -213,7 +213,8 @@ class ClientSerializer(serializers.ModelSerializer):
     nom = serializers.CharField(source='utilisateur.nom', read_only=True)
     prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
     actif = serializers.BooleanField(source='utilisateur.actif', read_only=True)
-    structure_detail = StructureClientSerializer(source='structure', read_only=True)
+    # Retourne l'objet structure complet (pas juste l'ID)
+    structure = StructureClientSerializer(read_only=True)
     structure_id = serializers.PrimaryKeyRelatedField(
         queryset=StructureClient.objects.all(),
         source='structure',
@@ -226,12 +227,12 @@ class ClientSerializer(serializers.ModelSerializer):
         model = Client
         fields = [
             'utilisateur', 'utilisateur_detail', 'email', 'nom', 'prenom', 'actif',
-            'structure', 'structure_id', 'structure_detail',
+            'structure', 'structure_id',
             # Legacy fields (for backward compatibility)
             'nom_structure', 'adresse', 'telephone',
             'contact_principal', 'email_facturation', 'logo'
         ]
-        read_only_fields = ['utilisateur', 'structure']
+        read_only_fields = ['utilisateur']
 
 
 class ClientCreateSerializer(serializers.ModelSerializer):

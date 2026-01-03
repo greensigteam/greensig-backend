@@ -134,19 +134,27 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         Assigner automatiquement le créateur (utilisateur connecté).
         Si c'est un client, on associe aussi le client_profile.
         Remplir automatiquement date_constatation si non fournie.
+        Déduire structure_client du site si non fourni.
         """
         user = self.request.user
         extra_kwargs = {'createur': user}
 
-        # Si l'utilisateur est un client, on associe également le client_profile
+        # Si l'utilisateur est un client, on associe la structure cliente
         if hasattr(user, 'client_profile'):
-            extra_kwargs['client'] = user.client_profile
+            extra_kwargs['client'] = user.client_profile  # Legacy
+            if user.client_profile.structure:
+                extra_kwargs['structure_client'] = user.client_profile.structure
 
         # Remplir automatiquement date_constatation avec la date actuelle si non fournie
         if 'date_constatation' not in serializer.validated_data or not serializer.validated_data['date_constatation']:
             extra_kwargs['date_constatation'] = timezone.now()
 
         reclamation = serializer.save(**extra_kwargs, _current_user=user)
+
+        # Déduire structure_client du site si pas déjà défini
+        if not reclamation.structure_client and reclamation.site and reclamation.site.structure_client:
+            reclamation.structure_client = reclamation.site.structure_client
+            reclamation.save(update_fields=['structure_client'])
 
         # Création de l'historique initial
         HistoriqueReclamation.objects.create(
