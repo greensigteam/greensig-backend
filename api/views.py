@@ -699,20 +699,35 @@ class ExportPDFView(APIView):
         visible_layers = request.data.get('visibleLayers', {})
         center = request.data.get('center', [0, 0])
         zoom = request.data.get('zoom', 15)
+        site_names = request.data.get('siteNames', [])  # Liste des noms de sites visibles
 
         # Créer le PDF en mémoire
         buffer = io.BytesIO()
         page_width, page_height = landscape(A4)
         pdf = canvas.Canvas(buffer, pagesize=landscape(A4))
 
-        # Titre
-        pdf.setFont("Helvetica-Bold", 20)
-        pdf.drawString(2*cm, page_height - 2*cm, title)
+        # Utilisateur
+        user = request.user
+        user_name = user.get_full_name() if hasattr(user, 'get_full_name') else f"{getattr(user, 'prenom', '')} {getattr(user, 'nom', user.username)}".strip()
+        user_info = f"Exporté par: {user_name} ({user.email})" if user.email else f"Exporté par: {user_name}"
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(2*cm, page_height - 2*cm, user_info)
+
+        # Site(s)
+        if site_names:
+            sites_text = f"Site(s): {', '.join(site_names[:3])}"  # Limiter à 3 sites pour éviter débordement
+            if len(site_names) > 3:
+                sites_text += f" (+{len(site_names) - 3} autre(s))"
+            pdf.setFont("Helvetica", 10)
+            pdf.drawString(2*cm, page_height - 2.6*cm, sites_text)
+            date_y = page_height - 3.2*cm
+        else:
+            date_y = page_height - 2.6*cm
 
         # Date
         pdf.setFont("Helvetica", 10)
         date_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-        pdf.drawString(2*cm, page_height - 2.8*cm, f"Date d'export: {date_str}")
+        pdf.drawString(2*cm, date_y, f"Date d'export: {date_str}")
 
         # Logo GreenSIG (en haut à droite)
         try:
@@ -748,64 +763,104 @@ class ExportPDFView(APIView):
 
         # Légende (à droite de l'image)
         legend_x = page_width - 6*cm
-        legend_y = page_height - 4*cm
+        legend_y = page_height - 3*cm
 
         pdf.setFont("Helvetica-Bold", 12)
         pdf.drawString(legend_x, legend_y, "Légende")
+        legend_y -= 0.6*cm
 
-        legend_y -= 0.7*cm
-        pdf.setFont("Helvetica", 9)
+        # Définition des catégories et éléments (Synchronisé avec constants.ts)
+        legend_data = [
+            {
+                "title": "SITES",
+                "items": [
+                    {"name": "Sites", "color": (59, 130, 246)},      # #3b82f6
+                ]
+            },
+            {
+                "title": "VÉGÉTATION",
+                "items": [
+                    {"name": "Arbres", "color": (5, 150, 105)},      # #059669
+                    {"name": "Gazons", "color": (132, 204, 22)},     # #84cc16
+                    {"name": "Palmiers", "color": (249, 115, 22)},    # #f97316
+                    {"name": "Arbustes", "color": (16, 185, 129)},    # #10b981
+                    {"name": "Vivaces", "color": (236, 72, 153)},     # #ec4899
+                    {"name": "Cactus", "color": (6, 182, 212)},      # #06b6d4
+                    {"name": "Graminées", "color": (234, 179, 8)},     # #eab308
+                ]
+            },
+            {
+                "title": "HYDRAULIQUE",
+                "items": [
+                    {"name": "Puits", "color": (14, 165, 233)},      # #0ea5e9
+                    {"name": "Pompes", "color": (6, 182, 212)},      # #06b6d4
+                    {"name": "Vannes", "color": (20, 184, 166)},     # #14b8a6
+                    {"name": "Clapets", "color": (8, 145, 178)},     # #0891b2
+                    {"name": "Canalisations", "color": (2, 132, 199)}, # #0284c7
+                    {"name": "Aspersions", "color": (56, 189, 248)}, # #38bdf8
+                    {"name": "Gouttes", "color": (125, 211, 252)},   # #7dd3fc
+                    {"name": "Ballons", "color": (3, 105, 161)},     # #0369a1
+                ]
+            },
+            {
+                "title": "RÉCLAMATIONS",
+                "items": [
+                    {"name": "Nouvelle", "color": (239, 68, 68)},      # #ef4444
+                    {"name": "Prise en compte", "color": (249, 115, 22)}, # #f97316
+                    {"name": "En cours", "color": (234, 179, 8)},       # #eab308
+                    {"name": "Résolue", "color": (34, 197, 94)},        # #22c55e
+                ]
+            }
+        ]
 
-        # Couleurs de légende (correspondant aux styles du frontend)
-        layer_colors = {
-            'sites': (59, 130, 246),      # #3b82f6
-            'sousSites': (255, 165, 0),   # Orange (inchangé car pas dans constants.ts)
-            'arbres': (34, 197, 94),      # #22c55e
-            'gazons': (132, 204, 22),     # #84cc16
-            'palmiers': (22, 163, 74),    # #16a34a
-            'arbustes': (101, 163, 13),   # #65a30d
-            'vivaces': (163, 230, 53),    # #a3e635
-            'cactus': (77, 124, 15),      # #4d7c0f
-            'graminees': (190, 242, 100), # #bef264
-            'puits': (14, 165, 233),      # #0ea5e9
-            'pompes': (6, 182, 212),      # #06b6d4
-            'vannes': (20, 184, 166),     # #14b8a6
-            'clapets': (8, 145, 178),     # #0891b2
-            'canalisations': (2, 132, 199), # #0284c7
-            'aspersions': (56, 189, 248), # #38bdf8
-            'gouttes': (125, 211, 252),   # #7dd3fc
-            'ballons': (3, 105, 161)      # #0369a1
-        }
+        # Rendre la légende complète
+        for category in legend_data:
+            # Titre de catégorie
+            pdf.setFont("Helvetica-Bold", 9)
+            pdf.setFillColorRGB(0.4, 0.4, 0.4)
+            pdf.drawString(legend_x, legend_y, category["title"])
+            legend_y -= 0.45*cm
 
-        layer_names = {
-            'sites': 'Sites',
-            'sousSites': 'Sous-sites',
-            'arbres': 'Arbres',
-            'gazons': 'Gazons',
-            'palmiers': 'Palmiers',
-            'arbustes': 'Arbustes',
-            'vivaces': 'Vivaces',
-            'cactus': 'Cactus',
-            'graminees': 'Graminées',
-            'puits': 'Puits',
-            'pompes': 'Pompes',
-            'vannes': 'Vannes',
-            'clapets': 'Clapets',
-            'canalisations': 'Canalisations',
-            'aspersions': 'Aspersions',
-            'gouttes': 'Goutte-à-goutte',
-            'ballons': 'Ballons'
-        }
+            # Cas spécial pour les réclamations : afficher les symbologies
+            if category["title"] == "RÉCLAMATIONS":
+                for item in category["items"]:
+                    color = item["color"]
+                    
+                    # Symbole Point: Cercle avec "!"
+                    pdf.setFillColorRGB(color[0]/255, color[1]/255, color[2]/255)
+                    pdf.circle(legend_x + 0.25*cm, legend_y + 0.1*cm, 0.12*cm, fill=1)
+                    pdf.setFillColorRGB(1, 1, 1)  # Blanc pour le "!"
+                    pdf.setFont("Helvetica-Bold", 7)
+                    pdf.drawString(legend_x + 0.22*cm, legend_y + 0.05*cm, "!")
+                    
+                    # Symbole Polygon: Rectangle avec bordure pointillée
+                    pdf.setStrokeColorRGB(color[0]/255, color[1]/255, color[2]/255)
+                    pdf.setFillColorRGB(color[0]/255, color[1]/255, color[2]/255, alpha=0.25)
+                    pdf.setLineWidth(1.5)
+                    pdf.setDash([2, 1])  # Ligne pointillée
+                    pdf.rect(legend_x + 0.55*cm, legend_y + 0.02*cm, 0.2*cm, 0.16*cm, fill=1, stroke=1)
+                    pdf.setDash([])  # Reset dash
+                    
+                    # Texte
+                    pdf.setFillColorRGB(0, 0, 0)
+                    pdf.setFont("Helvetica", 8)
+                    pdf.drawString(legend_x + 0.9*cm, legend_y, item["name"])
+                    legend_y -= 0.4*cm
+            else:
+                # Autres catégories: symbologie normale
+                for item in category["items"]:
+                    # Puce de couleur
+                    color = item["color"]
+                    pdf.setFillColorRGB(color[0]/255, color[1]/255, color[2]/255)
+                    pdf.circle(legend_x + 0.2*cm, legend_y + 0.1*cm, 0.15*cm, fill=1)
 
-        for layer_key, is_visible in visible_layers.items():
-            if is_visible and layer_key in layer_colors:
-                color = layer_colors[layer_key]
-                pdf.setFillColorRGB(color[0]/255, color[1]/255, color[2]/255)
-                pdf.circle(legend_x + 0.2*cm, legend_y, 0.15*cm, fill=1)
-
-                pdf.setFillColorRGB(0, 0, 0)
-                pdf.drawString(legend_x + 0.6*cm, legend_y - 0.15*cm, layer_names.get(layer_key, layer_key))
-                legend_y -= 0.5*cm
+                    # Texte
+                    pdf.setFillColorRGB(0, 0, 0)
+                    pdf.setFont("Helvetica", 8)
+                    pdf.drawString(legend_x + 0.6*cm, legend_y, item["name"])
+                    legend_y -= 0.4*cm
+            
+            legend_y -= 0.2*cm
 
         # Informations de la vue
         info_y = 2*cm

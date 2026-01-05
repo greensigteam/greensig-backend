@@ -48,6 +48,9 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'zone', 'zone_nom',
             'date_cloture_prevue',
             'date_cloture_reelle',
+            'date_prise_en_compte',
+            'date_debut_traitement',
+            'date_resolution',
             'description',
             'createur', 'createur_nom',
             'localisation'
@@ -207,11 +210,15 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
             'localisation',
             'description',
             'date_constatation',
+            'date_prise_en_compte',
+            'date_debut_traitement',
+            'date_resolution',
+            'date_cloture_reelle',
             'photos',
             'client',
             'createur'
         ]
-        read_only_fields = ['id', 'numero_reclamation']
+        read_only_fields = ['id', 'numero_reclamation', 'date_prise_en_compte', 'date_debut_traitement', 'date_resolution', 'date_cloture_reelle']
 
     def validate(self, attrs):
         """

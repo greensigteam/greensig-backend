@@ -502,7 +502,7 @@ class OperateurListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operateur
         fields = [
-            'id', 'nom', 'prenom', 'full_name', 'email',
+            'id', 'actif', 'nom', 'prenom', 'full_name', 'email',
             'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
             'superviseur', 'superviseur_nom',
             'date_embauche', 'date_sortie', 'telephone', 'photo',

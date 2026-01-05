@@ -734,6 +734,11 @@ class Operateur(models.Model):
         super().save(*args, **kwargs)
 
     @property
+    def actif(self):
+        """Retourne True si l'opérateur est actif (basé sur le statut)."""
+        return self.statut == StatutOperateur.ACTIF
+
+    @property
     def est_chef_equipe(self):
         """Vérifie si l'opérateur est chef d'une équipe."""
         # Dans la nouvelle architecture, un opérateur ne peut diriger qu'une seule équipe (OneToOne)

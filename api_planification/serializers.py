@@ -45,10 +45,12 @@ class ObjetSimpleSerializer(serializers.ModelSerializer):
     """
     site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
     sous_site_nom = serializers.CharField(source='sous_site.nom', read_only=True, allow_null=True)
+    nom_type = serializers.CharField(source='get_nom_type', read_only=True)
+    display = serializers.CharField(source='__str__', read_only=True)
 
     class Meta:
         model = Objet
-        fields = ['id', 'site', 'site_nom', 'sous_site', 'sous_site_nom']
+        fields = ['id', 'site', 'site_nom', 'sous_site', 'sous_site_nom', 'nom_type', 'display']
 
 class ParticipationTacheSerializer(serializers.ModelSerializer):
     operateur_nom = serializers.CharField(source='id_operateur.nom_complet', read_only=True)

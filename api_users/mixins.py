@@ -108,41 +108,37 @@ class RoleBasedQuerySetMixin:
         if model_name == 'SousSite':
             return queryset.filter(site__superviseur=superviseur)
 
-        # Opérateurs : Ses opérateurs + opérateurs des équipes intervenant sur ses sites
+        # Opérateurs : Ses opérateurs + opérateurs des équipes sur ses sites
         if model_name == 'Operateur':
-            # 1. Opérateurs directement supervisés
+            # 1. Opérateurs directement supervisés (relation directe)
             operateurs_directs = Q(superviseur=superviseur)
 
-            # 2. Opérateurs des équipes intervenant sur ses sites
-            # (soit affectées, soit avec tâches)
+            # 2. Opérateurs des équipes affectées aux sites du superviseur
+            operateurs_via_equipe_site = Q(equipe__site__superviseur=superviseur)
+
+            # 3. Opérateurs des équipes avec tâches sur les sites du superviseur
             from api_planification.models import Tache
 
-            # Équipes affectées à ses sites
-            equipes_ids = set()
-            equipes_ids.update(
-                superviseur.equipes_gerees.values_list('id', flat=True)
-            )
-
-            # Équipes avec tâches sur ses sites
             taches_sur_mes_sites = Tache.objects.filter(
                 deleted_at__isnull=True,
                 objets__site__superviseur=superviseur
             ).distinct()
 
+            equipes_ids_avec_taches = set()
             # M2M relation
-            equipes_ids.update(
+            equipes_ids_avec_taches.update(
                 taches_sur_mes_sites.values_list('equipes__id', flat=True)
             )
             # Legacy FK
-            equipes_ids.update(
+            equipes_ids_avec_taches.update(
                 taches_sur_mes_sites.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
             )
-            equipes_ids.discard(None)
+            equipes_ids_avec_taches.discard(None)
 
-            operateurs_des_equipes = Q(equipe__id__in=equipes_ids)
+            operateurs_via_taches = Q(equipe__id__in=equipes_ids_avec_taches) if equipes_ids_avec_taches else Q(pk__in=[])
 
             # Combiner avec OR
-            return queryset.filter(operateurs_directs | operateurs_des_equipes).distinct()
+            return queryset.filter(operateurs_directs | operateurs_via_equipe_site | operateurs_via_taches).distinct()
 
         # Équipes : Ses équipes + équipes avec tâches sur ses sites
         if model_name == 'Equipe':
@@ -176,8 +172,15 @@ class RoleBasedQuerySetMixin:
             return queryset.filter(equipes_affectees | equipes_avec_taches).distinct()
 
         # Absences : Absences de ses opérateurs
+        # Un opérateur est "sous" un superviseur si:
+        # 1. operateur.superviseur == superviseur (relation directe)
+        # 2. operateur.equipe.site.superviseur == superviseur (via équipe/site)
         if model_name == 'Absence':
-            return queryset.filter(operateur__superviseur=superviseur)
+            # Relation directe
+            absences_direct = Q(operateur__superviseur=superviseur)
+            # Via équipe -> site -> superviseur
+            absences_via_equipe = Q(operateur__equipe__site__superviseur=superviseur)
+            return queryset.filter(absences_direct | absences_via_equipe).distinct()
 
         # Tâches : Tâches assignées à ses équipes OU tâches sur ses sites sans équipe
         if model_name == 'Tache':

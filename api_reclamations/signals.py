@@ -19,12 +19,28 @@ _reclamation_previous_status = {}
 def reclamation_pre_save(sender, instance, **kwargs):
     """
     Capture l'ancien statut avant modification pour détecter les changements.
+    Et remplit automatiquement les dates clés selon le nouveau statut.
     """
     if instance.pk:
         try:
+            from django.utils import timezone
             old_instance = Reclamation.objects.get(pk=instance.pk)
-            _reclamation_previous_status[instance.pk] = old_instance.statut
-            logger.info(f"[DEBUG-SIGNAL] Reclamation #{instance.pk} pre_save: old_statut={old_instance.statut}")
+            old_statut = old_instance.statut
+            _reclamation_previous_status[instance.pk] = old_statut
+            
+            # Mise à jour automatique des dates si le statut a changé
+            if old_statut != instance.statut:
+                now = timezone.now()
+                if instance.statut == 'PRISE_EN_COMPTE' and not instance.date_prise_en_compte:
+                    instance.date_prise_en_compte = now
+                elif instance.statut == 'EN_COURS' and not instance.date_debut_traitement:
+                    instance.date_debut_traitement = now
+                elif instance.statut in ['RESOLUE', 'EN_ATTENTE_VALIDATION_CLOTURE'] and not instance.date_resolution:
+                    instance.date_resolution = now
+                elif instance.statut == 'CLOTUREE' and not instance.date_cloture_reelle:
+                    instance.date_cloture_reelle = now
+
+            logger.info(f"[DEBUG-SIGNAL] Reclamation #{instance.pk} pre_save: {old_statut} -> {instance.statut}")
         except Reclamation.DoesNotExist:
             pass
 

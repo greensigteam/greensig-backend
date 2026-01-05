@@ -170,18 +170,6 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         old_statut = instance.statut
         
-        # Mise à jour automatique des dates selon le statut
-        new_statut = serializer.validated_data.get('statut')
-        if new_statut and new_statut != old_statut:
-            if new_statut == 'PRISE_EN_COMPTE' and not instance.date_prise_en_compte:
-                serializer.validated_data['date_prise_en_compte'] = timezone.now()
-            elif new_statut == 'EN_COURS' and not instance.date_debut_traitement:
-                serializer.validated_data['date_debut_traitement'] = timezone.now()
-            elif new_statut == 'RESOLUE' and not instance.date_resolution:
-                serializer.validated_data['date_resolution'] = timezone.now()
-            elif new_statut == 'CLOTUREE' and not instance.date_cloture_reelle:
-                serializer.validated_data['date_cloture_reelle'] = timezone.now()
-
         updated_instance = serializer.save(_current_user=self.request.user)
         
         # Si le statut a changé, on ajoute une entrée dans l'historique
@@ -232,8 +220,6 @@ class ReclamationViewSet(viewsets.ModelViewSet):
              # Si nouvelle -> Prise en compte
              if reclamation.statut == 'NOUVELLE':
                  reclamation.statut = 'PRISE_EN_COMPTE'
-                 if not reclamation.date_prise_en_compte:
-                     reclamation.date_prise_en_compte = timezone.now()
              
              reclamation._current_user = request.user
              reclamation.save()
@@ -288,8 +274,6 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             reclamation.statut = 'EN_ATTENTE_VALIDATION_CLOTURE'
             reclamation.cloture_proposee_par = user
             reclamation.date_proposition_cloture = timezone.now()
-            if not reclamation.date_resolution:
-                reclamation.date_resolution = timezone.now()
             
             reclamation._current_user = user
             reclamation.save()
@@ -339,7 +323,6 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             old_statut = reclamation.statut
             reclamation.statut = 'CLOTUREE'
-            reclamation.date_cloture_reelle = timezone.now()
             
             reclamation._current_user = user
             reclamation.save()

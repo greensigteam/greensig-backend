@@ -85,7 +85,7 @@ from .filters import (
 from .permissions import (
     IsAdmin, IsSuperviseur, IsClient,
     IsSuperviseurAndOwnsOperateur, IsSuperviseurAndOwnsEquipe,
-    IsAdminOrReadOnly, IsSelfOrAdmin
+    IsAdminOrReadOnly, IsSelfOrAdmin, IsSuperviseurAndOwnsAbsence
 )
 from .mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin
 
@@ -1307,26 +1307,28 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
 
     Permissions (via RoleBasedPermissionMixin):
     - ADMIN: accès complet CRUD + validation
-    - SUPERVISEUR: lecture seule sur les absences de ses opérateurs
+    - SUPERVISEUR: CRUD + validation sur les absences de ses opérateurs
 
     Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
     queryset = Absence.objects.select_related(
         'operateur',
         'operateur__equipe',
+        'operateur__equipe__site',
         'validee_par'
     ).all()
     filterset_class = AbsenceFilter
 
     # Permissions par action
+    # SUPERVISEUR peut gérer les absences de ses opérateurs (via IsSuperviseurAndOwnsAbsence)
     permission_classes_by_action = {
-        'create': [IsAdmin],
-        'update': [IsAdmin],
-        'partial_update': [IsAdmin],
-        'destroy': [IsAdmin],
-        'valider': [IsAdmin],
-        'refuser': [IsAdmin],
-        'annuler': [IsAdmin],
+        'create': [IsSuperviseurAndOwnsAbsence],
+        'update': [IsSuperviseurAndOwnsAbsence],
+        'partial_update': [IsSuperviseurAndOwnsAbsence],
+        'destroy': [IsSuperviseurAndOwnsAbsence],
+        'valider': [IsSuperviseurAndOwnsAbsence],
+        'refuser': [IsSuperviseurAndOwnsAbsence],
+        'annuler': [IsSuperviseurAndOwnsAbsence],
         'default': [IsAuthenticated],  # Lecture pour tous authentifiés (filtrage via mixin)
     }
 
