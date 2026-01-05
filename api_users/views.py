@@ -85,7 +85,7 @@ from .filters import (
 from .permissions import (
     IsAdmin, IsSuperviseur, IsClient,
     IsSuperviseurAndOwnsOperateur, IsSuperviseurAndOwnsEquipe,
-    IsAdminOrReadOnly, IsSelfOrAdmin
+    IsAdminOrReadOnly, IsSelfOrAdmin, IsSuperviseurAndOwnsAbsence
 )
 from .mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin
 
@@ -431,11 +431,18 @@ class ClientViewSet(viewsets.ModelViewSet):
     Permissions:
     - ADMIN: accès complet CRUD
     - CLIENT: lecture seule sur son propre profil (filtré par get_queryset)
+
+    Filtres disponibles:
+    - structure: filtre par ID de structure
+    - structure__isnull: filtre les clients sans structure (orphelins)
     """
     permission_classes = [IsAuthenticated]
-    queryset = Client.objects.select_related('utilisateur').prefetch_related(
+    queryset = Client.objects.select_related('utilisateur', 'structure').prefetch_related(
         'utilisateur__roles_utilisateur__role'
     ).all()
+    filterset_fields = {
+        'structure': ['exact', 'isnull'],
+    }
 
     def get_queryset(self):
         """
@@ -560,8 +567,16 @@ class ClientViewSet(viewsets.ModelViewSet):
 
         client = self.get_object()
 
-        # Récupérer tous les sites du client
-        sites = Site.objects.filter(client=client).prefetch_related('objets')
+        # Récupérer tous les sites du client via structure_client
+        if not client.structure:
+            return Response({
+                'totalObjets': 0,
+                'vegetation': {'total': 0, 'byType': {}},
+                'hydraulique': {'total': 0, 'byType': {}},
+                'bySite': []
+            })
+
+        sites = Site.objects.filter(structure_client=client.structure).prefetch_related('objets')
 
         if not sites.exists():
             return Response({
@@ -1292,26 +1307,28 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
 
     Permissions (via RoleBasedPermissionMixin):
     - ADMIN: accès complet CRUD + validation
-    - SUPERVISEUR: lecture seule sur les absences de ses opérateurs
+    - SUPERVISEUR: CRUD + validation sur les absences de ses opérateurs
 
     Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
     queryset = Absence.objects.select_related(
         'operateur',
         'operateur__equipe',
+        'operateur__equipe__site',
         'validee_par'
     ).all()
     filterset_class = AbsenceFilter
 
     # Permissions par action
+    # SUPERVISEUR peut gérer les absences de ses opérateurs (via IsSuperviseurAndOwnsAbsence)
     permission_classes_by_action = {
-        'create': [IsAdmin],
-        'update': [IsAdmin],
-        'partial_update': [IsAdmin],
-        'destroy': [IsAdmin],
-        'valider': [IsAdmin],
-        'refuser': [IsAdmin],
-        'annuler': [IsAdmin],
+        'create': [IsSuperviseurAndOwnsAbsence],
+        'update': [IsSuperviseurAndOwnsAbsence],
+        'partial_update': [IsSuperviseurAndOwnsAbsence],
+        'destroy': [IsSuperviseurAndOwnsAbsence],
+        'valider': [IsSuperviseurAndOwnsAbsence],
+        'refuser': [IsSuperviseurAndOwnsAbsence],
+        'annuler': [IsSuperviseurAndOwnsAbsence],
         'default': [IsAuthenticated],  # Lecture pour tous authentifiés (filtrage via mixin)
     }
 
@@ -1319,6 +1336,9 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
         if self.action == 'create':
             return AbsenceCreateSerializer
         return AbsenceSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(_current_user=self.request.user)
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
@@ -1335,7 +1355,7 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
         if serializer.is_valid():
             # Utiliser l'utilisateur connecté ou un admin par défaut
             user = request.user if request.user.is_authenticated else None
-            absence = serializer.update_absence(absence, user)
+            absence = serializer.update_absence(absence, user, _current_user=request.user)
             return Response(AbsenceSerializer(absence).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1353,7 +1373,7 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
         serializer = AbsenceValidationSerializer(data={'action': 'refuser', **request.data})
         if serializer.is_valid():
             user = request.user if request.user.is_authenticated else None
-            absence = serializer.update_absence(absence, user)
+            absence = serializer.update_absence(absence, user, _current_user=request.user)
             return Response(AbsenceSerializer(absence).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1369,6 +1389,7 @@ class AbsenceViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.
             )
 
         absence.statut = StatutAbsence.ANNULEE
+        absence._current_user = request.user
         absence.save()
         return Response(AbsenceSerializer(absence).data)
 

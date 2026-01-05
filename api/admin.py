@@ -20,15 +20,16 @@ from .models import (
 @admin.register(Site)
 class SiteAdmin(GISModelAdmin):
     """Admin pour les Sites avec widget carte pour la géométrie."""
-    list_display = ('nom_site', 'client', 'code_site', 'actif', 'superficie_display')
-    list_filter = ('client', 'actif')
-    search_fields = ('nom_site', 'code_site', 'adresse')
+    list_display = ('nom_site', 'structure_client', 'superviseur', 'code_site', 'actif', 'superficie_display')
+    list_filter = ('structure_client', 'superviseur', 'actif')
+    search_fields = ('nom_site', 'code_site', 'adresse', 'structure_client__nom')
     readonly_fields = ('code_site', 'centroid')
     ordering = ('nom_site',)
+    autocomplete_fields = ['structure_client', 'superviseur']
 
     fieldsets = (
         ('Informations générales', {
-            'fields': ('nom_site', 'code_site', 'client', 'actif')
+            'fields': ('nom_site', 'code_site', 'structure_client', 'superviseur', 'actif')
         }),
         ('Contrat', {
             'fields': ('date_debut_contrat', 'date_fin_contrat'),
@@ -37,6 +38,11 @@ class SiteAdmin(GISModelAdmin):
         ('Localisation', {
             'fields': ('adresse', 'superficie_totale', 'geometrie_emprise', 'centroid'),
             'description': 'Dessinez le contour du site sur la carte ci-dessous.'
+        }),
+        ('Champs Legacy (à supprimer)', {
+            'fields': ('client',),
+            'classes': ('collapse',),
+            'description': 'Ancien champ client, utilisez structure_client à la place.'
         }),
     )
 

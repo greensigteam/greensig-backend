@@ -1,7 +1,14 @@
 from rest_framework import serializers
 from .models import TypeTache, Tache, ParticipationTache, RatioProductivite
-from api_users.models import Equipe, Client
+from api_users.models import Equipe, Client, StructureClient
 from api.models import Objet
+
+
+class StructureClientLightSerializer(serializers.ModelSerializer):
+    """Serializer allégé pour les structures client dans les tâches."""
+    class Meta:
+        model = StructureClient
+        fields = ['id', 'nom', 'actif']
 
 
 class ClientLightSerializer(serializers.ModelSerializer):
@@ -34,12 +41,16 @@ class ObjetSimpleSerializer(serializers.ModelSerializer):
     """Serializer ultra-léger pour les objets dans les tâches.
 
     N'utilise PAS get_nom_type() ou __str__() car ils causent des N+1.
+    Utilise select_related/prefetch_related dans la vue pour éviter N+1.
     """
     site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
+    sous_site_nom = serializers.CharField(source='sous_site.nom', read_only=True, allow_null=True)
+    nom_type = serializers.CharField(source='get_nom_type', read_only=True)
+    display = serializers.CharField(source='__str__', read_only=True)
 
     class Meta:
         model = Objet
-        fields = ['id', 'site', 'site_nom', 'sous_site']
+        fields = ['id', 'site', 'site_nom', 'sous_site', 'sous_site_nom', 'nom_type', 'display']
 
 class ParticipationTacheSerializer(serializers.ModelSerializer):
     operateur_nom = serializers.CharField(source='id_operateur.nom_complet', read_only=True)
@@ -83,6 +94,7 @@ class EquipeLightSerializer(serializers.ModelSerializer):
 class TacheSerializer(serializers.ModelSerializer):
     """Serializer COMPLET pour GET (lecture)"""
     client_detail = ClientLightSerializer(source='id_client', read_only=True)
+    structure_client_detail = StructureClientLightSerializer(source='id_structure_client', read_only=True)
     type_tache_detail = TypeTacheSerializer(source='id_type_tache', read_only=True)
     # Legacy single team (for backwards compatibility)
     equipe_detail = EquipeLightSerializer(source='id_equipe', read_only=True)
@@ -175,20 +187,30 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
+        # Extract metadata
+        current_user = validated_data.pop('_current_user', None)
+
         # Extract M2M fields
         equipes = validated_data.pop('equipes', None)
         objets = validated_data.pop('objets', None)
 
-        # AUTO-ASSIGN CLIENT: Si id_client n'est pas fourni, le déduire des objets
-        if 'id_client' not in validated_data or validated_data.get('id_client') is None:
-            if objets:
-                # Prendre le premier objet et récupérer son client via site
-                for obj in objets:
-                    if hasattr(obj, 'site') and obj.site and hasattr(obj.site, 'client') and obj.site.client:
-                        validated_data['id_client'] = obj.site.client
-                        break
+        # AUTO-ASSIGN CLIENT & STRUCTURE: Si non fournis, les déduire des objets
+        if objets:
+            for obj in objets:
+                if hasattr(obj, 'site') and obj.site:
+                    # Assigner id_structure_client si non fourni
+                    if ('id_structure_client' not in validated_data or validated_data.get('id_structure_client') is None):
+                        if obj.site.structure_client:
+                            validated_data['id_structure_client'] = obj.site.structure_client
+                    # Legacy: Assigner id_client si non fourni
+                    if ('id_client' not in validated_data or validated_data.get('id_client') is None):
+                        if hasattr(obj.site, 'client') and obj.site.client:
+                            validated_data['id_client'] = obj.site.client
+                    break
 
         instance = super().create(validated_data)
+        if current_user:
+            instance._current_user = current_user
 
         # Set M2M relationships
         if equipes is not None:
@@ -199,6 +221,11 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         return instance
 
     def update(self, instance, validated_data):
+        # Extract metadata
+        current_user = validated_data.pop('_current_user', None)
+        if current_user:
+            instance._current_user = current_user
+
         # Extract M2M fields
         equipes = validated_data.pop('equipes', None)
         objets = validated_data.pop('objets', None)

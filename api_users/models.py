@@ -255,16 +255,31 @@ class StructureClient(models.Model):
         blank=True,
         verbose_name="Email de facturation"
     )
-    logo = models.URLField(
+    logo = models.ImageField(
+        upload_to='structures/logos/',
         blank=True,
         null=True,
-        verbose_name="Logo",
-        help_text="URL du logo de l'organisation"
+        verbose_name="Logo (fichier)",
+        help_text="Fichier image du logo"
+    )
+    logo_url = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        verbose_name="Logo (URL)",
+        help_text="URL externe du logo (utilisé si pas de fichier uploadé)"
     )
     actif = models.BooleanField(
         default=True,
         verbose_name="Structure active"
     )
+
+    @property
+    def logo_display(self):
+        """Retourne l'URL du logo (fichier uploadé ou URL externe)."""
+        if self.logo:
+            return self.logo.url
+        return self.logo_url
     date_creation = models.DateTimeField(
         auto_now_add=True,
         verbose_name="Date de création"
@@ -347,11 +362,12 @@ class Client(models.Model):
         blank=True,
         verbose_name="Email de facturation"
     )
-    logo = models.URLField(
+    logo = models.CharField(
+        max_length=500,
         blank=True,
         null=True,
         verbose_name="Logo",
-        help_text="URL du logo de l'organisation"
+        help_text="URL du logo de l'organisation (accepte tous formats d'URL)"
     )
 
     class Meta:
@@ -716,6 +732,11 @@ class Operateur(models.Model):
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
+
+    @property
+    def actif(self):
+        """Retourne True si l'opérateur est actif (basé sur le statut)."""
+        return self.statut == StatutOperateur.ACTIF
 
     @property
     def est_chef_equipe(self):

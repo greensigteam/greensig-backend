@@ -131,21 +131,26 @@ class StructureClientSerializer(serializers.ModelSerializer):
     """Serializer pour les structures clientes."""
     utilisateurs_count = serializers.SerializerMethodField()
     sites_count = serializers.SerializerMethodField()
+    logo_display = serializers.SerializerMethodField()
 
     class Meta:
         model = StructureClient
         fields = [
             'id', 'nom', 'adresse', 'telephone',
-            'contact_principal', 'email_facturation', 'logo',
+            'contact_principal', 'email_facturation', 'logo', 'logo_url', 'logo_display',
             'actif', 'date_creation', 'utilisateurs_count', 'sites_count'
         ]
-        read_only_fields = ['id', 'date_creation']
+        read_only_fields = ['id', 'date_creation', 'logo_display']
 
     def get_utilisateurs_count(self, obj):
         return obj.nombre_utilisateurs
 
     def get_sites_count(self, obj):
         return obj.nombre_sites
+
+    def get_logo_display(self, obj):
+        """Retourne l'URL du logo (fichier ou URL externe)."""
+        return obj.logo_display
 
 
 class StructureClientDetailSerializer(StructureClientSerializer):
@@ -168,7 +173,7 @@ class StructureClientCreateSerializer(serializers.ModelSerializer):
         model = StructureClient
         fields = [
             'nom', 'adresse', 'telephone',
-            'contact_principal', 'email_facturation', 'logo'
+            'contact_principal', 'email_facturation', 'logo', 'logo_url'
         ]
 
 
@@ -179,7 +184,7 @@ class StructureClientUpdateSerializer(serializers.ModelSerializer):
         model = StructureClient
         fields = [
             'nom', 'adresse', 'telephone',
-            'contact_principal', 'email_facturation', 'logo', 'actif'
+            'contact_principal', 'email_facturation', 'logo', 'logo_url', 'actif'
         ]
 
 
@@ -208,7 +213,8 @@ class ClientSerializer(serializers.ModelSerializer):
     nom = serializers.CharField(source='utilisateur.nom', read_only=True)
     prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
     actif = serializers.BooleanField(source='utilisateur.actif', read_only=True)
-    structure_detail = StructureClientSerializer(source='structure', read_only=True)
+    # Retourne l'objet structure complet (pas juste l'ID)
+    structure = StructureClientSerializer(read_only=True)
     structure_id = serializers.PrimaryKeyRelatedField(
         queryset=StructureClient.objects.all(),
         source='structure',
@@ -221,12 +227,12 @@ class ClientSerializer(serializers.ModelSerializer):
         model = Client
         fields = [
             'utilisateur', 'utilisateur_detail', 'email', 'nom', 'prenom', 'actif',
-            'structure', 'structure_id', 'structure_detail',
+            'structure', 'structure_id',
             # Legacy fields (for backward compatibility)
             'nom_structure', 'adresse', 'telephone',
             'contact_principal', 'email_facturation', 'logo'
         ]
-        read_only_fields = ['utilisateur', 'structure']
+        read_only_fields = ['utilisateur']
 
 
 class ClientCreateSerializer(serializers.ModelSerializer):
@@ -496,7 +502,7 @@ class OperateurListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operateur
         fields = [
-            'id', 'nom', 'prenom', 'full_name', 'email',
+            'id', 'actif', 'nom', 'prenom', 'full_name', 'email',
             'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
             'superviseur', 'superviseur_nom',
             'date_embauche', 'date_sortie', 'telephone', 'photo',
@@ -970,13 +976,20 @@ class AbsenceCreateSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def create(self, validated_data):
+        current_user = validated_data.pop('_current_user', None)
+        instance = super().create(validated_data)
+        if current_user:
+            instance._current_user = current_user
+        return instance
+
 
 class AbsenceValidationSerializer(serializers.Serializer):
     """Serializer pour valider/refuser une absence."""
     action = serializers.ChoiceField(choices=['valider', 'refuser'])
     commentaire = serializers.CharField(required=False, allow_blank=True)
 
-    def update_absence(self, absence, user):
+    def update_absence(self, absence, user, _current_user=None):
         """Met à jour le statut de l'absence."""
         action = self.validated_data['action']
         commentaire = self.validated_data.get('commentaire', '')
@@ -989,6 +1002,10 @@ class AbsenceValidationSerializer(serializers.Serializer):
         absence.validee_par = user
         absence.date_validation = timezone.now()
         absence.commentaire = commentaire
+        
+        if _current_user:
+            absence._current_user = _current_user
+            
         absence.save()
 
         return absence

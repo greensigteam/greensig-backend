@@ -321,3 +321,54 @@ class CanImportData(permissions.BasePermission):
         return request.user.roles_utilisateur.filter(
             role__nom_role__in=['ADMIN', 'SUPERVISEUR']
         ).exists()
+
+
+class IsSuperviseurAndOwnsAbsence(permissions.BasePermission):
+    """
+    Permission : SUPERVISEUR peut gérer les absences de ses opérateurs.
+
+    Vérifie que l'opérateur de l'absence est supervisé par l'utilisateur.
+    Un opérateur est sous un superviseur si:
+    - operateur.superviseur == superviseur (relation directe)
+    - operateur.equipe.site.superviseur == superviseur (via équipe/site)
+    """
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # ADMIN peut tout
+        if request.user.roles_utilisateur.filter(role__nom_role='ADMIN').exists():
+            return True
+
+        # SUPERVISEUR peut créer des absences pour ses opérateurs
+        if request.user.roles_utilisateur.filter(role__nom_role='SUPERVISEUR').exists():
+            if hasattr(request.user, 'superviseur_profile'):
+                return True
+
+        return False
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # ADMIN peut tout
+        if request.user.roles_utilisateur.filter(role__nom_role='ADMIN').exists():
+            return True
+
+        # SUPERVISEUR peut gérer les absences de ses opérateurs
+        if request.user.roles_utilisateur.filter(role__nom_role='SUPERVISEUR').exists():
+            if hasattr(request.user, 'superviseur_profile'):
+                superviseur = request.user.superviseur_profile
+                operateur = obj.operateur
+
+                # Vérifier relation directe
+                if operateur.superviseur == superviseur:
+                    return True
+
+                # Vérifier via équipe -> site -> superviseur
+                if operateur.equipe and operateur.equipe.site:
+                    if operateur.equipe.site.superviseur == superviseur:
+                        return True
+
+        return False

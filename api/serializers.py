@@ -4,7 +4,8 @@ from rest_framework_gis.fields import GeometryField
 from rest_framework import serializers
 from .models import (
     Site, SousSite, Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee,
-    Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon
+    Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon,
+    Notification
 )
 
 
@@ -539,3 +540,70 @@ class BallonSerializer(GeoFeatureModelSerializer):
             'marque', 'pression', 'volume', 'materiau',
             'observation'
         )
+
+
+# ==============================================================================
+# SERIALIZERS POUR LES NOTIFICATIONS
+# ==============================================================================
+
+class NotificationSerializer(serializers.ModelSerializer):
+    """Serializer pour les notifications temps reel."""
+
+    # Alias 'type' pour compatibilite frontend (attend 'type' au lieu de 'type_notification')
+    type = serializers.CharField(source='type_notification', read_only=True)
+    # Retourner acteur comme objet avec id et nom (format attendu par frontend)
+    acteur = serializers.SerializerMethodField()
+    type_label = serializers.CharField(source='get_type_notification_display', read_only=True)
+    priorite_label = serializers.CharField(source='get_priorite_display', read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = (
+            'id', 'type', 'type_notification', 'type_label', 'titre', 'message',
+            'priorite', 'priorite_label', 'data', 'lu', 'date_lecture',
+            'acteur', 'created_at'
+        )
+        read_only_fields = fields
+
+    def get_acteur(self, obj):
+        """Retourne acteur comme objet {id, nom} pour le frontend."""
+        if obj.acteur:
+            nom = f"{obj.acteur.prenom} {obj.acteur.nom}".strip() or obj.acteur.email
+            return {'id': obj.acteur.id, 'nom': nom}
+        return None
+
+
+class AdminNotificationSerializer(NotificationSerializer):
+    """
+    Serializer pour les admins - inclut les infos du destinataire.
+    Permet aux admins de voir toutes les notifications du systeme.
+    """
+    destinataire_id = serializers.IntegerField(source='destinataire.id', read_only=True)
+    destinataire_nom = serializers.SerializerMethodField()
+    destinataire_email = serializers.EmailField(source='destinataire.email', read_only=True)
+    destinataire_role = serializers.SerializerMethodField()
+
+    class Meta(NotificationSerializer.Meta):
+        fields = NotificationSerializer.Meta.fields + (
+            'destinataire_id', 'destinataire_nom', 'destinataire_email', 'destinataire_role'
+        )
+
+    def get_destinataire_nom(self, obj):
+        if obj.destinataire:
+            return f"{obj.destinataire.prenom} {obj.destinataire.nom}".strip() or obj.destinataire.email
+        return None
+
+    def get_destinataire_role(self, obj):
+        """Retourne le role principal du destinataire."""
+        if not obj.destinataire:
+            return None
+        # Verifier le type de profil
+        if hasattr(obj.destinataire, 'superviseur_profile'):
+            return 'SUPERVISEUR'
+        if hasattr(obj.destinataire, 'client_profile'):
+            return 'CLIENT'
+        # Verifier via UtilisateurRole
+        role = obj.destinataire.roles_utilisateur.first()
+        if role:
+            return role.role.nom_role
+        return 'ADMIN'
