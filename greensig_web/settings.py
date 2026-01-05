@@ -49,7 +49,8 @@ REDIS_URL = config('REDIS_URL', default='redis://localhost:6379')
 # Application definition
 
 INSTALLED_APPS = [
-    'daphne',  # ASGI server for Django Channels
+    'daphne',
+    'channels',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -57,7 +58,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.gis',
-    'channels',
     'rest_framework',
     'rest_framework_simplejwt',
     'django_filters',
