@@ -14,12 +14,23 @@ class Site(models.Model):
     superficie_totale = models.FloatField(verbose_name="Surface totale m²", blank=True, null=True)
     code_site = models.CharField(max_length=50, unique=True, verbose_name="Code unique", blank=True)
 
-    # Client propriétaire du site
+    # Structure cliente propriétaire du site
+    structure_client = models.ForeignKey(
+        'api_users.StructureClient',
+        on_delete=models.CASCADE,
+        related_name='sites',
+        verbose_name="Structure cliente",
+        null=True,
+        blank=True,
+        help_text="Structure/organisation propriétaire du site"
+    )
+
+    # LEGACY: Ancien champ client (à supprimer après migration)
     client = models.ForeignKey(
         'api_users.Client',
         on_delete=models.CASCADE,
-        related_name='sites',
-        verbose_name="Client propriétaire",
+        related_name='sites_legacy',
+        verbose_name="[LEGACY] Client propriétaire",
         null=True,
         blank=True
     )
@@ -45,6 +56,8 @@ class Site(models.Model):
     centroid = models.PointField(srid=4326, blank=True, null=True, verbose_name="Point central")
 
     def save(self, *args, **kwargs):
+        print(f"[SITE.SAVE] Site #{self.pk} - superviseur_id={self.superviseur_id}")
+
         # Auto-generate code_site if not provided
         if not self.code_site:
             year = timezone.now().year
@@ -61,6 +74,7 @@ class Site(models.Model):
             self.centroid = self.geometrie_emprise.centroid
 
         super().save(*args, **kwargs)
+        print(f"[SITE.SAVE] Site #{self.pk} sauvegarde avec succes")
 
     def __str__(self):
         return self.nom_site
@@ -345,3 +359,137 @@ class Ballon(Objet):
     materiau = models.CharField(max_length=100, blank=True, null=True)
     observation = models.TextField(blank=True, null=True)
     geometry = models.PointField(srid=4326)
+
+
+# ==============================================================================
+# NOTIFICATIONS TEMPS REEL
+# ==============================================================================
+
+class Notification(models.Model):
+    """
+    Notification temps reel pour les utilisateurs.
+    Stockee en base pour persistance et historique.
+    Envoyee en temps reel via WebSocket (Django Channels).
+    """
+    TYPE_CHOICES = [
+        # Taches
+        ('tache_creee', 'Nouvelle tache'),
+        ('tache_assignee', 'Tache assignee'),
+        ('tache_modifiee', 'Tache modifiee'),
+        ('tache_terminee', 'Tache terminee'),
+        ('tache_en_retard', 'Tache en retard'),
+        ('tache_annulee', 'Tache annulee'),
+        # Reclamations
+        ('reclamation_creee', 'Nouvelle reclamation'),
+        ('reclamation_urgente', 'Reclamation urgente'),
+        ('reclamation_prise_en_compte', 'Reclamation prise en compte'),
+        ('reclamation_resolue', 'Reclamation resolue'),
+        ('reclamation_cloturee', 'Reclamation cloturee'),
+        # Absences
+        ('absence_demandee', 'Demande absence'),
+        ('absence_validee', 'Absence validee'),
+        ('absence_refusee', 'Absence refusee'),
+        # Equipes
+        ('equipe_membre_ajoute', 'Membre ajoute'),
+        ('equipe_membre_retire', 'Membre retire'),
+        # Sites
+        ('site_assigne', 'Site assigne'),
+        ('site_retire', 'Site retire'),
+        ('site_cree', 'Nouveau site'),
+        ('site_modifie', 'Site modifie'),
+        # Systeme
+        ('info', 'Information'),
+        ('alerte', 'Alerte'),
+    ]
+
+    PRIORITY_CHOICES = [
+        ('low', 'Basse'),
+        ('normal', 'Normale'),
+        ('high', 'Haute'),
+        ('urgent', 'Urgente'),
+    ]
+
+    # Destinataire
+    destinataire = models.ForeignKey(
+        'api_users.Utilisateur',
+        on_delete=models.CASCADE,
+        related_name='notifications',
+        verbose_name="Destinataire"
+    )
+
+    # Contenu
+    type_notification = models.CharField(
+        max_length=50,
+        choices=TYPE_CHOICES,
+        default='info',
+        verbose_name="Type"
+    )
+    titre = models.CharField(max_length=255, verbose_name="Titre")
+    message = models.TextField(verbose_name="Message")
+    priorite = models.CharField(
+        max_length=10,
+        choices=PRIORITY_CHOICES,
+        default='normal',
+        verbose_name="Priorite"
+    )
+
+    # Donnees supplementaires (JSON)
+    data = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Donnees JSON",
+        help_text="Donnees supplementaires (IDs, liens, etc.)"
+    )
+
+    # Statut
+    lu = models.BooleanField(default=False, verbose_name="Lu")
+    date_lecture = models.DateTimeField(null=True, blank=True, verbose_name="Date de lecture")
+
+    # Acteur (qui a declenche la notification)
+    acteur = models.ForeignKey(
+        'api_users.Utilisateur',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='notifications_envoyees',
+        verbose_name="Acteur"
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Date de creation")
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = "Notification"
+        verbose_name_plural = "Notifications"
+        indexes = [
+            models.Index(fields=['destinataire', 'lu', '-created_at']),
+            models.Index(fields=['type_notification']),
+        ]
+
+    def __str__(self):
+        return f"{self.titre} -> {self.destinataire.email}"
+
+    def marquer_comme_lu(self):
+        """Marque la notification comme lue"""
+        if not self.lu:
+            self.lu = True
+            self.date_lecture = timezone.now()
+            self.save(update_fields=['lu', 'date_lecture'])
+
+    def to_websocket_payload(self):
+        """Convertit la notification en payload pour WebSocket"""
+        return {
+            'id': self.id,
+            'type': self.type_notification,
+            'titre': self.titre,
+            'message': self.message,
+            'priorite': self.priorite,
+            'data': self.data,
+            'lu': self.lu,
+            'acteur': {
+                'id': self.acteur.id,
+                'nom': f"{self.acteur.prenom} {self.acteur.nom}",
+            } if self.acteur else None,
+            'created_at': self.created_at.isoformat(),
+        }

@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 
 from .models import (
-    Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
+    Utilisateur, Role, UtilisateurRole, StructureClient, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
     HistoriqueEquipeOperateur, StatutOperateur,
     NiveauCompetence, StatutAbsence
@@ -124,12 +124,76 @@ class UtilisateurRoleSerializer(serializers.ModelSerializer):
 
 
 # ==============================================================================
-# SERIALIZERS CLIENT
+# SERIALIZERS STRUCTURE CLIENT
 # ==============================================================================
 
-class ClientSerializer(serializers.ModelSerializer):
-    """Serializer pour les clients."""
-    utilisateur_detail = UtilisateurSerializer(source='utilisateur', read_only=True)
+class StructureClientSerializer(serializers.ModelSerializer):
+    """Serializer pour les structures clientes."""
+    utilisateurs_count = serializers.SerializerMethodField()
+    sites_count = serializers.SerializerMethodField()
+    logo_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StructureClient
+        fields = [
+            'id', 'nom', 'adresse', 'telephone',
+            'contact_principal', 'email_facturation', 'logo', 'logo_url', 'logo_display',
+            'actif', 'date_creation', 'utilisateurs_count', 'sites_count'
+        ]
+        read_only_fields = ['id', 'date_creation', 'logo_display']
+
+    def get_utilisateurs_count(self, obj):
+        return obj.nombre_utilisateurs
+
+    def get_sites_count(self, obj):
+        return obj.nombre_sites
+
+    def get_logo_display(self, obj):
+        """Retourne l'URL du logo (fichier ou URL externe)."""
+        return obj.logo_display
+
+
+class StructureClientDetailSerializer(StructureClientSerializer):
+    """Serializer détaillé pour les structures clientes avec utilisateurs."""
+    utilisateurs = serializers.SerializerMethodField()
+
+    class Meta(StructureClientSerializer.Meta):
+        fields = StructureClientSerializer.Meta.fields + ['utilisateurs']
+
+    def get_utilisateurs(self, obj):
+        """Retourne la liste des utilisateurs de la structure."""
+        clients = obj.utilisateurs.select_related('utilisateur').all()
+        return ClientLightSerializer(clients, many=True).data
+
+
+class StructureClientCreateSerializer(serializers.ModelSerializer):
+    """Serializer pour la création d'une structure cliente."""
+
+    class Meta:
+        model = StructureClient
+        fields = [
+            'nom', 'adresse', 'telephone',
+            'contact_principal', 'email_facturation', 'logo', 'logo_url'
+        ]
+
+
+class StructureClientUpdateSerializer(serializers.ModelSerializer):
+    """Serializer pour la mise à jour d'une structure cliente."""
+
+    class Meta:
+        model = StructureClient
+        fields = [
+            'nom', 'adresse', 'telephone',
+            'contact_principal', 'email_facturation', 'logo', 'logo_url', 'actif'
+        ]
+
+
+# ==============================================================================
+# SERIALIZERS CLIENT (Utilisateur d'une Structure)
+# ==============================================================================
+
+class ClientLightSerializer(serializers.ModelSerializer):
+    """Serializer léger pour les utilisateurs clients (sans détails structure)."""
     email = serializers.EmailField(source='utilisateur.email', read_only=True)
     nom = serializers.CharField(source='utilisateur.nom', read_only=True)
     prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
@@ -138,7 +202,33 @@ class ClientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client
         fields = [
+            'utilisateur', 'email', 'nom', 'prenom', 'actif'
+        ]
+
+
+class ClientSerializer(serializers.ModelSerializer):
+    """Serializer pour les clients avec leur structure."""
+    utilisateur_detail = UtilisateurSerializer(source='utilisateur', read_only=True)
+    email = serializers.EmailField(source='utilisateur.email', read_only=True)
+    nom = serializers.CharField(source='utilisateur.nom', read_only=True)
+    prenom = serializers.CharField(source='utilisateur.prenom', read_only=True)
+    actif = serializers.BooleanField(source='utilisateur.actif', read_only=True)
+    # Retourne l'objet structure complet (pas juste l'ID)
+    structure = StructureClientSerializer(read_only=True)
+    structure_id = serializers.PrimaryKeyRelatedField(
+        queryset=StructureClient.objects.all(),
+        source='structure',
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
+
+    class Meta:
+        model = Client
+        fields = [
             'utilisateur', 'utilisateur_detail', 'email', 'nom', 'prenom', 'actif',
+            'structure', 'structure_id',
+            # Legacy fields (for backward compatibility)
             'nom_structure', 'adresse', 'telephone',
             'contact_principal', 'email_facturation', 'logo'
         ]
@@ -146,18 +236,21 @@ class ClientSerializer(serializers.ModelSerializer):
 
 
 class ClientCreateSerializer(serializers.ModelSerializer):
-    """Serializer pour la création d'un client avec son utilisateur."""
+    """Serializer pour la création d'un utilisateur client dans une structure."""
     email = serializers.EmailField(write_only=True)
     nom = serializers.CharField(write_only=True)
     prenom = serializers.CharField(write_only=True)
     password = serializers.CharField(write_only=True, validators=[validate_password])
+    structure_id = serializers.PrimaryKeyRelatedField(
+        queryset=StructureClient.objects.all(),
+        source='structure',
+        required=True
+    )
 
     class Meta:
         model = Client
         fields = [
-            'email', 'nom', 'prenom', 'password',
-            'nom_structure', 'adresse', 'telephone',
-            'contact_principal', 'email_facturation', 'logo'
+            'email', 'nom', 'prenom', 'password', 'structure_id'
         ]
 
     def create(self, validated_data):
@@ -175,10 +268,74 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             **user_data
         )
 
-        # Créer le profil client
+        # Créer le profil client lié à la structure
         client = Client.objects.create(
             utilisateur=utilisateur,
             **validated_data
+        )
+
+        # Attribuer automatiquement le rôle CLIENT
+        from .models import Role, UtilisateurRole
+        role_client, _ = Role.objects.get_or_create(nom_role='CLIENT')
+        UtilisateurRole.objects.get_or_create(
+            utilisateur=utilisateur,
+            role=role_client
+        )
+
+        return client
+
+
+class ClientWithStructureCreateSerializer(serializers.Serializer):
+    """
+    Serializer pour créer une structure ET son premier utilisateur en une seule requête.
+    Utile pour la rétro-compatibilité avec l'ancien flux de création de client.
+    """
+    # Données utilisateur
+    email = serializers.EmailField()
+    nom = serializers.CharField()
+    prenom = serializers.CharField()
+    password = serializers.CharField(validators=[validate_password])
+
+    # Données structure
+    nom_structure = serializers.CharField()
+    adresse = serializers.CharField(required=False, allow_blank=True, default='')
+    telephone = serializers.CharField(required=False, allow_blank=True, default='')
+    contact_principal = serializers.CharField(required=False, allow_blank=True, default='')
+    email_facturation = serializers.EmailField(required=False, allow_blank=True, default='')
+    logo = serializers.URLField(required=False, allow_null=True, default=None)
+
+    def create(self, validated_data):
+        # Extraire les données
+        user_data = {
+            'email': validated_data['email'],
+            'nom': validated_data['nom'],
+            'prenom': validated_data['prenom'],
+        }
+        password = validated_data['password']
+
+        structure_data = {
+            'nom': validated_data['nom_structure'],
+            'adresse': validated_data.get('adresse', ''),
+            'telephone': validated_data.get('telephone', ''),
+            'contact_principal': validated_data.get('contact_principal', ''),
+            'email_facturation': validated_data.get('email_facturation', ''),
+            'logo': validated_data.get('logo'),
+        }
+
+        # Créer la structure
+        structure = StructureClient.objects.create(**structure_data)
+
+        # Créer l'utilisateur
+        utilisateur = Utilisateur.objects.create_user(
+            password=password,
+            **user_data
+        )
+
+        # Créer le profil client lié à la structure
+        client = Client.objects.create(
+            utilisateur=utilisateur,
+            structure=structure,
+            nom_structure=structure.nom  # Legacy field
         )
 
         # Attribuer automatiquement le rôle CLIENT
@@ -345,7 +502,7 @@ class OperateurListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operateur
         fields = [
-            'id', 'nom', 'prenom', 'full_name', 'email',
+            'id', 'actif', 'nom', 'prenom', 'full_name', 'email',
             'numero_immatriculation', 'statut', 'equipe', 'equipe_nom',
             'superviseur', 'superviseur_nom',
             'date_embauche', 'date_sortie', 'telephone', 'photo',
@@ -522,8 +679,14 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
     ⚠️ REFACTORISATION : Le superviseur est déduit du site (propriété calculée).
     """
     chef_equipe_detail = OperateurListSerializer(source='chef_equipe', read_only=True)
+    chef_equipe_nom = serializers.CharField(
+        source='chef_equipe.nom_complet',
+        read_only=True,
+        allow_null=True
+    )
     superviseur_detail = serializers.SerializerMethodField(read_only=True)
     superviseur = serializers.SerializerMethodField(read_only=True)
+    superviseur_nom = serializers.SerializerMethodField(read_only=True)
     site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
     membres = OperateurListSerializer(source='operateurs', many=True, read_only=True)
     nombre_membres = serializers.IntegerField(read_only=True)
@@ -539,12 +702,18 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
         """Retourne l'ID du superviseur (déduit du site)."""
         return obj.superviseur.utilisateur_id if obj.superviseur else None
 
+    def get_superviseur_nom(self, obj):
+        """Retourne le nom complet du superviseur (déduit du site)."""
+        if obj.superviseur and hasattr(obj.superviseur, 'utilisateur'):
+            return obj.superviseur.utilisateur.get_full_name()
+        return None
+
     class Meta:
         model = Equipe
         fields = [
             'id', 'nom_equipe',
-            'chef_equipe', 'chef_equipe_detail',
-            'superviseur', 'superviseur_detail',
+            'chef_equipe', 'chef_equipe_detail', 'chef_equipe_nom',
+            'superviseur', 'superviseur_detail', 'superviseur_nom',
             'site', 'site_nom',
             'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel', 'membres'
@@ -807,13 +976,20 @@ class AbsenceCreateSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def create(self, validated_data):
+        current_user = validated_data.pop('_current_user', None)
+        instance = super().create(validated_data)
+        if current_user:
+            instance._current_user = current_user
+        return instance
+
 
 class AbsenceValidationSerializer(serializers.Serializer):
     """Serializer pour valider/refuser une absence."""
     action = serializers.ChoiceField(choices=['valider', 'refuser'])
     commentaire = serializers.CharField(required=False, allow_blank=True)
 
-    def update_absence(self, absence, user):
+    def update_absence(self, absence, user, _current_user=None):
         """Met à jour le statut de l'absence."""
         action = self.validated_data['action']
         commentaire = self.validated_data.get('commentaire', '')
@@ -826,6 +1002,10 @@ class AbsenceValidationSerializer(serializers.Serializer):
         absence.validee_par = user
         absence.date_validation = timezone.now()
         absence.commentaire = commentaire
+        
+        if _current_user:
+            absence._current_user = _current_user
+            
         absence.save()
 
         return absence

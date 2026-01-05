@@ -1,6 +1,6 @@
 from django.db import models
 from django.core.exceptions import ValidationError
-from api_users.models import Client, Equipe, Operateur
+from api_users.models import Client, StructureClient, Equipe, Operateur
 from api.models import Objet
 from django.utils import timezone
 
@@ -59,7 +59,26 @@ class Tache(models.Model):
         ('REJETEE', 'Rejetée'),
     ]
 
-    id_client = models.ForeignKey(Client, on_delete=models.SET_NULL, null=True, blank=True, related_name='taches', verbose_name="Client")
+    # Structure cliente pour la tâche
+    id_structure_client = models.ForeignKey(
+        StructureClient,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taches',
+        verbose_name="Structure cliente"
+    )
+
+    # LEGACY: Ancien champ client (à supprimer après migration)
+    id_client = models.ForeignKey(
+        Client,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taches_legacy',
+        verbose_name="[LEGACY] Client"
+    )
+
     id_type_tache = models.ForeignKey(TypeTache, on_delete=models.PROTECT, related_name='taches', verbose_name="Type de tâche")
 
     # Équipe unique (legacy - conservé pour rétrocompatibilité)

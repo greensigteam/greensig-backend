@@ -24,7 +24,6 @@ if os.name == 'nt':
     GDAL_LIBRARY_PATH = r'C:\Program Files\QGIS 3.40.13\bin\gdal311.dll'
     GEOS_LIBRARY_PATH = r'C:\Program Files\QGIS 3.40.13\bin\geos_c.dll'
     os.environ['PROJ_LIB'] = r'C:\Program Files\QGIS 3.40.13\share\proj'
-# Linux/Docker : les variables GDAL_LIBRARY_PATH et GEOS_LIBRARY_PATH sont définies via env
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -43,10 +42,14 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=lambda v: [s.strip() for s in v.split(',')])
 ALLOWED_HOSTS += ['.trycloudflare.com', '.workers.dev', 'localhost', '127.0.0.1']
 
+# Redis configuration for Channels (WebSocket notifications)
+REDIS_URL = config('REDIS_URL', default='redis://localhost:6379')
+
 
 # Application definition
 
 INSTALLED_APPS = [
+    'daphne',  # ASGI server for Django Channels
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -54,10 +57,11 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.gis',
+    'channels',
     'rest_framework',
     'rest_framework_simplejwt',
     'django_filters',
-    'api',
+    'api.apps.ApiConfig',  # Explicit AppConfig pour charger les signals
     'api_users',
     'api_planification',
     'api_suivi_taches',
@@ -219,3 +223,25 @@ SIMPLE_JWT = {
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
     'TOKEN_TYPE_CLAIM': 'token_type',
 }
+
+# Django Channels (ASGI for WebSocket)
+ASGI_APPLICATION = 'greensig_web.asgi.application'
+
+# Channel Layer configuration
+# In development without Redis, use InMemoryChannelLayer
+# In production, use Redis
+if DEBUG:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer'
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [REDIS_URL],
+            },
+        },
+    }

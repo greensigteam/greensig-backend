@@ -1,54 +1,71 @@
 """
 Signals pour le module Planification
 
-Auto-remplissage du champ id_client basé sur les objets liés à la tâche.
+- Auto-remplissage du champ id_client basé sur les objets liés à la tâche
+- Notifications temps réel via Novu
 """
 
-from django.db.models.signals import m2m_changed
+import logging
+from django.db.models.signals import m2m_changed, post_save, pre_save
 from django.dispatch import receiver
 from .models import Tache
+
+logger = logging.getLogger(__name__)
+
+# Debug: api_planification.signals LOADED
 
 
 @receiver(m2m_changed, sender=Tache.objets.through)
 def auto_assign_client_from_objects(sender, instance, action, **kwargs):
     """
-    Signal qui remplit automatiquement id_client quand des objets sont ajoutés à une tâche.
+    Signal qui remplit automatiquement id_client et id_structure_client quand des objets sont ajoutés à une tâche.
 
     Fonctionnement:
     - Quand des objets sont ajoutés à une tâche (action='post_add')
     - Récupère le site du premier objet
-    - Récupère le client du site
-    - Assigne ce client à la tâche
+    - Récupère le client et la structure_client du site
+    - Assigne ces valeurs à la tâche
 
     Cela permet de maintenir la cohérence entre:
     - Relation directe: Tâche.id_client → Client
-    - Relation indirecte: Tâche → Objets → Site → Client
+    - Relation directe: Tâche.id_structure_client → StructureClient
+    - Relation indirecte: Tâche → Objets → Site → Client/StructureClient
     """
 
     # On agit seulement APRÈS l'ajout d'objets
     if action != 'post_add':
         return
 
-    # Si la tâche a déjà un client assigné manuellement, on respecte ce choix
-    if instance.id_client is not None:
-        return
+    # Récupérer le premier objet avec site, client et structure_client
+    objets = instance.objets.select_related('site__client', 'site__structure_client').all()
 
-    # Récupérer le premier objet avec site et client
-    objets = instance.objets.select_related('site__client').all()
+    update_fields = []
 
     for obj in objets:
-        if obj.site and obj.site.client:
-            # Assigner le client du site à la tâche
-            instance.id_client = obj.site.client
-            instance.save(update_fields=['id_client'])
+        if obj.site:
+            # Assigner le client du site à la tâche (si pas déjà défini)
+            if instance.id_client is None and obj.site.client:
+                instance.id_client = obj.site.client
+                update_fields.append('id_client')
+                logger.info(f"[AUTO-ASSIGN] Tache #{instance.id} -> Client '{obj.site.client.nom_structure}'")
 
-            print(f"✅ [AUTO-ASSIGN] Tâche #{instance.id} → Client '{obj.site.client.nom_structure}'")
-            break
+            # Assigner la structure client du site à la tâche (si pas déjà défini)
+            if instance.id_structure_client is None and obj.site.structure_client:
+                instance.id_structure_client = obj.site.structure_client
+                update_fields.append('id_structure_client')
+                logger.info(f"[AUTO-ASSIGN] Tache #{instance.id} -> StructureClient '{obj.site.structure_client.nom}'")
 
-    # Si aucun client trouvé, logger un avertissement
-    else:
-        if objets.exists():
-            print(f"⚠️  [AUTO-ASSIGN] Tâche #{instance.id}: objets sans site ou site sans client")
+            # Si on a trouvé au moins une valeur, on sort de la boucle
+            if update_fields:
+                break
+
+    # Sauvegarder si des champs ont été mis à jour
+    if update_fields:
+        instance.save(update_fields=update_fields)
+
+    # Si aucun client/structure trouvé, logger un avertissement
+    if not update_fields and objets.exists():
+        logger.warning(f"[AUTO-ASSIGN] Tache #{instance.id}: objets sans site ou site sans client/structure")
 
 
 @receiver(m2m_changed, sender=Tache.objets.through)
@@ -80,13 +97,105 @@ def validate_client_consistency(sender, instance, action, **kwargs):
         tache_client_id = instance.id_client.utilisateur_id
 
         if tache_client_id not in clients_found:
-            print(
-                f"⚠️  [VALIDATION] Tâche #{instance.id}: "
-                f"id_client={tache_client_id} mais objets appartiennent à {clients_found}"
+            logger.warning(
+                f"[VALIDATION] Tache #{instance.id}: "
+                f"id_client={tache_client_id} mais objets appartiennent a {clients_found}"
             )
 
         if len(clients_found) > 1:
-            print(
-                f"⚠️  [VALIDATION] Tâche #{instance.id}: "
-                f"objets appartiennent à plusieurs clients {clients_found}"
+            logger.warning(
+                f"[VALIDATION] Tache #{instance.id}: "
+                f"objets appartiennent a plusieurs clients {clients_found}"
             )
+
+
+# =============================================================================
+# NOTIFICATIONS TÂCHES
+# =============================================================================
+
+# Cache pour stocker l'ancien statut avant sauvegarde
+_tache_previous_status = {}
+
+# Note: On utilise désormais le champ 'notifiee' du modèle Tache pour la persistance 
+# au lieu des caches en mémoire qui ne sont pas multi-process safe.
+
+
+@receiver(pre_save, sender=Tache)
+def tache_pre_save(sender, instance, **kwargs):
+    """
+    Capture l'ancien statut avant modification pour détecter les changements.
+    """
+    if instance.pk:
+        try:
+            old_instance = Tache.objects.get(pk=instance.pk)
+            _tache_previous_status[instance.pk] = old_instance.statut
+        except Tache.DoesNotExist:
+            pass
+
+
+@receiver(post_save, sender=Tache)
+def tache_post_save(sender, instance, created, **kwargs):
+    """
+    Signal declenche apres sauvegarde d'une tache.
+    Gere les changements de statut (la notification de creation est dans m2m_changed).
+    """
+    logger.debug(f"[DEBUG] tache_post_save TRIGGERED for Tache #{instance.id} created={created}")
+    try:
+        from api.services.notifications import NotificationService
+
+        if created:
+            # Pour une nouvelle tâche, on attend l'ajout d'objets (m2m_changed)
+            # pour envoyer la notification de création avec les infos du site.
+            logger.debug(f"[NOTIF] Tache #{instance.id} creee, en attente d'objets...")
+            pass
+        else:
+            # Verifier si le statut a change
+            old_statut = _tache_previous_status.pop(instance.pk, None)
+
+            if old_statut and old_statut != instance.statut:
+                logger.info(f"[NOTIF] Tache #{instance.id} statut: {old_statut} -> {instance.statut}")
+
+                if instance.statut == 'TERMINEE':
+                    NotificationService.notify_tache_terminee(
+                        instance, 
+                        createur=getattr(instance, '_current_user', None)
+                    )
+
+    except Exception as e:
+        logger.error(f"[NOTIF] Erreur notification tache #{instance.id}: {e}")
+
+
+@receiver(m2m_changed, sender=Tache.objets.through)
+def notify_tache_on_objects_added(sender, instance, action, **kwargs):
+    """
+    Envoie la notification de creation APRES que les objets sont lies a la tache.
+    C'est ici qu'on peut recuperer le site via tache.objets.
+    """
+    if action != 'post_add':
+        return
+
+    # Si la tâche est déjà notifiée ou n'a pas encore d'objets (sécurité)
+    if instance.notifiee:
+        return
+
+    # Vérifier s'il y a des objets (indispensable pour le site)
+    if not instance.objets.exists():
+        return
+
+    try:
+        from api.services.notifications import NotificationService
+
+        logger.info(f"[NOTIF] Objets ajoutes a tache #{instance.id}, envoi notification...")
+
+        # Marquer comme notifiee persistante
+        instance.notifiee = True
+        instance.save(update_fields=['notifiee'])
+
+        NotificationService.notify_tache_creee(
+            instance, 
+            createur=getattr(instance, '_current_user', None)
+        )
+
+
+    except Exception as e:
+        logger.error(f"[NOTIF] Erreur notification tache #{instance.id} apres ajout objets: {e}")
