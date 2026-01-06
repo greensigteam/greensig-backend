@@ -45,7 +45,8 @@ urlpatterns = [
 # PUT    /utilisateurs/{id}/               - Mettre a jour un utilisateur
 # PATCH  /utilisateurs/{id}/               - Mise a jour partielle
 # DELETE /utilisateurs/{id}/               - Desactiver un utilisateur (soft delete)
-# POST   /utilisateurs/{id}/change_password/ - Changer le mot de passe
+# POST   /utilisateurs/{id}/change_password/ - Changer le mot de passe (necessite ancien MdP)
+# POST   /utilisateurs/{id}/admin_reset_password/ - Reinitialiser le mot de passe (ADMIN uniquement)
 # POST   /utilisateurs/{id}/activer/       - Reactiver un utilisateur
 # GET    /utilisateurs/{id}/roles/         - Liste des roles d'un utilisateur
 # POST   /utilisateurs/{id}/attribuer_role/ - Attribuer un role

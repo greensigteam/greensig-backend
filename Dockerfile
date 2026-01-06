@@ -32,6 +32,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copier le code de l'application
 COPY . .
 
+# Copier et rendre exécutable le script d'entrypoint
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Collecter les fichiers statiques (variables temporaires pour le build uniquement)
 RUN SECRET_KEY=build-secret-key-not-for-production \
     DEBUG=False \
@@ -44,5 +48,5 @@ RUN SECRET_KEY=build-secret-key-not-for-production \
 # Exposer le port
 EXPOSE 8000
 
-# Commande de démarrage
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "greensig_web.wsgi:application"]
+# Script d'entrypoint qui gère les migrations et démarre Daphne
+ENTRYPOINT ["/entrypoint.sh"]

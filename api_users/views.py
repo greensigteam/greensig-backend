@@ -65,7 +65,7 @@ from .models import (
 )
 from .serializers import (
     UtilisateurSerializer, UtilisateurCreateSerializer, UtilisateurUpdateSerializer,
-    ChangePasswordSerializer, RoleSerializer, UtilisateurRoleSerializer,
+    ChangePasswordSerializer, AdminResetPasswordSerializer, RoleSerializer, UtilisateurRoleSerializer,
     StructureClientSerializer, StructureClientDetailSerializer,
     StructureClientCreateSerializer, StructureClientUpdateSerializer,
     ClientSerializer, ClientCreateSerializer, ClientWithStructureCreateSerializer,
@@ -222,6 +222,24 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             user.set_password(serializer.validated_data['new_password'])
             user.save()
             return Response({'message': 'Mot de passe modifié avec succès.'})
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def admin_reset_password(self, request, pk=None):
+        """
+        Réinitialise le mot de passe d'un utilisateur (réservé aux administrateurs).
+        Ne nécessite pas l'ancien mot de passe.
+        """
+        user = self.get_object()
+        serializer = AdminResetPasswordSerializer(data=request.data)
+
+        if serializer.is_valid():
+            user.set_password(serializer.validated_data['new_password'])
+            user.save()
+            return Response({
+                'message': f'Mot de passe réinitialisé avec succès pour {user.get_full_name()}.'
+            })
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

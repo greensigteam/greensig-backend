@@ -99,6 +99,23 @@ class ChangePasswordSerializer(serializers.Serializer):
         return attrs
 
 
+class AdminResetPasswordSerializer(serializers.Serializer):
+    """Serializer pour la réinitialisation de mot de passe par un administrateur."""
+    new_password = serializers.CharField(
+        required=True,
+        write_only=True,
+        validators=[validate_password]
+    )
+    new_password_confirm = serializers.CharField(required=True, write_only=True)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['new_password_confirm']:
+            raise serializers.ValidationError({
+                'new_password_confirm': "Les nouveaux mots de passe ne correspondent pas."
+            })
+        return attrs
+
+
 # ==============================================================================
 # SERIALIZERS ROLE
 # ==============================================================================
