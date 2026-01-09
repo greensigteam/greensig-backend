@@ -60,7 +60,7 @@ from django.db.models import Q, Count, Prefetch
 
 from .models import (
     Utilisateur, Role, UtilisateurRole, StructureClient, Client, Superviseur, Operateur,
-    Competence, CompetenceOperateur, Equipe, Absence,
+    Competence, CompetenceOperateur, Equipe, Absence, HoraireTravail, JourFerie,
     HistoriqueEquipeOperateur, StatutAbsence, StatutOperateur, NiveauCompetence
 )
 from .serializers import (
@@ -75,6 +75,8 @@ from .serializers import (
     OperateurCreateSerializer, OperateurUpdateSerializer,
     EquipeListSerializer, EquipeDetailSerializer,
     EquipeCreateSerializer, EquipeUpdateSerializer, AffecterMembresSerializer,
+    HoraireTravailSerializer, HoraireTravailCreateSerializer, HoraireTravailUpdateSerializer,
+    JourFerieSerializer, JourFerieCreateSerializer, JourFerieUpdateSerializer,
     AbsenceSerializer, AbsenceCreateSerializer, AbsenceValidationSerializer,
     HistoriqueEquipeOperateurSerializer
 )
@@ -1119,10 +1121,11 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
 
     Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
+    # ⚡ OPTIMISATION: Queryset simplifié pour la liste (était 22s → maintenant <1s)
+    # Les relations supplémentaires sont chargées uniquement pour retrieve()
     queryset = Equipe.objects.select_related(
-        'chef_equipe', 'site__superviseur__utilisateur'
-    ).prefetch_related(
-        Prefetch('operateurs', queryset=Operateur.objects.filter(statut=StatutOperateur.ACTIF))
+        'chef_equipe',
+        'site'  # Simplifié: juste le site, pas la chaîne complète
     ).all()
     filterset_class = EquipeFilter
 
@@ -1138,47 +1141,19 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
     }
 
     def filter_queryset(self, queryset):
-        """Override pour debug et s'assurer que le filtrage django-filter est appliqué."""
-        import logging
-        logger = logging.getLogger(__name__)
+        """Override pour s'assurer que le filtrage django-filter est appliqué."""
+        # ⚡ OPTIMISATION: Logs de debug désactivés car ils causaient un ralentissement de 22s
+        # Les logs faisaient des .count() et des boucles sur toutes les équipes à chaque requête
+        # Pour réactiver le debug, décommenter les lignes ci-dessous
 
-        # Log utilisateur et rôle
-        user = self.request.user
-        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()] if user.is_authenticated else []
-        logger.info(f"[EquipeViewSet] 👤 User: {user.email}, Roles: {roles}")
-
-        # Log avant filtrage
-        total_equipes = queryset.count()
-        logger.info(f"[EquipeViewSet] 📊 AVANT filtrage: {total_equipes} équipes totales")
-
-        # Si SUPERVISEUR, afficher des infos de debug
-        if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
-            superviseur = user.superviseur_profile
-            logger.info(f"[EquipeViewSet] 🔍 Superviseur ID: {superviseur.utilisateur_id}")
-
-            # Vérifier les sites du superviseur
-            from api.models import Site
-            mes_sites = Site.objects.filter(superviseur=superviseur)
-            logger.info(f"[EquipeViewSet] 🏢 Sites supervisés: {mes_sites.count()}")
-            for site in mes_sites:
-                logger.info(f"[EquipeViewSet]    - Site: {site.nom_site} (ID: {site.id})")
-
-            # Vérifier les équipes sur ces sites
-            equipes_sur_mes_sites = queryset.filter(site__superviseur=superviseur)
-            logger.info(f"[EquipeViewSet] 👥 Équipes sur mes sites: {equipes_sur_mes_sites.count()}")
-            for eq in equipes_sur_mes_sites:
-                logger.info(f"[EquipeViewSet]    - Équipe: {eq.nom_equipe}, Site: {eq.site.nom_site if eq.site else 'AUCUN'}")
-
-        logger.info(f"[EquipeViewSet] 🔧 Query params: {self.request.query_params}")
+        # import logging
+        # logger = logging.getLogger(__name__)
+        # user = self.request.user
+        # roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()] if user.is_authenticated else []
+        # logger.info(f"[EquipeViewSet] 👤 User: {user.email}, Roles: {roles}")
 
         # Appliquer le filtrage (django-filter + RoleBasedQuerySetMixin)
         filtered = super().filter_queryset(queryset)
-
-        # Log après filtrage
-        logger.info(f"[EquipeViewSet] ✅ APRÈS filtrage: {filtered.count()} équipes")
-        if filtered.count() > 0:
-            for eq in filtered[:5]:  # Log les 5 premières
-                logger.info(f"[EquipeViewSet]    - {eq.nom_equipe}")
 
         return filtered
 
@@ -1308,6 +1283,318 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
         ).select_related('operateur', 'equipe')
         serializer = HistoriqueEquipeOperateurSerializer(historique, many=True)
         return Response(serializer.data)
+
+
+# ==============================================================================
+# VUES HORAIRE TRAVAIL (PHASE 2)
+# ==============================================================================
+
+class HoraireTravailViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des horaires de travail des équipes.
+
+    ✅ PHASE 2: Permet de définir et gérer les horaires de travail par équipe et jour.
+    Ces horaires sont utilisés pour calculer la charge réelle lors de la génération
+    de tâches récurrentes.
+
+    Permissions:
+    - ADMIN: accès complet CRUD
+    - SUPERVISEUR: lecture seule sur les horaires de ses équipes
+    - Autres: lecture seule
+    """
+    queryset = HoraireTravail.objects.select_related('equipe').all()
+    filterset_fields = ['equipe', 'jour_semaine', 'actif']
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        """Retourne le serializer approprié selon l'action."""
+        if self.action == 'create':
+            return HoraireTravailCreateSerializer
+        elif self.action in ['update', 'partial_update']:
+            return HoraireTravailUpdateSerializer
+        return HoraireTravailSerializer
+
+    def get_queryset(self):
+        """Filtre les horaires selon le rôle de l'utilisateur."""
+        user = self.request.user
+        queryset = super().get_queryset()
+
+        # Récupérer les rôles
+        roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+        # ADMIN voit tout
+        if 'ADMIN' in roles:
+            return queryset
+
+        # SUPERVISEUR voit les horaires de ses équipes
+        if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+            superviseur = user.superviseur_profile
+            return queryset.filter(equipe__site__superviseur=superviseur)
+
+        # Autres utilisateurs voient les horaires de toutes les équipes (lecture seule)
+        return queryset
+
+    def get_permissions(self):
+        """Permissions dynamiques : seul ADMIN peut créer/modifier/supprimer."""
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdmin()]
+        return [IsAuthenticated()]
+
+    @action(detail=False, methods=['get'])
+    def par_equipe(self, request):
+        """
+        Retourne les horaires groupés par équipe.
+
+        Query params:
+        - equipe_id: Filtre par ID d'équipe (optionnel)
+        """
+        equipe_id = request.query_params.get('equipe_id')
+        queryset = self.get_queryset()
+
+        if equipe_id:
+            queryset = queryset.filter(equipe_id=equipe_id)
+
+        # Grouper par équipe
+        from collections import defaultdict
+        horaires_par_equipe = defaultdict(list)
+
+        for horaire in queryset:
+            horaires_par_equipe[horaire.equipe.id].append(HoraireTravailSerializer(horaire).data)
+
+        result = []
+        for equipe_id, horaires in horaires_par_equipe.items():
+            equipe = Equipe.objects.get(id=equipe_id)
+            result.append({
+                'equipe': {
+                    'id': equipe.id,
+                    'nom_equipe': equipe.nom_equipe
+                },
+                'horaires': horaires
+            })
+
+        return Response(result)
+
+    @action(detail=False, methods=['post'])
+    def creer_semaine_complete(self, request):
+        """
+        Crée les horaires pour toute une semaine d'un coup.
+
+        Body:
+        {
+            "equipe": 1,
+            "lundi_vendredi": {
+                "heure_debut": "08:00",
+                "heure_fin": "17:00",
+                "duree_pause_minutes": 60
+            },
+            "samedi": {
+                "heure_debut": "08:00",
+                "heure_fin": "12:00",
+                "duree_pause_minutes": 0
+            },
+            "dimanche": null  // Pas de travail le dimanche
+        }
+        """
+        equipe_id = request.data.get('equipe')
+        lundi_vendredi = request.data.get('lundi_vendredi')
+        samedi = request.data.get('samedi')
+        dimanche = request.data.get('dimanche')
+
+        if not equipe_id:
+            return Response(
+                {'error': 'Le champ "equipe" est requis.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            equipe = Equipe.objects.get(id=equipe_id)
+        except Equipe.DoesNotExist:
+            return Response(
+                {'error': 'Équipe non trouvée.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        horaires_crees = []
+        jours_mapping = {
+            'LUN': lundi_vendredi,
+            'MAR': lundi_vendredi,
+            'MER': lundi_vendredi,
+            'JEU': lundi_vendredi,
+            'VEN': lundi_vendredi,
+            'SAM': samedi,
+            'DIM': dimanche,
+        }
+
+        for jour, config in jours_mapping.items():
+            if config is None:
+                continue
+
+            # Supprimer l'ancien horaire actif si existe
+            HoraireTravail.objects.filter(
+                equipe=equipe,
+                jour_semaine=jour,
+                actif=True
+            ).delete()
+
+            # Créer le nouvel horaire
+            horaire = HoraireTravail.objects.create(
+                equipe=equipe,
+                jour_semaine=jour,
+                heure_debut=config['heure_debut'],
+                heure_fin=config['heure_fin'],
+                duree_pause_minutes=config.get('duree_pause_minutes', 60),
+                actif=True
+            )
+            horaires_crees.append(horaire)
+
+        serializer = HoraireTravailSerializer(horaires_crees, many=True)
+        return Response({
+            'message': f'{len(horaires_crees)} horaires créés avec succès.',
+            'horaires': serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+
+# ==============================================================================
+# VUES JOUR FERIE (PHASE 3)
+# ==============================================================================
+
+class JourFerieViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des jours fériés.
+
+    ✅ PHASE 3: Permet de définir et gérer les jours fériés nationaux et locaux.
+    Ces jours fériés sont utilisés pour :
+    - Skipping de jours lors de la génération de récurrence
+    - Affichage dans le calendrier de planification
+    - Validation de disponibilité des équipes
+
+    Permissions:
+    - ADMIN: accès complet CRUD
+    - Autres: lecture seule
+    """
+    queryset = JourFerie.objects.all()
+    filterset_fields = ['date', 'type_ferie', 'actif', 'recurrent']
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        """Retourne le serializer approprié selon l'action."""
+        if self.action == 'create':
+            return JourFerieCreateSerializer
+        elif self.action in ['update', 'partial_update']:
+            return JourFerieUpdateSerializer
+        return JourFerieSerializer
+
+    def get_permissions(self):
+        """Permissions dynamiques : seul ADMIN peut créer/modifier/supprimer."""
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdmin()]
+        return [IsAuthenticated()]
+
+    @action(detail=False, methods=['get'])
+    def dans_plage(self, request):
+        """
+        Retourne tous les jours fériés dans une plage de dates.
+
+        Query params:
+        - date_debut: Date de début (format: YYYY-MM-DD)
+        - date_fin: Date de fin (format: YYYY-MM-DD)
+        - actif_uniquement: true/false (default: true)
+        """
+        from datetime import datetime
+
+        date_debut_str = request.query_params.get('date_debut')
+        date_fin_str = request.query_params.get('date_fin')
+        actif_uniquement = request.query_params.get('actif_uniquement', 'true').lower() == 'true'
+
+        if not date_debut_str or not date_fin_str:
+            return Response(
+                {'error': 'Les paramètres date_debut et date_fin sont requis (format: YYYY-MM-DD).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            date_debut = datetime.strptime(date_debut_str, '%Y-%m-%d').date()
+            date_fin = datetime.strptime(date_fin_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response(
+                {'error': 'Format de date invalide. Utilisez YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        jours_feries = JourFerie.get_jours_feries_dans_plage(
+            date_debut=date_debut,
+            date_fin=date_fin,
+            actif_uniquement=actif_uniquement
+        )
+
+        serializer = JourFerieSerializer(jours_feries, many=True)
+        return Response({
+            'date_debut': date_debut_str,
+            'date_fin': date_fin_str,
+            'nombre_jours_feries': jours_feries.count(),
+            'jours_feries': serializer.data
+        })
+
+    @action(detail=False, methods=['post'])
+    def importer_feries_maroc(self, request):
+        """
+        ✅ PHASE 3: Importe automatiquement les jours fériés marocains pour une année donnée.
+
+        Body:
+        {
+            "annee": 2024
+        }
+        """
+        annee = request.data.get('annee')
+        if not annee:
+            return Response(
+                {'error': 'Le paramètre "annee" est requis.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            annee = int(annee)
+        except ValueError:
+            return Response(
+                {'error': 'L\'année doit être un nombre entier.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Jours fériés fixes au Maroc
+        jours_feries_fixes = [
+            {'nom': 'Jour de l\'An', 'mois': 1, 'jour': 1, 'type': 'NATIONAL'},
+            {'nom': 'Manifeste de l\'Indépendance', 'mois': 1, 'jour': 11, 'type': 'NATIONAL'},
+            {'nom': 'Fête du Travail', 'mois': 5, 'jour': 1, 'type': 'NATIONAL'},
+            {'nom': 'Fête du Trône', 'mois': 7, 'jour': 30, 'type': 'NATIONAL'},
+            {'nom': 'Révolution du Roi et du Peuple', 'mois': 8, 'jour': 20, 'type': 'NATIONAL'},
+            {'nom': 'Fête de la Jeunesse', 'mois': 8, 'jour': 21, 'type': 'NATIONAL'},
+            {'nom': 'Marche Verte', 'mois': 11, 'jour': 6, 'type': 'NATIONAL'},
+            {'nom': 'Fête de l\'Indépendance', 'mois': 11, 'jour': 18, 'type': 'NATIONAL'},
+        ]
+
+        crees = []
+        for ferie_data in jours_feries_fixes:
+            from datetime import date
+            date_ferie = date(annee, ferie_data['mois'], ferie_data['jour'])
+
+            # Créer ou mettre à jour
+            ferie, created = JourFerie.objects.get_or_create(
+                date=date_ferie,
+                type_ferie=ferie_data['type'],
+                defaults={
+                    'nom': ferie_data['nom'],
+                    'recurrent': True,
+                    'actif': True
+                }
+            )
+
+            if created:
+                crees.append(ferie)
+
+        return Response({
+            'message': f'{len(crees)} jours fériés importés pour l\'année {annee}.',
+            'jours_feries_crees': JourFerieSerializer(crees, many=True).data
+        }, status=status.HTTP_201_CREATED)
 
 
 # ==============================================================================

@@ -113,8 +113,10 @@ class RoleBasedQuerySetMixin:
             # 1. Opérateurs directement supervisés (relation directe)
             operateurs_directs = Q(superviseur=superviseur)
 
-            # 2. Opérateurs des équipes affectées aux sites du superviseur
-            operateurs_via_equipe_site = Q(equipe__site__superviseur=superviseur)
+            # 2. Opérateurs des équipes affectées aux sites du superviseur (site principal OU secondaire)
+            operateurs_via_equipe_site_principal = Q(equipe__site_principal__superviseur=superviseur)
+            operateurs_via_equipe_site_secondaire = Q(equipe__sites_secondaires__superviseur=superviseur)
+            operateurs_via_equipe_site_legacy = Q(equipe__site__superviseur=superviseur)  # Legacy fallback
 
             # 3. Opérateurs des équipes avec tâches sur les sites du superviseur
             from api_planification.models import Tache
@@ -138,12 +140,20 @@ class RoleBasedQuerySetMixin:
             operateurs_via_taches = Q(equipe__id__in=equipes_ids_avec_taches) if equipes_ids_avec_taches else Q(pk__in=[])
 
             # Combiner avec OR
-            return queryset.filter(operateurs_directs | operateurs_via_equipe_site | operateurs_via_taches).distinct()
+            return queryset.filter(
+                operateurs_directs |
+                operateurs_via_equipe_site_principal |
+                operateurs_via_equipe_site_secondaire |
+                operateurs_via_equipe_site_legacy |
+                operateurs_via_taches
+            ).distinct()
 
         # Équipes : Ses équipes + équipes avec tâches sur ses sites
         if model_name == 'Equipe':
-            # 1. Équipes affectées à ses sites
-            equipes_affectees = Q(site__superviseur=superviseur)
+            # 1. Équipes affectées à ses sites (principal OU secondaire)
+            equipes_site_principal = Q(site_principal__superviseur=superviseur)
+            equipes_site_secondaire = Q(sites_secondaires__superviseur=superviseur)
+            equipes_site_legacy = Q(site__superviseur=superviseur)  # Legacy fallback
 
             # 2. Équipes ayant des tâches sur les sites du superviseur
             # Via Tache.equipes (M2M) ou Tache.id_equipe (legacy)
@@ -168,19 +178,34 @@ class RoleBasedQuerySetMixin:
 
             equipes_avec_taches = Q(id__in=equipes_ids_avec_taches)
 
-            # Combiner les deux critères avec OR
-            return queryset.filter(equipes_affectees | equipes_avec_taches).distinct()
+            # Combiner tous les critères avec OR
+            return queryset.filter(
+                equipes_site_principal |
+                equipes_site_secondaire |
+                equipes_site_legacy |
+                equipes_avec_taches
+            ).distinct()
 
         # Absences : Absences de ses opérateurs
         # Un opérateur est "sous" un superviseur si:
         # 1. operateur.superviseur == superviseur (relation directe)
-        # 2. operateur.equipe.site.superviseur == superviseur (via équipe/site)
+        # 2. operateur.equipe.site_principal.superviseur == superviseur (via équipe/site principal)
+        # 3. operateur.equipe.sites_secondaires contient un site du superviseur (via équipe/site secondaire)
         if model_name == 'Absence':
             # Relation directe
             absences_direct = Q(operateur__superviseur=superviseur)
-            # Via équipe -> site -> superviseur
-            absences_via_equipe = Q(operateur__equipe__site__superviseur=superviseur)
-            return queryset.filter(absences_direct | absences_via_equipe).distinct()
+            # Via équipe -> site principal -> superviseur
+            absences_via_equipe_principal = Q(operateur__equipe__site_principal__superviseur=superviseur)
+            # Via équipe -> sites secondaires -> superviseur
+            absences_via_equipe_secondaire = Q(operateur__equipe__sites_secondaires__superviseur=superviseur)
+            # Legacy fallback
+            absences_via_equipe_legacy = Q(operateur__equipe__site__superviseur=superviseur)
+            return queryset.filter(
+                absences_direct |
+                absences_via_equipe_principal |
+                absences_via_equipe_secondaire |
+                absences_via_equipe_legacy
+            ).distinct()
 
         # Tâches : Tâches assignées à ses équipes OU tâches sur ses sites sans équipe
         if model_name == 'Tache':
@@ -241,8 +266,16 @@ class RoleBasedQuerySetMixin:
             return queryset.filter(structure_client=client.structure)
 
         # Équipes : Équipes travaillant sur ses sites (via structure_client)
+        # Une équipe est visible si son site principal OU un site secondaire appartient au client
         if model_name == 'Equipe':
-            return queryset.filter(site__structure_client=client.structure)
+            equipes_site_principal = Q(site_principal__structure_client=client.structure)
+            equipes_site_secondaire = Q(sites_secondaires__structure_client=client.structure)
+            equipes_legacy = Q(site__structure_client=client.structure)  # Legacy
+            return queryset.filter(
+                equipes_site_principal |
+                equipes_site_secondaire |
+                equipes_legacy
+            ).distinct()
 
         # Opérateurs : Opérateurs des équipes travaillant sur ses sites (via structure_client)
         if model_name == 'Operateur':
@@ -283,7 +316,14 @@ class RoleBasedQuerySetMixin:
 
         # Absences : Absences des opérateurs de ses équipes (via structure_client)
         if model_name == 'Absence':
-            return queryset.filter(operateur__equipe__site__structure_client=client.structure)
+            absences_via_principal = Q(operateur__equipe__site_principal__structure_client=client.structure)
+            absences_via_secondaire = Q(operateur__equipe__sites_secondaires__structure_client=client.structure)
+            absences_legacy = Q(operateur__equipe__site__structure_client=client.structure)  # Legacy
+            return queryset.filter(
+                absences_via_principal |
+                absences_via_secondaire |
+                absences_legacy
+            ).distinct()
 
         # Compétences : Toutes les compétences (référentiel, lecture seule)
         if model_name == 'Competence':

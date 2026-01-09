@@ -64,12 +64,12 @@ class Urgence(models.Model):
 
 class Reclamation(models.Model):
     STATUT_CHOICES = [
-        ('NOUVELLE', 'Nouvelle'),
+        ('NOUVELLE', 'En attente de lecture'),
         ('PRISE_EN_COMPTE', 'Prise en compte'),
-        ('EN_COURS', 'En cours'),
-        ('RESOLUE', 'Résolue'),
+        ('EN_COURS', 'En attente de réalisation'),
+        ('RESOLUE', 'Tâche terminée côté administrateur'),
         ('EN_ATTENTE_VALIDATION_CLOTURE', 'En attente de validation de clôture'),
-        ('CLOTUREE', 'Clôturée'),
+        ('CLOTUREE', 'Validée côté client'),
         ('REJETEE', 'Rejetée'),
     ]
 

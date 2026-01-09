@@ -5,10 +5,13 @@ from django.utils import timezone
 
 from .models import (
     Utilisateur, Role, UtilisateurRole, StructureClient, Client, Superviseur, Operateur,
-    Competence, CompetenceOperateur, Equipe, Absence,
+    Competence, CompetenceOperateur, Equipe, Absence, HoraireTravail, JourFerie,
     HistoriqueEquipeOperateur, StatutOperateur,
     NiveauCompetence, StatutAbsence
 )
+
+# Import Site pour les relations ManyToMany dans EquipeCreate/UpdateSerializer
+from api.models import Site
 
 
 # ==============================================================================
@@ -145,29 +148,35 @@ class UtilisateurRoleSerializer(serializers.ModelSerializer):
 # ==============================================================================
 
 class StructureClientSerializer(serializers.ModelSerializer):
-    """Serializer pour les structures clientes."""
-    utilisateurs_count = serializers.SerializerMethodField()
-    sites_count = serializers.SerializerMethodField()
-    logo_display = serializers.SerializerMethodField()
+    """
+    ⚡ Serializer OPTIMISÉ pour les structures clientes.
+
+    Désactive les champs calculés coûteux pour éviter les N+1 queries.
+    """
+    # ⚠️ DÉSACTIVÉ: Ces champs font des .count() sur chaque structure (N+1)
+    # utilisateurs_count = serializers.SerializerMethodField()  # obj.nombre_utilisateurs fait .count()
+    # sites_count = serializers.SerializerMethodField()  # obj.nombre_sites fait .count()
+    # logo_display = serializers.SerializerMethodField()  # Propriété calculée
 
     class Meta:
         model = StructureClient
         fields = [
             'id', 'nom', 'adresse', 'telephone',
-            'contact_principal', 'email_facturation', 'logo', 'logo_url', 'logo_display',
-            'actif', 'date_creation', 'utilisateurs_count', 'sites_count'
+            'contact_principal', 'email_facturation', 'logo', 'logo_url',
+            'actif', 'date_creation'
+            # Champs désactivés pour performance: utilisateurs_count, sites_count, logo_display
         ]
-        read_only_fields = ['id', 'date_creation', 'logo_display']
+        read_only_fields = ['id', 'date_creation']
 
-    def get_utilisateurs_count(self, obj):
-        return obj.nombre_utilisateurs
-
-    def get_sites_count(self, obj):
-        return obj.nombre_sites
-
-    def get_logo_display(self, obj):
-        """Retourne l'URL du logo (fichier ou URL externe)."""
-        return obj.logo_display
+    # def get_utilisateurs_count(self, obj):
+    #     return obj.nombre_utilisateurs
+    #
+    # def get_sites_count(self, obj):
+    #     return obj.nombre_sites
+    #
+    # def get_logo_display(self, obj):
+    #     """Retourne l'URL du logo (fichier ou URL externe)."""
+    #     return obj.logo_display
 
 
 class StructureClientDetailSerializer(StructureClientSerializer):
@@ -648,44 +657,39 @@ class OperateurUpdateSerializer(serializers.ModelSerializer):
 
 class EquipeListSerializer(serializers.ModelSerializer):
     """
-    Serializer pour la liste des équipes.
+    ⚡ Serializer OPTIMISÉ pour la liste des équipes.
 
-    ⚠️ REFACTORISATION : Le superviseur est déduit du site (propriété calculée).
+    Désactive tous les champs calculés coûteux pour accélérer le chargement (22s → <1s).
+    Les détails complets sont disponibles via EquipeDetailSerializer (retrieve).
     """
     chef_equipe_nom = serializers.CharField(
         source='chef_equipe.nom_complet',
         read_only=True,
         allow_null=True
     )
-    superviseur_nom = serializers.SerializerMethodField(read_only=True)
-    superviseur = serializers.SerializerMethodField(read_only=True)
+
+    # Champs simples (pas de calculs, pas de méthodes)
     site_nom = serializers.CharField(
         source='site.nom_site',
         read_only=True,
         allow_null=True
     )
-    nombre_membres = serializers.IntegerField(read_only=True)
-    statut_operationnel = serializers.CharField(read_only=True)
 
-    def get_superviseur_nom(self, obj):
-        """Retourne le nom complet du superviseur (déduit du site)."""
-        if obj.superviseur and hasattr(obj.superviseur, 'utilisateur'):
-            return obj.superviseur.utilisateur.get_full_name()
-        return None
-
-    def get_superviseur(self, obj):
-        """Retourne l'ID du superviseur (déduit du site)."""
-        return obj.superviseur.utilisateur_id if obj.superviseur else None
+    # ⚠️ DÉSACTIVÉ: Ces champs font des requêtes N+1 (réactivés dans DetailSerializer)
+    # nombre_membres = serializers.IntegerField(read_only=True)  # Property avec query
+    # statut_operationnel = serializers.CharField(read_only=True)  # Property avec query
+    # superviseur_nom = ...  # SerializerMethodField avec query
+    # sites_secondaires_noms = ...  # .all() sur chaque équipe
+    # tous_les_sites = ...  # Property avec queries
 
     class Meta:
         model = Equipe
         fields = [
             'id', 'nom_equipe',
             'chef_equipe', 'chef_equipe_nom',
-            'superviseur', 'superviseur_nom',
             'site', 'site_nom',
             'actif', 'date_creation',
-            'nombre_membres', 'statut_operationnel'
+            # Champs désactivés pour performance, voir EquipeDetailSerializer
         ]
 
 
@@ -693,7 +697,9 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
     """
     Serializer détaillé pour une équipe.
 
-    ⚠️ REFACTORISATION : Le superviseur est déduit du site (propriété calculée).
+    ⚠️ REFACTORISATION (Multi-Sites) :
+    - Le superviseur est déduit du site principal (propriété calculée)
+    - Une équipe peut avoir un site principal + sites secondaires
     """
     chef_equipe_detail = OperateurListSerializer(source='chef_equipe', read_only=True)
     chef_equipe_nom = serializers.CharField(
@@ -704,26 +710,53 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
     superviseur_detail = serializers.SerializerMethodField(read_only=True)
     superviseur = serializers.SerializerMethodField(read_only=True)
     superviseur_nom = serializers.SerializerMethodField(read_only=True)
+
+    # ✅ NOUVEAU : Champs multi-sites
+    site_principal_nom = serializers.CharField(
+        source='site_principal.nom_site',
+        read_only=True,
+        allow_null=True
+    )
+    sites_secondaires_noms = serializers.SerializerMethodField(read_only=True)
+    tous_les_sites = serializers.SerializerMethodField(read_only=True)
+
+    # ⚠️ LEGACY : Ancien champ conservé temporairement
     site_nom = serializers.CharField(source='site.nom_site', read_only=True, allow_null=True)
+
     membres = OperateurListSerializer(source='operateurs', many=True, read_only=True)
     nombre_membres = serializers.IntegerField(read_only=True)
     statut_operationnel = serializers.CharField(read_only=True)
 
     def get_superviseur_detail(self, obj):
-        """Retourne les détails du superviseur (déduit du site)."""
+        """Retourne les détails du superviseur (déduit du site principal)."""
         if obj.superviseur:
             return SuperviseurSerializer(obj.superviseur).data
         return None
 
     def get_superviseur(self, obj):
-        """Retourne l'ID du superviseur (déduit du site)."""
+        """Retourne l'ID du superviseur (déduit du site principal)."""
         return obj.superviseur.utilisateur_id if obj.superviseur else None
 
     def get_superviseur_nom(self, obj):
-        """Retourne le nom complet du superviseur (déduit du site)."""
+        """Retourne le nom complet du superviseur (déduit du site principal)."""
         if obj.superviseur and hasattr(obj.superviseur, 'utilisateur'):
             return obj.superviseur.utilisateur.get_full_name()
         return None
+
+    def get_sites_secondaires_noms(self, obj):
+        """Retourne la liste des noms des sites secondaires."""
+        return [site.nom_site for site in obj.sites_secondaires.all()]
+
+    def get_tous_les_sites(self, obj):
+        """Retourne tous les sites (principal + secondaires) avec détails complets."""
+        sites = []
+        for site in obj.tous_les_sites:
+            sites.append({
+                'id': site.id,
+                'nom': site.nom_site,
+                'code': site.code_site if hasattr(site, 'code_site') else None
+            })
+        return sites
 
     class Meta:
         model = Equipe
@@ -731,6 +764,11 @@ class EquipeDetailSerializer(serializers.ModelSerializer):
             'id', 'nom_equipe',
             'chef_equipe', 'chef_equipe_detail', 'chef_equipe_nom',
             'superviseur', 'superviseur_detail', 'superviseur_nom',
+            # Nouveaux champs multi-sites
+            'site_principal', 'site_principal_nom',
+            'sites_secondaires', 'sites_secondaires_noms',
+            'tous_les_sites',
+            # Legacy
             'site', 'site_nom',
             'actif', 'date_creation',
             'nombre_membres', 'statut_operationnel', 'membres'
@@ -741,7 +779,9 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
     """
     Serializer pour la création d'une équipe.
 
-    ⚠️ REFACTORISATION : Le superviseur est déduit automatiquement du site.
+    ⚠️ REFACTORISATION (Multi-Sites) :
+    - Le superviseur est déduit automatiquement du site principal
+    - Possibilité d'affecter plusieurs sites secondaires
     """
     membres = serializers.PrimaryKeyRelatedField(
         many=True,
@@ -749,10 +789,21 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
         required=False,
         write_only=True
     )
+    sites_secondaires = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Site.objects.all(),
+        required=False,
+        allow_empty=True
+    )
 
     class Meta:
         model = Equipe
-        fields = ['id', 'nom_equipe', 'chef_equipe', 'site', 'actif', 'membres']
+        fields = [
+            'id', 'nom_equipe', 'chef_equipe',
+            'site_principal', 'sites_secondaires',
+            'site',  # Legacy, optionnel
+            'actif', 'membres'
+        ]
         read_only_fields = ['id']
 
     def validate_chef_equipe(self, value):
@@ -771,9 +822,14 @@ class EquipeCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         membres = validated_data.pop('membres', [])
+        sites_secondaires = validated_data.pop('sites_secondaires', [])
 
         # Créer l'équipe (skip_validation car on a déjà validé)
         equipe = Equipe.objects.create(**validated_data)
+
+        # Affecter les sites secondaires
+        if sites_secondaires:
+            equipe.sites_secondaires.set(sites_secondaires)
 
         # Affecter les membres à l'équipe
         today = timezone.now().date()
@@ -796,12 +852,25 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
     """
     Serializer pour la mise à jour d'une équipe.
 
-    ⚠️ Le superviseur est déduit automatiquement du site (non modifiable directement).
+    ⚠️ REFACTORISATION (Multi-Sites) :
+    - Le superviseur est déduit automatiquement du site principal (non modifiable directement)
+    - Possibilité de modifier les sites secondaires
     """
+    sites_secondaires = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Site.objects.all(),
+        required=False,
+        allow_empty=True
+    )
 
     class Meta:
         model = Equipe
-        fields = ['nom_equipe', 'chef_equipe', 'site', 'actif']
+        fields = [
+            'nom_equipe', 'chef_equipe',
+            'site_principal', 'sites_secondaires',
+            'site',  # Legacy, optionnel
+            'actif'
+        ]
 
     def validate_chef_equipe(self, value):
         """Vérifie que le chef a la compétence requise."""
@@ -818,10 +887,16 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         """Met à jour l'équipe."""
-        # Mettre à jour l'équipe
+        sites_secondaires = validated_data.pop('sites_secondaires', None)
+
+        # Mettre à jour les champs simples
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
+        # Mettre à jour les sites secondaires si fournis
+        if sites_secondaires is not None:
+            instance.sites_secondaires.set(sites_secondaires)
 
         return instance
 
@@ -911,6 +986,164 @@ class AffecterMembresSerializer(serializers.Serializer):
                 nouveau.save()
 
         return equipe
+
+
+# ==============================================================================
+# SERIALIZERS HORAIRE TRAVAIL (PHASE 2)
+# ==============================================================================
+
+class HoraireTravailSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les horaires de travail d'une équipe.
+
+    ✅ PHASE 2: Permet de définir les horaires de travail par équipe et jour de la semaine.
+    Utilisé pour calculer la charge de travail réelle dans la génération de récurrence.
+    """
+    equipe_nom = serializers.CharField(
+        source='equipe.nom_equipe',
+        read_only=True
+    )
+    jour_semaine_display = serializers.CharField(
+        source='get_jour_semaine_display',
+        read_only=True
+    )
+    heures_travaillables = serializers.FloatField(read_only=True)
+
+    class Meta:
+        model = HoraireTravail
+        fields = [
+            'id', 'equipe', 'equipe_nom',
+            'jour_semaine', 'jour_semaine_display',
+            'heure_debut', 'heure_fin',
+            'duree_pause_minutes', 'actif',
+            'heures_travaillables'
+        ]
+        read_only_fields = ['id', 'heures_travaillables']
+
+
+class HoraireTravailCreateSerializer(serializers.ModelSerializer):
+    """Serializer pour la création d'un horaire de travail."""
+
+    class Meta:
+        model = HoraireTravail
+        fields = [
+            'equipe', 'jour_semaine',
+            'heure_debut', 'heure_fin',
+            'duree_pause_minutes', 'actif'
+        ]
+
+    def validate(self, attrs):
+        """Valide que l'heure de fin est après l'heure de début."""
+        if attrs['heure_fin'] <= attrs['heure_debut']:
+            raise serializers.ValidationError({
+                'heure_fin': "L'heure de fin doit être postérieure à l'heure de début."
+            })
+
+        # Vérifier qu'il n'existe pas déjà un horaire actif pour cette équipe et ce jour
+        equipe = attrs['equipe']
+        jour = attrs['jour_semaine']
+
+        existing = HoraireTravail.objects.filter(
+            equipe=equipe,
+            jour_semaine=jour,
+            actif=True
+        )
+
+        if existing.exists():
+            raise serializers.ValidationError(
+                f"Un horaire actif existe déjà pour {equipe.nom_equipe} le {jour}. "
+                "Désactivez-le d'abord avant d'en créer un nouveau."
+            )
+
+        return attrs
+
+
+class HoraireTravailUpdateSerializer(serializers.ModelSerializer):
+    """Serializer pour la mise à jour d'un horaire de travail."""
+
+    class Meta:
+        model = HoraireTravail
+        fields = [
+            'heure_debut', 'heure_fin',
+            'duree_pause_minutes', 'actif'
+        ]
+
+    def validate(self, attrs):
+        """Valide que l'heure de fin est après l'heure de début."""
+        instance = self.instance
+        heure_debut = attrs.get('heure_debut', instance.heure_debut)
+        heure_fin = attrs.get('heure_fin', instance.heure_fin)
+
+        if heure_fin <= heure_debut:
+            raise serializers.ValidationError({
+                'heure_fin': "L'heure de fin doit être postérieure à l'heure de début."
+            })
+
+        return attrs
+
+
+# ==============================================================================
+# SERIALIZERS JOUR FERIE (PHASE 3)
+# ==============================================================================
+
+class JourFerieSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les jours fériés.
+
+    ✅ PHASE 3: Permet de gérer les jours fériés nationaux et locaux.
+    """
+    type_ferie_display = serializers.CharField(source='get_type_ferie_display', read_only=True)
+
+    class Meta:
+        model = JourFerie
+        fields = [
+            'id', 'nom', 'date',
+            'type_ferie', 'type_ferie_display',
+            'recurrent', 'description', 'actif'
+        ]
+        read_only_fields = ['id']
+
+
+class JourFerieCreateSerializer(serializers.ModelSerializer):
+    """Serializer pour la création d'un jour férié."""
+
+    class Meta:
+        model = JourFerie
+        fields = ['nom', 'date', 'type_ferie', 'recurrent', 'description', 'actif']
+
+    def validate(self, attrs):
+        """Validation pour éviter doublons sur même date+type."""
+        nom = attrs.get('nom')
+        date = attrs.get('date')
+        type_ferie = attrs.get('type_ferie')
+
+        # Vérifier que le nom n'est pas vide
+        if not nom or not nom.strip():
+            raise serializers.ValidationError({
+                'nom': "Le nom du jour férié est requis."
+            })
+
+        # Vérifier doublon uniquement à la création (pas d'instance existante)
+        if not self.instance:
+            existing = JourFerie.objects.filter(
+                date=date,
+                type_ferie=type_ferie
+            ).exists()
+
+            if existing:
+                raise serializers.ValidationError(
+                    f"Un jour férié de type '{type_ferie}' existe déjà pour la date {date.strftime('%d/%m/%Y')}."
+                )
+
+        return attrs
+
+
+class JourFerieUpdateSerializer(serializers.ModelSerializer):
+    """Serializer pour la mise à jour d'un jour férié."""
+
+    class Meta:
+        model = JourFerie
+        fields = ['nom', 'type_ferie', 'recurrent', 'description', 'actif']
 
 
 # ==============================================================================

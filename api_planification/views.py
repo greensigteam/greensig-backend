@@ -143,28 +143,21 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         # Appeler le mixin pour filtrage par rôle + soft-delete
         qs = super().get_queryset()
 
-        # Optimisations de requêtes (select_related, prefetch_related)
+        # ⚡ OPTIMISATION: Charger uniquement les relations essentielles pour la liste
         qs = qs.select_related(
             'id_client__utilisateur',
             'id_structure_client',
             'id_type_tache',
-            'id_equipe__chef_equipe',
-            'id_equipe__site',
+            'id_equipe',  # Simplifié: pas de chaîne profonde
             'reclamation'
         )
 
-        # Prefetch optimisé pour les équipes avec leurs opérateurs
-        equipes_qs = Equipe.objects.select_related(
-            'chef_equipe',
-            'site__superviseur__utilisateur'  # Site → Superviseur → Utilisateur
-        ).prefetch_related('operateurs')
-
+        # ⚡ PREFETCH MINIMAL: Seulement les infos utilisées par les serializers minimaux
+        # ObjetMinimalSerializer: id, site_id, site_nom → besoin de 'objets__site' (only ID + nom)
+        # EquipeMinimalSerializer: id, nom_equipe → aucun prefetch nécessaire
         qs = qs.prefetch_related(
-            Prefetch('equipes', queryset=equipes_qs),
-            'objets__site',
-            'objets__sous_site',
-            'participations__id_operateur',
-            'id_client__utilisateur__roles_utilisateur__role'
+            'equipes',  # Juste les IDs et noms (pas de relations supplémentaires)
+            'objets__site'  # Site ID + nom seulement (via ObjetMinimalSerializer)
         )
 
         # Filtres optionnels via query params
@@ -209,6 +202,46 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             return TacheCreateUpdateSerializer
         return TacheSerializer
 
+    def update(self, request, *args, **kwargs):
+        """Override update pour retourner une réponse minimale (sans _detail fields lourds)."""
+        import time
+        start = time.time()
+        print(f"[VIEWSET] update() START")
+
+        partial = kwargs.pop('partial', False)
+
+        t1 = time.time()
+        instance = self.get_object()
+        print(f"[VIEWSET] get_object() took {time.time() - t1:.2f}s")
+
+        t2 = time.time()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        print(f"[VIEWSET] get_serializer() took {time.time() - t2:.2f}s")
+
+        t3 = time.time()
+        serializer.is_valid(raise_exception=True)
+        print(f"[VIEWSET] is_valid() took {time.time() - t3:.2f}s")
+
+        t4 = time.time()
+        self.perform_update(serializer)
+        print(f"[VIEWSET] perform_update() took {time.time() - t4:.2f}s")
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            instance._prefetched_objects_cache = {}
+
+        # ⚡ OPTIMISATION: Retourner une réponse minimale sans recharger tous les _detail
+        # Le frontend rechargera les données via loadTaches() de toute façon
+        print(f"[VIEWSET] update() TOTAL took {time.time() - start:.2f}s")
+        return Response({
+            'id': instance.id,
+            'message': 'Tâche mise à jour avec succès'
+        }, status=status.HTTP_200_OK)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Override partial_update pour utiliser la même optimisation."""
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+
     # perform_destroy() est géré par SoftDeleteMixin
 
     @action(detail=True, methods=['post'])
@@ -243,6 +276,119 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             {'error': 'Erreur lors du recalcul de la charge'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+    @action(detail=False, methods=['post'])
+    def calculer_recurrence_recommandee(self, request):
+        """
+        ✅ PHASE 2: Calcule le nombre d'occurrences recommandé basé sur les horaires réels de l'équipe.
+
+        POST /api/planification/taches/calculer_recurrence_recommandee/
+
+        Body:
+        {
+            "equipe_id": 1,
+            "charge_totale_heures": 35.5,
+            "date_debut": "2024-01-15",
+            "frequence": "daily"  // optional, default: daily
+        }
+
+        Returns:
+        {
+            "nombre_occurrences": 4,
+            "heures_par_jour_moyen": 8.5,
+            "detail_horaires": [...],
+            "message": "..."
+        }
+        """
+        from api_users.models import Equipe
+        from datetime import datetime
+
+        equipe_id = request.data.get('equipe_id')
+        charge_totale = request.data.get('charge_totale_heures')
+        date_debut_str = request.data.get('date_debut')
+        frequence = request.data.get('frequence', 'daily')
+
+        # Validation
+        if not equipe_id:
+            return Response(
+                {'error': 'Le champ "equipe_id" est requis.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not charge_totale or charge_totale <= 0:
+            return Response(
+                {'error': 'Le champ "charge_totale_heures" doit être un nombre positif.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not date_debut_str:
+            return Response(
+                {'error': 'Le champ "date_debut" est requis (format: YYYY-MM-DD).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupérer l'équipe
+        try:
+            equipe = Equipe.objects.get(id=equipe_id)
+        except Equipe.DoesNotExist:
+            return Response(
+                {'error': f'Équipe avec ID {equipe_id} non trouvée.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Parser la date
+        try:
+            date_debut = datetime.strptime(date_debut_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response(
+                {'error': 'Format de date invalide. Utilisez YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Calculer le nombre d'occurrences recommandé
+        from .services import RecurrenceService
+        nombre_occurrences = RecurrenceService.calculate_recommended_occurrences(
+            equipe=equipe,
+            charge_totale_heures=charge_totale,
+            date_debut=date_debut,
+            frequence=frequence
+        )
+
+        # Détail des horaires pour les 7 prochains jours (pour daily)
+        detail_horaires = []
+        if frequence == 'daily':
+            import datetime as dt
+            for i in range(min(7, nombre_occurrences)):
+                jour_test = date_debut + dt.timedelta(days=i)
+                heures = RecurrenceService._get_work_hours_for_day(equipe, jour_test)
+                jour_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'][jour_test.weekday()]
+                detail_horaires.append({
+                    'date': jour_test.strftime('%Y-%m-%d'),
+                    'jour': jour_fr,
+                    'heures_travaillables': heures
+                })
+
+        # Calcul heures moyennes par jour
+        if detail_horaires:
+            heures_moyen = sum(d['heures_travaillables'] for d in detail_horaires) / len(detail_horaires)
+        else:
+            heures_moyen = 8.0
+
+        message = (
+            f"Pour une charge de {charge_totale}h, "
+            f"il est recommandé de créer {nombre_occurrences} occurrence(s) "
+            f"(≈ {charge_totale / nombre_occurrences:.1f}h par occurrence)."
+        )
+
+        return Response({
+            'nombre_occurrences': nombre_occurrences,
+            'heures_par_jour_moyen': round(heures_moyen, 1),
+            'charge_totale_heures': charge_totale,
+            'charge_par_occurrence': round(charge_totale / nombre_occurrences, 2),
+            'detail_horaires': detail_horaires,
+            'frequence': frequence,
+            'message': message
+        })
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
