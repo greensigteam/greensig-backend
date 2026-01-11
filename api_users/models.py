@@ -219,23 +219,20 @@ class UtilisateurRole(models.Model):
 
 
 # ==============================================================================
-# MODELE CLIENT
+# MODELE STRUCTURE CLIENT
 # ==============================================================================
 
-class Client(models.Model):
+class StructureClient(models.Model):
     """
-    Représente un client (maître d'ouvrage).
+    Représente une structure/organisation cliente.
 
-    Hérite conceptuellement d'Utilisateur via une relation OneToOne.
-    Un client possède des sites d'intervention.
+    Une structure peut avoir plusieurs utilisateurs (comptes de connexion).
+    Les sites sont assignés à la structure, pas aux utilisateurs individuels.
+
+    Exemple: "Mairie de Casablanca" peut avoir plusieurs utilisateurs
+    (admin@mairie.ma, gestionnaire@mairie.ma) qui voient tous les mêmes sites.
     """
-    utilisateur = models.OneToOneField(
-        Utilisateur,
-        on_delete=models.CASCADE,
-        primary_key=True,
-        related_name='client_profile'
-    )
-    nom_structure = models.CharField(
+    nom = models.CharField(
         max_length=255,
         verbose_name="Nom de la structure",
         help_text="Nom de l'entreprise ou organisation"
@@ -258,11 +255,119 @@ class Client(models.Model):
         blank=True,
         verbose_name="Email de facturation"
     )
-    logo = models.URLField(
+    logo = models.ImageField(
+        upload_to='structures/logos/',
+        blank=True,
+        null=True,
+        verbose_name="Logo (fichier)",
+        help_text="Fichier image du logo"
+    )
+    logo_url = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        verbose_name="Logo (URL)",
+        help_text="URL externe du logo (utilisé si pas de fichier uploadé)"
+    )
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Structure active"
+    )
+
+    @property
+    def logo_display(self):
+        """Retourne l'URL du logo (fichier uploadé ou URL externe)."""
+        if self.logo:
+            return self.logo.url
+        return self.logo_url
+    date_creation = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Date de création"
+    )
+
+    class Meta:
+        verbose_name = "Structure Client"
+        verbose_name_plural = "Structures Clients"
+        ordering = ['nom']
+
+    def __str__(self):
+        return self.nom
+
+    @property
+    def nombre_utilisateurs(self):
+        """Retourne le nombre d'utilisateurs de cette structure."""
+        return self.utilisateurs.filter(utilisateur__actif=True).count()
+
+    @property
+    def nombre_sites(self):
+        """Retourne le nombre de sites de cette structure."""
+        return self.sites.count()
+
+
+# ==============================================================================
+# MODELE CLIENT (Utilisateur d'une Structure)
+# ==============================================================================
+
+class Client(models.Model):
+    """
+    Représente un utilisateur appartenant à une structure cliente.
+
+    Un Client est le lien entre un Utilisateur (compte de connexion)
+    et une StructureClient (organisation).
+
+    Plusieurs Clients peuvent appartenir à la même StructureClient,
+    ce qui permet à une organisation d'avoir plusieurs comptes.
+    """
+    utilisateur = models.OneToOneField(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name='client_profile'
+    )
+    structure = models.ForeignKey(
+        StructureClient,
+        on_delete=models.CASCADE,
+        related_name='utilisateurs',
+        verbose_name="Structure",
+        null=True,  # Temporairement nullable pour la migration
+        blank=True
+    )
+
+    # =========================================================================
+    # CHAMPS LEGACY (à supprimer après migration)
+    # Ces champs sont conservés temporairement pour la migration des données
+    # =========================================================================
+    nom_structure = models.CharField(
+        max_length=255,
+        verbose_name="Nom de la structure",
+        help_text="[LEGACY] Sera migré vers StructureClient.nom",
+        blank=True,
+        default=""
+    )
+    adresse = models.TextField(
+        blank=True,
+        verbose_name="Adresse complète"
+    )
+    telephone = models.CharField(
+        max_length=20,
+        blank=True,
+        verbose_name="Téléphone"
+    )
+    contact_principal = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name="Contact principal"
+    )
+    email_facturation = models.EmailField(
+        blank=True,
+        verbose_name="Email de facturation"
+    )
+    logo = models.CharField(
+        max_length=500,
         blank=True,
         null=True,
         verbose_name="Logo",
-        help_text="URL du logo de l'organisation"
+        help_text="URL du logo de l'organisation (accepte tous formats d'URL)"
     )
 
     class Meta:
@@ -270,7 +375,9 @@ class Client(models.Model):
         verbose_name_plural = "Clients"
 
     def __str__(self):
-        return self.nom_structure
+        if self.structure:
+            return f"{self.utilisateur.get_full_name()} ({self.structure.nom})"
+        return self.nom_structure or str(self.utilisateur)
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
@@ -512,28 +619,8 @@ class Equipe(models.Model):
         else:
             return StatutEquipe.INDISPONIBLE
 
-    def clean(self):
-        """Valide que le chef a la competence 'Gestion d'équipe'."""
-        # Si aucun chef n'est défini, on autorise la création sans chef.
-        if self.chef_equipe_id:
-            has_gestion = CompetenceOperateur.objects.filter(
-                operateur=self.chef_equipe,
-                competence__nom_competence="Gestion d'équipe",
-                niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
-            ).exists()
-
-            if not has_gestion:
-                raise ValidationError({
-                    'chef_equipe': "Le chef d'équipe doit avoir la competence 'Gestion d'équipe' "
-                                   "avec un niveau Intermédiaire ou Expert."
-                })
-
     def save(self, *args, **kwargs):
-        # Skip validation if chef_equipe is being set for the first time
-        # and we want to allow initial setup
-        skip_validation = kwargs.pop('skip_validation', False)
-        if not skip_validation:
-            self.full_clean()
+        # Le chef d'équipe est une simple nomination, pas de validation de compétence requise
         super().save(*args, **kwargs)
 
 
@@ -647,6 +734,11 @@ class Operateur(models.Model):
         super().save(*args, **kwargs)
 
     @property
+    def actif(self):
+        """Retourne True si l'opérateur est actif (basé sur le statut)."""
+        return self.statut == StatutOperateur.ACTIF
+
+    @property
     def est_chef_equipe(self):
         """Vérifie si l'opérateur est chef d'une équipe."""
         # Dans la nouvelle architecture, un opérateur ne peut diriger qu'une seule équipe (OneToOne)
@@ -668,12 +760,8 @@ class Operateur(models.Model):
         ).exists()
 
     def peut_etre_chef(self):
-        """Verifie si l'operateur peut etre chef d'equipe."""
-        return CompetenceOperateur.objects.filter(
-            operateur=self,
-            competence__nom_competence="Gestion d'équipe",
-            niveau__in=[NiveauCompetence.INTERMEDIAIRE, NiveauCompetence.EXPERT]
-        ).exists()
+        """Tout opérateur actif peut être nommé chef d'équipe."""
+        return self.statut == StatutOperateur.ACTIF
 
 
 # ==============================================================================

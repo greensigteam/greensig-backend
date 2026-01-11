@@ -52,6 +52,14 @@ from .views import (
 from .site_statistics_view import SiteStatisticsView
 from .reporting_view import ReportingView
 from .monthly_report_view import MonthlyReportView
+from .views_notifications import (
+    NotificationListView,
+    UnreadCountView,
+    MarkReadView,
+    MarkAllReadView,
+    NotificationDeleteView,
+    SendTestNotificationView,
+)
 
 urlpatterns = [
     # ==============================================================================
@@ -79,9 +87,10 @@ urlpatterns = [
     # ==============================================================================
     # EXPORT DONNÉES
     # ==============================================================================
-    path('export/<str:model_name>/', ExportDataView.as_view(), name='export-data'),
+    # Routes spécifiques AVANT la route générique
     path('export/inventory/excel/', InventoryExportExcelView.as_view(), name='inventory-export-excel'),
     path('export/inventory/pdf/', InventoryExportPDFView.as_view(), name='inventory-export-pdf'),
+    path('export/<str:model_name>/', ExportDataView.as_view(), name='export-data'),
 
     # ==============================================================================
     # IMPORT GÉOGRAPHIQUE (GeoJSON, KML, Shapefile)
@@ -153,4 +162,14 @@ urlpatterns = [
     path('gouttes/<int:pk>/', GoutteDetailView.as_view(), name='goutte-detail'),
     path('ballons/', BallonListCreateView.as_view(), name='tank-list'),
     path('ballons/<int:pk>/', TankDetailView.as_view(), name='tank-detail'),
+
+    # ==============================================================================
+    # NOTIFICATIONS TEMPS REEL
+    # ==============================================================================
+    path('notifications/', NotificationListView.as_view(), name='notification-list'),
+    path('notifications/unread-count/', UnreadCountView.as_view(), name='notification-unread-count'),
+    path('notifications/mark-all-read/', MarkAllReadView.as_view(), name='notification-mark-all-read'),
+    path('notifications/test/', SendTestNotificationView.as_view(), name='notification-test'),
+    path('notifications/<int:pk>/mark-read/', MarkReadView.as_view(), name='notification-mark-read'),
+    path('notifications/<int:pk>/', NotificationDeleteView.as_view(), name='notification-delete'),
 ]

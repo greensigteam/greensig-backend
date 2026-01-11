@@ -146,6 +146,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         # Optimisations de requêtes (select_related, prefetch_related)
         qs = qs.select_related(
             'id_client__utilisateur',
+            'id_structure_client',
             'id_type_tache',
             'id_equipe__chef_equipe',
             'id_equipe__site',
@@ -171,6 +172,15 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         if client_id:
             qs = qs.filter(id_client=client_id)
 
+        structure_client_id = self.request.query_params.get('structure_client_id')
+        if structure_client_id:
+            import logging
+            logger = logging.getLogger(__name__)
+            before_count = qs.count()
+            qs = qs.filter(id_structure_client=structure_client_id)
+            after_count = qs.count()
+            logger.info(f"[TACHES] Filtre structure_client_id={structure_client_id}: {before_count} -> {after_count} taches")
+
         equipe_id = self.request.query_params.get('equipe_id')
         if equipe_id:
             qs = qs.filter(Q(equipes__id=equipe_id) | Q(id_equipe=equipe_id)).distinct()
@@ -186,6 +196,11 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         has_reclamation = self.request.query_params.get('has_reclamation')
         if has_reclamation == 'true':
             qs = qs.filter(reclamation__isnull=False)
+
+        # Filtre par objet (pour afficher l'historique des tâches d'un objet)
+        objet_id = self.request.query_params.get('objet_id')
+        if objet_id:
+            qs = qs.filter(objets__id=objet_id).distinct()
 
         return qs
 
@@ -262,7 +277,16 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         tache.date_validation = timezone.now()
         tache.validee_par = request.user
         tache.commentaire_validation = commentaire
-        tache.save()
+        tache.save(update_fields=['etat_validation', 'date_validation', 'validee_par', 'commentaire_validation'])
+
+        # Envoyer notification
+        from api.services.notifications import NotificationService
+        NotificationService.notify_tache_validee(
+            tache=tache,
+            etat_validation=etat,
+            valideur=request.user,
+            commentaire=commentaire
+        )
 
         # Retourner la tâche mise à jour
         serializer = self.get_serializer(tache)
@@ -272,7 +296,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         })
 
     def perform_create(self, serializer):
-        tache = serializer.save()
+        tache = serializer.save(_current_user=self.request.user)
 
         # Calcul automatique de la charge estimée
         WorkloadCalculationService.recalculate_and_save(tache)
@@ -301,7 +325,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
                 )
 
     def perform_update(self, serializer):
-        tache = serializer.save()
+        tache = serializer.save(_current_user=self.request.user)
 
         # Recalcul automatique de la charge estimée
         WorkloadCalculationService.recalculate_and_save(tache)

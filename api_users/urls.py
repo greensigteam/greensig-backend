@@ -6,7 +6,7 @@ from .views import (
     UtilisateurViewSet, RoleViewSet, ClientViewSet, SuperviseurViewSet,
     CompetenceViewSet, OperateurViewSet, EquipeViewSet,
     AbsenceViewSet, HistoriqueRHView, StatistiquesUtilisateursView,
-    MeView
+    MeView, StructureClientViewSet
 )
 
 # Configuration du routeur DRF
@@ -14,6 +14,7 @@ router = DefaultRouter()
 router.register(r'utilisateurs', UtilisateurViewSet, basename='utilisateur')
 router.register(r'roles', RoleViewSet, basename='role')
 router.register(r'clients', ClientViewSet, basename='client')
+router.register(r'structures', StructureClientViewSet, basename='structure')
 router.register(r'superviseurs', SuperviseurViewSet, basename='superviseur')
 router.register(r'competences', CompetenceViewSet, basename='competence')
 router.register(r'operateurs', OperateurViewSet, basename='operateur')
@@ -57,10 +58,20 @@ urlpatterns = [
 # PUT    /roles/{id}/                      - Mettre a jour un role
 # DELETE /roles/{id}/                      - Supprimer un role
 #
+# STRUCTURES CLIENTS (/api/users/structures/)
+# -------------------------------------------
+# GET    /structures/                      - Liste des structures clientes
+# POST   /structures/                      - Creer une structure
+# GET    /structures/{id}/                 - Detail d'une structure
+# PUT    /structures/{id}/                 - Mettre a jour une structure
+# DELETE /structures/{id}/                 - Desactiver une structure
+# GET    /structures/{id}/utilisateurs/    - Liste des utilisateurs de la structure
+# POST   /structures/{id}/ajouter_utilisateur/ - Ajouter un utilisateur a la structure
+#
 # CLIENTS (/api/users/clients/)
 # -----------------------------
-# GET    /clients/                         - Liste des clients
-# POST   /clients/                         - Creer un client (avec utilisateur)
+# GET    /clients/                         - Liste des clients (utilisateurs)
+# POST   /clients/                         - Creer un client (avec utilisateur et structure)
 # GET    /clients/{id}/                    - Detail d'un client
 # PUT    /clients/{id}/                    - Mettre a jour un client
 # DELETE /clients/{id}/                    - Desactiver un client

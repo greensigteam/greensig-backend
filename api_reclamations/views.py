@@ -110,9 +110,9 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             except AttributeError:
                 return queryset.filter(createur=user)
 
-        # Client : accès à ses réclamations uniquement (créées par lui ou liées à lui)
+        # Client : accès à ses réclamations uniquement (créées par lui ou liées à sa structure)
         if hasattr(user, 'client_profile'):
-            return queryset.filter(Q(client=user.client_profile) | Q(createur=user))
+            return queryset.filter(Q(structure_client=user.client_profile.structure) | Q(createur=user))
 
         # Tout autre utilisateur : réclamations qu'il a créées
         return queryset.filter(createur=user)
@@ -134,19 +134,27 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         Assigner automatiquement le créateur (utilisateur connecté).
         Si c'est un client, on associe aussi le client_profile.
         Remplir automatiquement date_constatation si non fournie.
+        Déduire structure_client du site si non fourni.
         """
         user = self.request.user
         extra_kwargs = {'createur': user}
 
-        # Si l'utilisateur est un client, on associe également le client_profile
+        # Si l'utilisateur est un client, on associe la structure cliente
         if hasattr(user, 'client_profile'):
-            extra_kwargs['client'] = user.client_profile
+            extra_kwargs['client'] = user.client_profile  # Legacy
+            if user.client_profile.structure:
+                extra_kwargs['structure_client'] = user.client_profile.structure
 
         # Remplir automatiquement date_constatation avec la date actuelle si non fournie
         if 'date_constatation' not in serializer.validated_data or not serializer.validated_data['date_constatation']:
             extra_kwargs['date_constatation'] = timezone.now()
 
-        reclamation = serializer.save(**extra_kwargs)
+        reclamation = serializer.save(**extra_kwargs, _current_user=user)
+
+        # Déduire structure_client du site si pas déjà défini
+        if not reclamation.structure_client and reclamation.site and reclamation.site.structure_client:
+            reclamation.structure_client = reclamation.site.structure_client
+            reclamation.save(update_fields=['structure_client'])
 
         # Création de l'historique initial
         HistoriqueReclamation.objects.create(
@@ -162,19 +170,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         old_statut = instance.statut
         
-        # Mise à jour automatique des dates selon le statut
-        new_statut = serializer.validated_data.get('statut')
-        if new_statut and new_statut != old_statut:
-            if new_statut == 'PRISE_EN_COMPTE' and not instance.date_prise_en_compte:
-                serializer.validated_data['date_prise_en_compte'] = timezone.now()
-            elif new_statut == 'EN_COURS' and not instance.date_debut_traitement:
-                serializer.validated_data['date_debut_traitement'] = timezone.now()
-            elif new_statut == 'RESOLUE' and not instance.date_resolution:
-                serializer.validated_data['date_resolution'] = timezone.now()
-            elif new_statut == 'CLOTUREE' and not instance.date_cloture_reelle:
-                serializer.validated_data['date_cloture_reelle'] = timezone.now()
-
-        updated_instance = serializer.save()
+        updated_instance = serializer.save(_current_user=self.request.user)
         
         # Si le statut a changé, on ajoute une entrée dans l'historique
         if old_statut != updated_instance.statut:
@@ -224,8 +220,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
              # Si nouvelle -> Prise en compte
              if reclamation.statut == 'NOUVELLE':
                  reclamation.statut = 'PRISE_EN_COMPTE'
-                 if not reclamation.date_prise_en_compte:
-                     reclamation.date_prise_en_compte = timezone.now()
+             
+             reclamation._current_user = request.user
              reclamation.save()
              
              # 2. Propagation aux Tâches (via le related_name 'taches_correctives')
@@ -278,8 +274,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             reclamation.statut = 'EN_ATTENTE_VALIDATION_CLOTURE'
             reclamation.cloture_proposee_par = user
             reclamation.date_proposition_cloture = timezone.now()
-            if not reclamation.date_resolution:
-                reclamation.date_resolution = timezone.now()
+            
+            reclamation._current_user = user
             reclamation.save()
 
             # Historique
@@ -327,7 +323,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             old_statut = reclamation.statut
             reclamation.statut = 'CLOTUREE'
-            reclamation.date_cloture_reelle = timezone.now()
+            
+            reclamation._current_user = user
             reclamation.save()
 
             # Historique
@@ -470,6 +467,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                     'urgence': rec.urgence.niveau_urgence if rec.urgence else None,
                     'urgence_couleur': rec.urgence.couleur if rec.urgence else None,
                     'type_reclamation': rec.type_reclamation.nom_reclamation if rec.type_reclamation else None,
+                    'type_reclamation_symbole': rec.type_reclamation.symbole if rec.type_reclamation else None,
+                    'type_reclamation_categorie': rec.type_reclamation.categorie if rec.type_reclamation else None,
                     'description': rec.description[:100] + '...' if rec.description and len(rec.description) > 100 else rec.description,
                     'site_nom': rec.site.nom_site if rec.site else None,
                     'zone_nom': rec.zone.nom if rec.zone else None,

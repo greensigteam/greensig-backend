@@ -4,7 +4,7 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
 
 from .models import (
-    Utilisateur, Role, UtilisateurRole, Client, Superviseur, Operateur,
+    Utilisateur, Role, UtilisateurRole, StructureClient, Client, Superviseur, Operateur,
     Competence, CompetenceOperateur, Equipe, Absence,
     HistoriqueEquipeOperateur
 )
@@ -119,33 +119,91 @@ class RoleAdmin(admin.ModelAdmin):
 
 
 # ==============================================================================
-# ADMIN CLIENT
+# ADMIN STRUCTURE CLIENT
 # ==============================================================================
 
-@admin.register(Client)
-class ClientAdmin(admin.ModelAdmin):
-    """Admin pour les clients."""
-
-    list_display = [
-        'nom_structure', 'get_email', 'get_nom_complet',
-        'telephone', 'contact_principal', 'get_actif'
-    ]
-    list_filter = ['utilisateur__actif']
-    search_fields = [
-        'nom_structure', 'utilisateur__email',
-        'utilisateur__nom', 'utilisateur__prenom'
-    ]
+class ClientInline(admin.TabularInline):
+    """Inline pour les utilisateurs d'une structure."""
+    model = Client
+    extra = 0
+    fields = ['utilisateur', 'get_email', 'get_nom_complet']
+    readonly_fields = ['get_email', 'get_nom_complet']
     autocomplete_fields = ['utilisateur']
 
+    def get_email(self, obj):
+        return obj.utilisateur.email if obj.utilisateur else '-'
+    get_email.short_description = 'Email'
+
+    def get_nom_complet(self, obj):
+        return obj.utilisateur.get_full_name() if obj.utilisateur else '-'
+    get_nom_complet.short_description = 'Nom complet'
+
+
+@admin.register(StructureClient)
+class StructureClientAdmin(admin.ModelAdmin):
+    """Admin pour les structures clientes."""
+
+    list_display = [
+        'nom', 'telephone', 'contact_principal',
+        'get_nombre_utilisateurs', 'get_nombre_sites', 'actif'
+    ]
+    list_filter = ['actif', 'date_creation']
+    search_fields = ['nom', 'adresse', 'contact_principal', 'email_facturation']
+    date_hierarchy = 'date_creation'
+
     fieldsets = (
-        ('Utilisateur', {'fields': ('utilisateur',)}),
         ('Information structure', {
-            'fields': ('nom_structure', 'adresse', 'telephone')
+            'fields': ('nom', 'adresse', 'telephone', 'actif')
         }),
         ('Contact et facturation', {
             'fields': ('contact_principal', 'email_facturation', 'logo')
         }),
     )
+
+    inlines = [ClientInline]
+
+    def get_nombre_utilisateurs(self, obj):
+        return obj.nombre_utilisateurs
+    get_nombre_utilisateurs.short_description = 'Utilisateurs'
+
+    def get_nombre_sites(self, obj):
+        return obj.nombre_sites
+    get_nombre_sites.short_description = 'Sites'
+
+
+# ==============================================================================
+# ADMIN CLIENT (Utilisateur d'une Structure)
+# ==============================================================================
+
+@admin.register(Client)
+class ClientAdmin(admin.ModelAdmin):
+    """Admin pour les utilisateurs clients (liés à une structure)."""
+
+    list_display = [
+        'get_structure', 'get_email', 'get_nom_complet', 'get_actif'
+    ]
+    list_filter = ['utilisateur__actif', 'structure']
+    search_fields = [
+        'structure__nom', 'utilisateur__email',
+        'utilisateur__nom', 'utilisateur__prenom'
+    ]
+    autocomplete_fields = ['utilisateur', 'structure']
+
+    fieldsets = (
+        ('Utilisateur', {'fields': ('utilisateur',)}),
+        ('Structure', {'fields': ('structure',)}),
+        # Champs legacy (cachés, pour rétro-compatibilité)
+        ('Données legacy', {
+            'fields': ('nom_structure', 'adresse', 'telephone', 'contact_principal', 'email_facturation', 'logo'),
+            'classes': ('collapse',),
+            'description': 'Ces champs sont obsolètes et seront supprimés. Utilisez la Structure à la place.'
+        }),
+    )
+
+    def get_structure(self, obj):
+        return obj.structure.nom if obj.structure else obj.nom_structure or '-'
+    get_structure.short_description = 'Structure'
+    get_structure.admin_order_field = 'structure__nom'
 
     def get_email(self, obj):
         return obj.utilisateur.email
@@ -154,7 +212,7 @@ class ClientAdmin(admin.ModelAdmin):
 
     def get_nom_complet(self, obj):
         return obj.utilisateur.get_full_name()
-    get_nom_complet.short_description = 'Responsable'
+    get_nom_complet.short_description = 'Nom complet'
 
     def get_actif(self, obj):
         return obj.utilisateur.actif
