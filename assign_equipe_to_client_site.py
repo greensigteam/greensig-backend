@@ -36,15 +36,21 @@ try:
     for site in client_sites:
         print(f'  - {site.nom_site} (ID: {site.id})')
 
-    # Trouver des équipes sans site ou avec d'autres sites
-    equipes_disponibles = Equipe.objects.filter(site__isnull=True)[:3]
+    # Trouver des équipes sans site principal ou avec d'autres sites
+    equipes_disponibles = Equipe.objects.filter(site_principal__isnull=True)[:3]
     if not equipes_disponibles.exists():
         # Prendre des équipes existantes
         equipes_disponibles = Equipe.objects.all()[:3]
 
     print(f'\n👥 Équipes disponibles ({equipes_disponibles.count()}) :')
     for equipe in equipes_disponibles:
-        site_nom = equipe.site.nom_site if equipe.site else "AUCUN"
+        # Afficher site principal (avec fallback sur legacy)
+        if equipe.site_principal:
+            site_nom = equipe.site_principal.nom_site
+        elif equipe.site:  # Legacy
+            site_nom = equipe.site.nom_site
+        else:
+            site_nom = "AUCUN"
         print(f'  - {equipe.nom_equipe} (Site actuel: {site_nom})')
 
     # Assigner les équipes aux sites du client
@@ -53,17 +59,25 @@ try:
         for i, equipe in enumerate(equipes_disponibles):
             # Assigner à un site du client (rotation)
             site = client_sites[i % client_sites.count()]
-            ancien_site = equipe.site.nom_site if equipe.site else "AUCUN"
-            equipe.site = site
+            # Récupérer l'ancien site (avec fallback)
+            if equipe.site_principal:
+                ancien_site = equipe.site_principal.nom_site
+            elif equipe.site:
+                ancien_site = equipe.site.nom_site
+            else:
+                ancien_site = "AUCUN"
+            # Assigner le nouveau site principal
+            equipe.site_principal = site
             equipe.save()
             print(f'  ✅ {equipe.nom_equipe}: {ancien_site} → {site.nom_site}')
 
         # Vérification
-        equipes_client = Equipe.objects.filter(site__client=client)
+        equipes_client = Equipe.objects.filter(site_principal__client=client)
         print(f'\n✅ SUCCÈS ! Le CLIENT peut maintenant voir {equipes_client.count()} équipes:')
         for equipe in equipes_client:
             nb_membres = equipe.operateurs.count()
-            print(f'  - {equipe.nom_equipe} | Site: {equipe.site.nom_site} | Membres: {nb_membres}')
+            site_nom = equipe.site_principal.nom_site if equipe.site_principal else "AUCUN"
+            print(f'  - {equipe.nom_equipe} | Site: {site_nom} | Membres: {nb_membres}')
     else:
         print('\n❌ Pas assez de données pour l\'assignation')
 

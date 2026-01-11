@@ -32,6 +32,7 @@ class ReclamationListSerializer(serializers.ModelSerializer):
     site_nom = serializers.CharField(source='site.nom_site', read_only=True)
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     createur_nom = serializers.SerializerMethodField()
+    statut_display = serializers.CharField(source='get_statut_display', read_only=True)
     localisation = GeometryField(read_only=True, allow_null=True)
 
     class Meta:
@@ -44,6 +45,7 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'date_creation',
             'date_constatation',
             'statut',
+            'statut_display',
             'site', 'site_nom',
             'zone', 'zone_nom',
             'date_cloture_prevue',
@@ -69,15 +71,25 @@ class ReclamationListSerializer(serializers.ModelSerializer):
 
 class HistoriqueReclamationSerializer(serializers.ModelSerializer):
     auteur_nom = serializers.SerializerMethodField()
+    statut_precedent_display = serializers.SerializerMethodField()
+    statut_nouveau_display = serializers.SerializerMethodField()
 
     class Meta:
         model = HistoriqueReclamation
-        fields = ['id', 'statut_precedent', 'statut_nouveau', 'date_changement', 'auteur', 'auteur_nom', 'commentaire']
+        fields = ['id', 'statut_precedent', 'statut_precedent_display', 'statut_nouveau', 'statut_nouveau_display', 'date_changement', 'auteur', 'auteur_nom', 'commentaire']
 
     def get_auteur_nom(self, obj):
         if obj.auteur:
             return f"{obj.auteur.prenom} {obj.auteur.nom}".strip() or obj.auteur.email
         return "Système"
+
+    def get_statut_precedent_display(self, obj):
+        if obj.statut_precedent:
+            return dict(Reclamation.STATUT_CHOICES).get(obj.statut_precedent, obj.statut_precedent)
+        return None
+
+    def get_statut_nouveau_display(self, obj):
+        return dict(Reclamation.STATUT_CHOICES).get(obj.statut_nouveau, obj.statut_nouveau)
 
 
 
@@ -94,6 +106,7 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     equipe_nom = serializers.CharField(source='equipe_affectee.nom_equipe', read_only=True, allow_null=True)
     createur_nom = serializers.SerializerMethodField()
+    statut_display = serializers.CharField(source='get_statut_display', read_only=True)
     photos = PhotoSerializer(many=True, read_only=True)
     photos_taches = serializers.SerializerMethodField()
     taches_liees_details = serializers.SerializerMethodField()

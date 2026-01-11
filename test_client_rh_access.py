@@ -33,16 +33,31 @@ try:
         for site in sites:
             print(f'  - {site.nom_site} (ID: {site.id})')
 
-        # Équipes sur ces sites
-        equipes = Equipe.objects.filter(site__client=client)
+        # Équipes sur ces sites (site principal OU secondaire)
+        from django.db.models import Q
+        equipes = Equipe.objects.filter(
+            Q(site_principal__client=client) |
+            Q(sites_secondaires__client=client) |
+            Q(site__client=client)  # Legacy fallback
+        ).distinct()
         print(f'\n👥 Équipes sur ces sites: {equipes.count()}')
         for equipe in equipes[:10]:
-            site_nom = equipe.site.nom_site if equipe.site else "AUCUN"
+            # Afficher site principal avec fallback
+            if equipe.site_principal:
+                site_nom = equipe.site_principal.nom_site
+            elif equipe.site:  # Legacy
+                site_nom = equipe.site.nom_site
+            else:
+                site_nom = "AUCUN"
             nb_membres = equipe.operateurs.count()
             print(f'  - {equipe.nom_equipe} | Site: {site_nom} | Membres: {nb_membres}')
 
         # Opérateurs de ces équipes
-        operateurs = Operateur.objects.filter(equipe__site__client=client)
+        operateurs = Operateur.objects.filter(
+            Q(equipe__site_principal__client=client) |
+            Q(equipe__sites_secondaires__client=client) |
+            Q(equipe__site__client=client)  # Legacy
+        ).distinct()
         print(f'\n👷 Opérateurs sur ces équipes: {operateurs.count()}')
         for op in operateurs[:10]:
             equipe_nom = op.equipe.nom_equipe if op.equipe else "AUCUNE"

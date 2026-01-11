@@ -4,7 +4,8 @@ from typing import Dict, Optional, Tuple
 from dateutil.rrule import rrule, DAILY, WEEKLY, MONTHLY, MO, TU, WE, TH, FR, SA, SU
 from django.db import transaction
 from django.db.models import QuerySet
-from .models import Tache, RatioProductivite
+from .models import Tache, RatioProductivite, DistributionCharge
+from api_users.models import HoraireTravail, JourFerie, Absence, StatutAbsence
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,233 @@ class RecurrenceService:
         "weekly": WEEKLY,
         "monthly": MONTHLY
     }
+
+    @staticmethod
+    def _get_work_hours_for_day(equipe, date):
+        """
+        ✅ PHASE 2: Retourne les heures travaillables pour une équipe à une date donnée.
+
+        Args:
+            equipe: Instance d'Equipe
+            date: datetime.date ou datetime.datetime
+
+        Returns:
+            float: Nombre d'heures travaillables dans la journée (défaut: 8h si pas d'horaire)
+        """
+        if not equipe:
+            return 8.0  # Défaut si pas d'équipe
+
+        # Convertir en date si datetime
+        if isinstance(date, datetime.datetime):
+            date = date.date()
+
+        # Mapper jour de semaine (0=lundi, 6=dimanche) vers code BDD
+        jours_mapping = {
+            0: 'LUN',
+            1: 'MAR',
+            2: 'MER',
+            3: 'JEU',
+            4: 'VEN',
+            5: 'SAM',
+            6: 'DIM',
+        }
+        jour_code = jours_mapping[date.weekday()]
+
+        # Chercher l'horaire actif pour cette équipe et ce jour
+        try:
+            horaire = HoraireTravail.objects.get(
+                equipe=equipe,
+                jour_semaine=jour_code,
+                actif=True
+            )
+            return horaire.heures_travaillables
+        except HoraireTravail.DoesNotExist:
+            # Pas d'horaire défini, utiliser des valeurs par défaut intelligentes
+            # Samedi : 4h (08:00-12:00), Dimanche : 0h, Autres jours : 8h
+            if jour_code == 'SAM':
+                logger.debug(f"Pas d'horaire pour équipe {equipe.id} le samedi. Défaut: 4h (08:00-12:00)")
+                return 4.0
+            elif jour_code == 'DIM':
+                logger.debug(f"Pas d'horaire pour équipe {equipe.id} le dimanche. Défaut: 0h (repos)")
+                return 0.0
+            else:
+                logger.debug(f"Pas d'horaire pour équipe {equipe.id} le {jour_code}. Défaut: 8h")
+                return 8.0
+        except HoraireTravail.MultipleObjectsReturned:
+            # Plusieurs horaires actifs (ne devrait pas arriver avec validation)
+            logger.error(
+                f"Plusieurs horaires actifs pour équipe {equipe.id} le {jour_code}. "
+                f"Utilisation du premier."
+            )
+            horaire = HoraireTravail.objects.filter(
+                equipe=equipe,
+                jour_semaine=jour_code,
+                actif=True
+            ).first()
+            return horaire.heures_travaillables if horaire else 8.0
+
+    @staticmethod
+    def _est_weekend(date):
+        """
+        ✅ PHASE 3: Vérifie si une date tombe un weekend (dimanche uniquement).
+
+        Note: Le samedi est considéré comme jour travaillé (demi-journée jusqu'à midi).
+
+        Args:
+            date: datetime.date ou datetime.datetime
+
+        Returns:
+            bool: True si dimanche, False sinon
+        """
+        if isinstance(date, datetime.datetime):
+            date = date.date()
+
+        # 6 = dimanche (samedi retiré car travaillé jusqu'à midi)
+        return date.weekday() == 6
+
+    @staticmethod
+    def _est_jour_ferie(date):
+        """
+        ✅ PHASE 3: Vérifie si une date est un jour férié.
+
+        Args:
+            date: datetime.date ou datetime.datetime
+
+        Returns:
+            bool: True si jour férié, False sinon
+        """
+        return JourFerie.est_jour_ferie(date, actif_uniquement=True)
+
+    @staticmethod
+    def _est_equipe_disponible(equipe, date):
+        """
+        ✅ PHASE 3: Vérifie si une équipe a suffisamment de membres disponibles pour une date.
+
+        Critère: Au moins 50% des membres actifs doivent être disponibles.
+
+        Args:
+            equipe: Instance d'Equipe
+            date: datetime.date ou datetime.datetime
+
+        Returns:
+            bool: True si équipe disponible, False sinon
+        """
+        if not equipe:
+            return True  # Pas d'équipe = pas de contrainte
+
+        # Convertir en date si datetime
+        if isinstance(date, datetime.datetime):
+            date = date.date()
+
+        # Compter les membres actifs
+        from api_users.models import StatutOperateur
+        membres_actifs = equipe.operateurs.filter(statut=StatutOperateur.ACTIF)
+        nombre_membres = membres_actifs.count()
+
+        if nombre_membres == 0:
+            logger.warning(f"Équipe {equipe.id} n'a aucun membre actif")
+            return False
+
+        # Compter les membres en absence ce jour-là
+        absences = Absence.objects.filter(
+            operateur__in=membres_actifs,
+            statut=StatutAbsence.VALIDEE,
+            date_debut__lte=date,
+            date_fin__gte=date
+        )
+        nombre_absents = absences.count()
+        nombre_presents = nombre_membres - nombre_absents
+
+        # Critère: au moins 50% des membres doivent être présents
+        seuil_minimum = nombre_membres * 0.5
+        disponible = nombre_presents >= seuil_minimum
+
+        if not disponible:
+            logger.info(
+                f"Équipe {equipe.id} indisponible le {date}: "
+                f"{nombre_presents}/{nombre_membres} présents (seuil: {seuil_minimum:.0f})"
+            )
+
+        return disponible
+
+    @staticmethod
+    def _est_jour_travaillable(equipe, date, skip_weekends=True, skip_holidays=True, check_availability=True):
+        """
+        ✅ PHASE 3: Vérifie si un jour est travaillable pour une équipe.
+
+        Args:
+            equipe: Instance d'Equipe
+            date: datetime.date ou datetime.datetime
+            skip_weekends: Si True, exclut les weekends
+            skip_holidays: Si True, exclut les jours fériés
+            check_availability: Si True, vérifie la disponibilité de l'équipe
+
+        Returns:
+            bool: True si jour travaillable, False sinon
+        """
+        # Vérifier weekend
+        if skip_weekends and RecurrenceService._est_weekend(date):
+            return False
+
+        # Vérifier jour férié
+        if skip_holidays and RecurrenceService._est_jour_ferie(date):
+            return False
+
+        # Vérifier disponibilité équipe
+        if check_availability and not RecurrenceService._est_equipe_disponible(equipe, date):
+            return False
+
+        return True
+
+    @staticmethod
+    def calculate_recommended_occurrences(equipe, charge_totale_heures, date_debut, frequence='daily'):
+        """
+        ✅ PHASE 2: Calcule le nombre de jours recommandés pour une charge donnée.
+
+        Args:
+            equipe: Instance d'Equipe
+            charge_totale_heures: Charge totale en heures
+            date_debut: Date de début (datetime.date ou datetime.datetime)
+            frequence: 'daily', 'weekly', ou 'monthly'
+
+        Returns:
+            int: Nombre d'occurrences recommandé
+        """
+        if not charge_totale_heures or charge_totale_heures <= 0:
+            return 1
+
+        if not equipe:
+            # Pas d'équipe, utiliser défaut 8h/jour
+            return max(1, int(round(charge_totale_heures / 8.0)))
+
+        # Convertir en date si datetime
+        if isinstance(date_debut, datetime.datetime):
+            date_debut = date_debut.date()
+
+        # Calculer les heures moyennes par occurrence selon la fréquence
+        if frequence == 'daily':
+            # Pour daily, calculer la moyenne sur 7 jours
+            total_heures_semaine = 0
+            for i in range(7):
+                jour_test = date_debut + datetime.timedelta(days=i)
+                heures = RecurrenceService._get_work_hours_for_day(equipe, jour_test)
+                total_heures_semaine += heures
+            heures_par_occurrence = total_heures_semaine / 7
+        elif frequence == 'weekly':
+            # Pour weekly, utiliser les heures du jour de la semaine de début
+            heures_par_occurrence = RecurrenceService._get_work_hours_for_day(equipe, date_debut)
+        elif frequence == 'monthly':
+            # Pour monthly, utiliser les heures du jour de la semaine de début
+            heures_par_occurrence = RecurrenceService._get_work_hours_for_day(equipe, date_debut)
+        else:
+            heures_par_occurrence = 8.0
+
+        # Calculer le nombre d'occurrences nécessaires
+        if heures_par_occurrence <= 0:
+            return 1
+
+        nombre_occurrences = int(round(charge_totale_heures / heures_par_occurrence))
+        return max(1, nombre_occurrences)
 
     @staticmethod
     def _parse_params(tache):
@@ -100,19 +328,78 @@ class RecurrenceService:
 
         # Génération des dates
         dates = list(rrule(**rule_kwargs))
-        
+
+        # ✅ PHASE 3: Filtrer les dates non-travaillables (weekends, jours fériés, équipe indisponible)
+        # Récupérer l'équipe (support legacy id_equipe + nouveau equipes)
+        equipe = tache_mere.id_equipe
+        if not equipe and hasattr(tache_mere, 'equipes') and tache_mere.equipes.exists():
+            equipe = tache_mere.equipes.first()
+
+        dates_travaillables = []
+        dates_skippees = []
+        for dt in dates:
+            if dt == start_dt:
+                # Garder la date de la tâche mère
+                dates_travaillables.append(dt)
+                continue
+
+            # Vérifier si jour travaillable
+            if RecurrenceService._est_jour_travaillable(
+                equipe=equipe,
+                date=dt,
+                skip_weekends=True,
+                skip_holidays=True,
+                check_availability=True
+            ):
+                dates_travaillables.append(dt)
+            else:
+                dates_skippees.append(dt)
+                logger.debug(f"⏭️ Date skippée (non-travaillable): {dt.date()}")
+
+        # Si on a skippé des dates et qu'on a un count, générer plus de dates pour compenser
+        if dates_skippees and params['count']:
+            count_original = int(params['count'])
+            count_manquant = len(dates_skippees)
+            logger.info(f"🔄 {count_manquant} dates skippées, génération de dates supplémentaires...")
+
+            # Réajuster la règle pour générer plus de dates
+            rule_kwargs_extended = rule_kwargs.copy()
+            rule_kwargs_extended['count'] = count_original + count_manquant * 2  # *2 pour marge
+
+            dates_extended = list(rrule(**rule_kwargs_extended))
+
+            # Filtrer à nouveau
+            for dt in dates_extended:
+                if dt not in dates_travaillables and dt != start_dt:
+                    if RecurrenceService._est_jour_travaillable(equipe, dt, True, True, True):
+                        dates_travaillables.append(dt)
+                        if len(dates_travaillables) >= count_original + 1:  # +1 pour la tâche mère
+                            break
+
+        dates = dates_travaillables
+        logger.info(f"✅ {len(dates)} dates travaillables après filtrage (dont {len(dates_skippees)} skippées)")
+
+        # ✅ PHASE 1.2: Calculate charge per occurrence (divide total by number of occurrences)
+        charge_mere = tache_mere.charge_estimee_heures
+        nombre_occurrences_total = len([d for d in dates if d != start_dt])  # Exclude mother task
+        charge_par_occurrence = None
+
+        if charge_mere and nombre_occurrences_total > 0:
+            # Répartir la charge totale sur toutes les occurrences (mère incluse)
+            charge_par_occurrence = charge_mere / (nombre_occurrences_total + 1)  # +1 for mother task
+
         # Création des instances
         occurrences_to_create = []
-        
+
         # On ignore la première date si elle correspond exactement à la tâche mère
         # rrule inclut souvent le start_dt
         for dt in dates:
             if dt == start_dt:
                 continue
-                
+
             new_start = dt
             new_end = dt + duration
-            
+
             # Création de l'objet (sans save pour le moment)
             occurrence = Tache(
                 id_client=tache_mere.id_client,
@@ -126,18 +413,32 @@ class RecurrenceService:
                 statut='PLANIFIEE', # Toujours planifiée au début
                 id_recurrence_parent=tache_mere,
                 parametres_recurrence=None, # Les filles ne portent pas la règle de récurrence pour éviter la récursion
+                charge_estimee_heures=charge_par_occurrence,  # ✅ Répartir la charge
             )
             occurrences_to_create.append(occurrence)
 
         # Bulk create pour la performance
         created_tasks = Tache.objects.bulk_create(occurrences_to_create)
-        
-        # Gestion des relations ManyToMany (Objets Inventaire)
+
+        # Gestion des relations ManyToMany (Objets Inventaire + Équipes)
         # bulk_create ne gère pas les M2M, il faut les ajouter après
-        if created_tasks and tache_mere.objets.exists():
-            objets = list(tache_mere.objets.all())
-            for task in created_tasks:
-                task.objets.set(objets)
+        if created_tasks:
+            # Copier les objets
+            if tache_mere.objets.exists():
+                objets = list(tache_mere.objets.all())
+                for task in created_tasks:
+                    task.objets.set(objets)
+
+            # ✅ FIX: Copier les équipes (M2M moderne)
+            if tache_mere.equipes.exists():
+                equipes = list(tache_mere.equipes.all())
+                for task in created_tasks:
+                    task.equipes.set(equipes)
+
+        # ✅ PHASE 1.2: Update mother task with distributed charge
+        if charge_par_occurrence is not None:
+            tache_mere.charge_estimee_heures = charge_par_occurrence
+            tache_mere.save(update_fields=['charge_estimee_heures'])
 
         return len(created_tasks)
 
@@ -297,9 +598,94 @@ class WorkloadCalculationService:
         return length_deg * 111000 * cos_lat
 
     @classmethod
+    def create_default_distributions(cls, tache: Tache, charge_totale: float) -> int:
+        """
+        ✅ NOUVEAU: Crée des distributions de charge par défaut pour une tâche multi-jours.
+
+        Distribue la charge totale uniformément sur les jours travaillables dans la période de la tâche.
+
+        Args:
+            tache: Instance de Tache
+            charge_totale: Charge totale en heures à distribuer
+
+        Returns:
+            int: Nombre de distributions créées
+        """
+        if not tache.date_debut_planifiee or not tache.date_fin_planifiee:
+            logger.warning(f"Tache {tache.id}: dates manquantes, distributions non créées")
+            return 0
+
+        if charge_totale <= 0:
+            logger.info(f"Tache {tache.id}: charge nulle, distributions non créées")
+            return 0
+
+        # Convertir en dates
+        date_debut = tache.date_debut_planifiee.date()
+        date_fin = tache.date_fin_planifiee.date()
+
+        # Récupérer l'équipe pour vérifier jours travaillables
+        equipe = tache.id_equipe
+        if not equipe and hasattr(tache, 'equipes') and tache.equipes.exists():
+            equipe = tache.equipes.first()
+
+        # Lister tous les jours travaillables dans la période
+        jours_travaillables = []
+        current_date = date_debut
+
+        while current_date <= date_fin:
+            # Vérifier si jour travaillable
+            if RecurrenceService._est_jour_travaillable(
+                equipe=equipe,
+                date=current_date,
+                skip_weekends=True,
+                skip_holidays=True,
+                check_availability=False  # Pas de check disponibilité pour distribution par défaut
+            ):
+                heures_jour = RecurrenceService._get_work_hours_for_day(equipe, current_date)
+                if heures_jour > 0:
+                    jours_travaillables.append(current_date)
+
+            current_date += datetime.timedelta(days=1)
+
+        if not jours_travaillables:
+            logger.warning(f"Tache {tache.id}: aucun jour travaillable trouvé dans la période")
+            return 0
+
+        # Distribuer uniformément la charge
+        nombre_jours = len(jours_travaillables)
+        heures_par_jour = charge_totale / nombre_jours
+
+        # Supprimer anciennes distributions si elles existent
+        tache.distributions_charge.all().delete()
+
+        # Créer les distributions
+        distributions_to_create = []
+        for jour in jours_travaillables:
+            distributions_to_create.append(
+                DistributionCharge(
+                    tache=tache,
+                    date=jour,
+                    heures_planifiees=round(heures_par_jour, 2),
+                    commentaire="Distribution automatique basée sur objets GIS"
+                )
+            )
+
+        # Bulk create
+        DistributionCharge.objects.bulk_create(distributions_to_create)
+
+        logger.info(
+            f"✅ Tache {tache.id}: {len(distributions_to_create)} distributions créées "
+            f"({heures_par_jour:.2f}h/jour × {nombre_jours} jours = {charge_totale}h total)"
+        )
+
+        return len(distributions_to_create)
+
+    @classmethod
     def recalculate_and_save(cls, tache: Tache, force: bool = False) -> Tuple[Optional[float], bool]:
         """
         Calcule et sauvegarde la charge estimée pour une tâche.
+
+        ✅ MODIFIÉ: Crée aussi des distributions de charge par défaut si la tâche a des objets GIS.
 
         Args:
             tache: Instance de Tache
@@ -314,10 +700,16 @@ class WorkloadCalculationService:
             return tache.charge_estimee_heures, True
 
         try:
+            # Calculer la charge totale
             charge = cls.calculate_workload(tache)
             tache.charge_estimee_heures = charge
             tache.save(update_fields=['charge_estimee_heures'])
             logger.info(f"Tache {tache.id}: charge estimée = {charge}h")
+
+            # ✅ NOUVEAU: Créer distributions par défaut si objets GIS
+            if charge and charge > 0 and tache.objets.exists():
+                cls.create_default_distributions(tache, charge)
+
             return charge, True
         except Exception as e:
             logger.error(f"Erreur calcul charge tâche {tache.id}: {e}")

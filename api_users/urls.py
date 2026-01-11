@@ -4,8 +4,8 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     UtilisateurViewSet, RoleViewSet, ClientViewSet, SuperviseurViewSet,
-    CompetenceViewSet, OperateurViewSet, EquipeViewSet,
-    AbsenceViewSet, HistoriqueRHView, StatistiquesUtilisateursView,
+    CompetenceViewSet, OperateurViewSet, EquipeViewSet, HoraireTravailViewSet,
+    JourFerieViewSet, AbsenceViewSet, HistoriqueRHView, StatistiquesUtilisateursView,
     MeView, StructureClientViewSet
 )
 
@@ -19,6 +19,8 @@ router.register(r'superviseurs', SuperviseurViewSet, basename='superviseur')
 router.register(r'competences', CompetenceViewSet, basename='competence')
 router.register(r'operateurs', OperateurViewSet, basename='operateur')
 router.register(r'equipes', EquipeViewSet, basename='equipe')
+router.register(r'horaires', HoraireTravailViewSet, basename='horaire')
+router.register(r'jours-feries', JourFerieViewSet, basename='jour-ferie')
 router.register(r'absences', AbsenceViewSet, basename='absence')
 
 app_name = 'api_users'
@@ -45,7 +47,8 @@ urlpatterns = [
 # PUT    /utilisateurs/{id}/               - Mettre a jour un utilisateur
 # PATCH  /utilisateurs/{id}/               - Mise a jour partielle
 # DELETE /utilisateurs/{id}/               - Desactiver un utilisateur (soft delete)
-# POST   /utilisateurs/{id}/change_password/ - Changer le mot de passe
+# POST   /utilisateurs/{id}/change_password/ - Changer le mot de passe (necessite ancien MdP)
+# POST   /utilisateurs/{id}/admin_reset_password/ - Reinitialiser le mot de passe (ADMIN uniquement)
 # POST   /utilisateurs/{id}/activer/       - Reactiver un utilisateur
 # GET    /utilisateurs/{id}/roles/         - Liste des roles d'un utilisateur
 # POST   /utilisateurs/{id}/attribuer_role/ - Attribuer un role
@@ -126,6 +129,18 @@ urlpatterns = [
 # POST   /equipes/{id}/retirer_membre/     - Retirer un membre
 # GET    /equipes/{id}/statut/             - Statut operationnel detaille
 # GET    /equipes/{id}/historique/         - Historique des membres
+#
+# HORAIRES TRAVAIL (/api/users/horaires/) - ✅ PHASE 2
+# -------------------------------------------------------
+# GET    /horaires/                        - Liste des horaires de travail
+# POST   /horaires/                        - Creer un horaire (ADMIN uniquement)
+# GET    /horaires/{id}/                   - Detail d'un horaire
+# PUT    /horaires/{id}/                   - Mettre a jour un horaire (ADMIN uniquement)
+# DELETE /horaires/{id}/                   - Supprimer un horaire (ADMIN uniquement)
+# GET    /horaires/par_equipe/             - Horaires groupes par equipe
+#        Params: equipe_id (optionnel)
+# POST   /horaires/creer_semaine_complete/ - Creer horaires pour toute une semaine
+#        Body: {equipe, lundi_vendredi: {heure_debut, heure_fin, duree_pause_minutes}, samedi: {...}, dimanche: null}
 #
 # ABSENCES (/api/users/absences/)
 # -------------------------------

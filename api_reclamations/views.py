@@ -20,6 +20,7 @@ from .serializers import (
     SatisfactionClientSerializer
 )
 from .permissions import IsReclamationCreatorOrTeamReader
+from .filters import ReclamationFilter
 
 class TypeReclamationViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -55,7 +56,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
     """
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
-    filterset_fields = ['statut', 'site', 'zone', 'urgence', 'type_reclamation', 'createur']
+    filterset_class = ReclamationFilter
     ordering_fields = ['date_creation', 'date_cloture_prevue']
     search_fields = ['numero_reclamation', 'description']
 
@@ -342,6 +343,132 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'reclamation': serializer.data
         })
 
+    @action(detail=True, methods=['post'])
+    def refuser_cloture(self, request, pk=None):
+        """
+        Endpoint pour refuser la clôture d'une réclamation (CREATEUR uniquement).
+
+        Workflow:
+        - Seul le créateur de la réclamation peut refuser la clôture
+        - La réclamation doit être en statut EN_ATTENTE_VALIDATION_CLOTURE
+        - Un commentaire de refus est OBLIGATOIRE
+        - Retour au statut RESOLUE pour permettre de nouvelles interventions
+        """
+        reclamation = self.get_object()
+        user = request.user
+
+        # Vérification 1: L'utilisateur doit être le créateur de la réclamation
+        if reclamation.createur != user:
+            return Response(
+                {"error": "Seul le créateur de la réclamation peut refuser sa clôture."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérification 2: La réclamation doit être en attente de validation
+        if reclamation.statut != 'EN_ATTENTE_VALIDATION_CLOTURE':
+            return Response(
+                {"error": f"La réclamation doit être en attente de validation de clôture. Statut actuel: {reclamation.get_statut_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérification 3: Le commentaire de refus est OBLIGATOIRE
+        commentaire_refus = request.data.get('commentaire_refus', '').strip()
+        if not commentaire_refus:
+            return Response(
+                {"error": "Un commentaire expliquant le refus est obligatoire."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            old_statut = reclamation.statut
+
+            # Retour au statut RESOLUE (état avant proposition de clôture)
+            reclamation.statut = 'RESOLUE'
+
+            # Sauvegarde du commentaire de refus
+            reclamation.justification_rejet = commentaire_refus
+
+            # Réinitialisation des champs de proposition de clôture
+            reclamation.cloture_proposee_par = None
+            reclamation.date_proposition_cloture = None
+
+            reclamation._current_user = user
+            reclamation.save()
+
+            # Historique avec le commentaire de refus
+            HistoriqueReclamation.objects.create(
+                reclamation=reclamation,
+                statut_precedent=old_statut,
+                statut_nouveau='RESOLUE',
+                auteur=user,
+                commentaire=f"Clôture refusée par le créateur {user.get_full_name() or user.email}. Motif: {commentaire_refus}"
+            )
+
+        serializer = ReclamationDetailSerializer(reclamation)
+        return Response({
+            'message': 'Clôture refusée. La réclamation retourne au statut "Résolue" pour permettre de nouvelles interventions.',
+            'reclamation': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def rejeter(self, request, pk=None):
+        """
+        Endpoint pour rejeter une réclamation (ADMIN uniquement).
+
+        Workflow:
+        - Seul l'admin peut rejeter une réclamation
+        - La réclamation ne doit pas être CLOTUREE
+        - Une justification est OBLIGATOIRE
+        - Passage au statut REJETEE définitif
+        """
+        reclamation = self.get_object()
+        user = request.user
+
+        # Vérification 1: Seul l'admin peut rejeter
+        if not (user.is_staff or user.is_superuser):
+            return Response(
+                {"error": "Seuls les administrateurs peuvent rejeter une réclamation."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérification 2: La réclamation ne doit pas être déjà clôturée
+        if reclamation.statut == 'CLOTUREE':
+            return Response(
+                {"error": "Une réclamation clôturée ne peut pas être rejetée."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérification 3: La justification est OBLIGATOIRE
+        justification = request.data.get('justification', '').strip()
+        if not justification:
+            return Response(
+                {"error": "Une justification est obligatoire pour rejeter une réclamation."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            old_statut = reclamation.statut
+            reclamation.statut = 'REJETEE'
+            reclamation.justification_rejet = justification
+
+            reclamation._current_user = user
+            reclamation.save()
+
+            # Historique
+            HistoriqueReclamation.objects.create(
+                reclamation=reclamation,
+                statut_precedent=old_statut,
+                statut_nouveau='REJETEE',
+                auteur=user,
+                commentaire=f"Réclamation rejetée par {user.get_full_name() or user.email}. Motif: {justification}"
+            )
+
+        serializer = ReclamationDetailSerializer(reclamation)
+        return Response({
+            'message': 'Réclamation rejetée avec succès.',
+            'reclamation': serializer.data
+        })
+
     @action(detail=False, methods=['post'], url_path='detect-site')
     def detect_site(self, request):
         """
@@ -396,11 +523,14 @@ class ReclamationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def map(self, request):
         """
-        Endpoint pour afficher les réclamations sur la carte.
+        Endpoint pour afficher les réclamations sur la carte principale.
 
         Retourne un GeoJSON FeatureCollection avec les réclamations:
         - Qui ont une localisation (geometry non null)
-        - Qui ne sont pas CLOTUREE (disparaissent après clôture)
+        - Qui ne sont pas CLOTUREE ni REJETEE (réclamations archivées masquées)
+
+        Note: Les mini-cartes dans les fiches détails affichent toutes les
+        réclamations (y compris CLOTUREE/REJETEE) pour la traçabilité.
 
         Query params optionnels:
         - bbox: Bounding box au format "west,south,east,north"
@@ -420,12 +550,14 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'EN_COURS': '#eab308',         # Jaune - en cours de traitement
             'RESOLUE': '#22c55e',          # Vert - résolue, en attente de clôture
             'REJETEE': '#6b7280',          # Gris - rejetée
-            # CLOTUREE n'est pas affiché sur la carte
+            # CLOTUREE et REJETEE ne sont pas affichées sur la carte principale
+            # (mais visibles dans les mini-cartes des fiches détails)
         }
 
-        # Base queryset - exclure les réclamations clôturées et celles sans localisation
+        # Base queryset - exclure les réclamations clôturées/rejetées et celles sans localisation
+        # Note: Les mini-cartes dans les fiches détails affichent toutes les réclamations
         queryset = self.get_queryset().exclude(
-            statut='CLOTUREE'
+            statut__in=['CLOTUREE', 'REJETEE']  # Exclure les réclamations archivées
         ).exclude(
             localisation__isnull=True
         ).select_related(
@@ -470,6 +602,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                     'type_reclamation_symbole': rec.type_reclamation.symbole if rec.type_reclamation else None,
                     'type_reclamation_categorie': rec.type_reclamation.categorie if rec.type_reclamation else None,
                     'description': rec.description[:100] + '...' if rec.description and len(rec.description) > 100 else rec.description,
+                    'site': rec.site.id if rec.site else None,  # ✅ ID du site (pour filtrage)
                     'site_nom': rec.site.nom_site if rec.site else None,
                     'zone_nom': rec.zone.nom if rec.zone else None,
                     'date_creation': rec.date_creation.isoformat() if rec.date_creation else None,

@@ -510,16 +510,19 @@ class Equipe(models.Model):
     """
     Représente une équipe d'opérateurs.
 
-    ⚠️ REFACTORISATION (Architecture RH) :
-    - Une équipe est affectée à un SITE
-    - Le superviseur de l'équipe est automatiquement celui du site (propriété calculée)
+    ⚠️ REFACTORISATION (Architecture RH + Multi-Sites) :
+    - Une équipe est affectée à un SITE PRINCIPAL (base contractuelle)
+    - Une équipe peut aussi travailler sur des SITES SECONDAIRES (proximité géographique)
+    - Le superviseur de l'équipe est automatiquement celui du site principal (propriété calculée)
     - Un opérateur peut être désigné comme "chef d'équipe" (attribut, pas rôle)
     - Le chef d'équipe travaille sur le terrain avec son équipe
 
     Règles métier:
     - Une équipe PEUT avoir un chef (opérateur avec compétence "Gestion d'équipe")
     - Un opérateur ne peut être chef que d'UNE SEULE équipe (OneToOne)
-    - Une équipe est affectée à un site, son superviseur est celui du site
+    - Une équipe a UN site principal (pour déterminer le superviseur)
+    - Une équipe peut avoir PLUSIEURS sites secondaires (pour sites proches géographiquement)
+    - Le superviseur est toujours celui du site principal
     """
     nom_equipe = models.CharField(
         max_length=100,
@@ -536,17 +539,39 @@ class Equipe(models.Model):
         help_text="Opérateur désigné comme chef (doit avoir compétence 'Gestion d\\'équipe')"
     )
 
-    # ⚠️ SUPPRIMÉ : Le superviseur est désormais automatiquement déduit du site
+    # ⚠️ SUPPRIMÉ : Le superviseur est désormais automatiquement déduit du site principal
     # superviseur = models.ForeignKey(...) - Voir @property superviseur ci-dessous
 
+    # ✅ NOUVEAU : Site principal (remplace 'site')
+    site_principal = models.ForeignKey(
+        'api.Site',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='equipes_principales',
+        verbose_name="Site principal",
+        help_text="Site d'affectation contractuelle de base (détermine le superviseur)"
+    )
+
+    # ✅ NOUVEAU : Sites secondaires (affectations multiples)
+    sites_secondaires = models.ManyToManyField(
+        'api.Site',
+        blank=True,
+        related_name='equipes_secondaires',
+        verbose_name="Sites secondaires",
+        help_text="Sites proches géographiquement où l'équipe peut aussi intervenir"
+    )
+
+    # ⚠️ LEGACY : Ancien champ 'site' conservé temporairement pour la migration
+    # Sera supprimé après migration des données vers 'site_principal'
     site = models.ForeignKey(
         'api.Site',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='equipes_affectees',
-        verbose_name="Site d'affectation contractuelle",
-        help_text="Site auquel l'équipe est affectée de manière contractuelle (affectation de base)"
+        related_name='equipes_affectees_legacy',
+        verbose_name="[LEGACY] Site",
+        help_text="[LEGACY] Sera migré vers site_principal"
     )
 
     actif = models.BooleanField(
@@ -574,15 +599,66 @@ class Equipe(models.Model):
     @property
     def superviseur(self):
         """
-        Retourne le superviseur de l'équipe, automatiquement déduit du site.
+        Retourne le superviseur de l'équipe, automatiquement déduit du site principal.
 
         ⚠️ LOGIQUE MÉTIER : Le superviseur d'une équipe est celui qui supervise
-        le site sur lequel l'équipe est affectée.
+        le site principal sur lequel l'équipe est affectée.
 
         Returns:
-            Superviseur | None: Le superviseur du site, ou None si pas de site
+            Superviseur | None: Le superviseur du site principal, ou None si pas de site
         """
-        return self.site.superviseur if self.site else None
+        # Priorité au nouveau système (site_principal)
+        if self.site_principal:
+            return self.site_principal.superviseur
+        # Fallback sur l'ancien champ pendant la migration
+        if self.site:
+            return self.site.superviseur
+        return None
+
+    @property
+    def tous_les_sites(self):
+        """
+        Retourne la liste de tous les sites (principal + secondaires).
+
+        ⚠️ NOUVEAU (Multi-Sites) : Permet d'obtenir facilement tous les sites
+        où l'équipe peut intervenir.
+
+        Returns:
+            list[Site]: Liste avec site principal en premier, puis sites secondaires
+        """
+        sites = []
+
+        # Ajouter le site principal en premier
+        if self.site_principal:
+            sites.append(self.site_principal)
+        elif self.site:  # Fallback legacy
+            sites.append(self.site)
+
+        # Ajouter les sites secondaires
+        sites.extend(self.sites_secondaires.all())
+
+        return sites
+
+    @property
+    def tous_les_sites_ids(self):
+        """
+        Retourne la liste des IDs de tous les sites (principal + secondaires).
+
+        Utile pour les requêtes et filtres.
+
+        Returns:
+            list[int]: Liste des IDs de sites
+        """
+        ids = []
+
+        if self.site_principal_id:
+            ids.append(self.site_principal_id)
+        elif self.site_id:  # Fallback legacy
+            ids.append(self.site_id)
+
+        ids.extend(self.sites_secondaires.values_list('id', flat=True))
+
+        return ids
 
     @property
     def statut_operationnel(self):
@@ -807,6 +883,227 @@ class CompetenceOperateur(models.Model):
 
     def __str__(self):
         return f"{self.operateur} - {self.competence}: {self.get_niveau_display()}"
+
+
+# ==============================================================================
+# MODELE HORAIRE DE TRAVAIL (PHASE 2)
+# ==============================================================================
+
+class HoraireTravail(models.Model):
+    """
+    ✅ PHASE 2: Définit les horaires de travail par équipe et jour de la semaine.
+
+    Permet de :
+    - Configurer les horaires réels (8h-17h, 8h-12h le vendredi, etc.)
+    - Calculer automatiquement les heures travaillables par jour
+    - Planifier les récurrences selon les vrais horaires (pas 10h hardcodé)
+    - Respecter les demi-journées et horaires spéciaux
+
+    Exemple:
+    - Équipe A, Lundi: 08:00-17:00 (9h avec pause déjeuner)
+    - Équipe A, Vendredi: 08:00-12:00 (4h - demi-journée)
+    """
+
+    JOURS_SEMAINE = [
+        ('LUN', 'Lundi'),
+        ('MAR', 'Mardi'),
+        ('MER', 'Mercredi'),
+        ('JEU', 'Jeudi'),
+        ('VEN', 'Vendredi'),
+        ('SAM', 'Samedi'),
+        ('DIM', 'Dimanche'),
+    ]
+
+    equipe = models.ForeignKey(
+        Equipe,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='horaires',
+        verbose_name="Équipe",
+        help_text="Laisser vide pour une configuration globale (par défaut)"
+    )
+
+    jour_semaine = models.CharField(
+        max_length=3,
+        choices=JOURS_SEMAINE,
+        verbose_name="Jour de la semaine"
+    )
+
+    heure_debut = models.TimeField(
+        verbose_name="Heure de début",
+        help_text="Exemple: 08:00"
+    )
+
+    heure_fin = models.TimeField(
+        verbose_name="Heure de fin",
+        help_text="Exemple: 17:00"
+    )
+
+    duree_pause_minutes = models.PositiveIntegerField(
+        default=60,
+        verbose_name="Pause déjeuner (minutes)",
+        help_text="Durée de la pause déjeuner (par défaut 60 min)"
+    )
+
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif",
+        help_text="Horaire actif (décocher pour jours fériés exceptionnels)"
+    )
+
+    class Meta:
+        verbose_name = "Horaire de travail"
+        verbose_name_plural = "Horaires de travail"
+        # Note: unique_together avec equipe nullable géré par validation custom si nécessaire
+        ordering = ['equipe', 'jour_semaine']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['equipe', 'jour_semaine'],
+                name='unique_equipe_jour',
+                condition=models.Q(equipe__isnull=False)
+            ),
+            models.UniqueConstraint(
+                fields=['jour_semaine'],
+                name='unique_global_jour',
+                condition=models.Q(equipe__isnull=True)
+            ),
+        ]
+
+    @property
+    def heures_travaillables(self):
+        """
+        Calcule le nombre d'heures travaillables dans la journée.
+
+        Returns:
+            float: Nombre d'heures (ex: 9.0 pour 8h-17h avec 1h pause)
+        """
+        from datetime import datetime, timedelta
+
+        # Convertir les heures en datetime pour calcul
+        debut = datetime.combine(datetime.today(), self.heure_debut)
+        fin = datetime.combine(datetime.today(), self.heure_fin)
+
+        # Calculer la durée totale
+        duree_totale = (fin - debut).total_seconds() / 3600  # Heures
+
+        # Soustraire la pause
+        duree_pause_heures = self.duree_pause_minutes / 60
+
+        return max(0, duree_totale - duree_pause_heures)
+
+    def __str__(self):
+        return f"{self.equipe.nom_equipe} - {self.get_jour_semaine_display()}: {self.heure_debut.strftime('%H:%M')}-{self.heure_fin.strftime('%H:%M')} ({self.heures_travaillables}h)"
+
+
+# ==============================================================================
+# MODELE JOUR FERIE (PHASE 3)
+# ==============================================================================
+
+class JourFerie(models.Model):
+    """
+    ✅ PHASE 3: Gère les jours fériés nationaux et locaux.
+
+    Utilisé pour :
+    - Skipping de jours lors de la génération de récurrence
+    - Affichage dans le calendrier de planification
+    - Validation de disponibilité des équipes
+    """
+    TYPE_FERIE_CHOICES = [
+        ('NATIONAL', 'Férié national'),
+        ('LOCAL', 'Férié local'),
+        ('RELIGIEUX', 'Férié religieux'),
+        ('AUTRE', 'Autre'),
+    ]
+
+    nom = models.CharField(
+        max_length=100,
+        verbose_name="Nom du jour férié"
+    )
+    date = models.DateField(
+        verbose_name="Date",
+        db_index=True  # Index pour requêtes rapides sur plages de dates
+    )
+    type_ferie = models.CharField(
+        max_length=20,
+        choices=TYPE_FERIE_CHOICES,
+        default='NATIONAL',
+        verbose_name="Type de férié"
+    )
+    recurrent = models.BooleanField(
+        default=False,
+        verbose_name="Récurrent annuellement",
+        help_text="Si coché, ce jour férié se répète chaque année (ex: Fête du Travail)"
+    )
+    description = models.TextField(
+        blank=True,
+        verbose_name="Description"
+    )
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif",
+        help_text="Décocher pour désactiver temporairement un jour férié"
+    )
+
+    class Meta:
+        db_table = 'api_users_jour_ferie'
+        verbose_name = "Jour férié"
+        verbose_name_plural = "Jours fériés"
+        ordering = ['date']
+        # Contrainte unicité sur (date, type_ferie) pour éviter doublons
+        unique_together = [['date', 'type_ferie']]
+        indexes = [
+            models.Index(fields=['date', 'actif']),  # Index composite pour filtrage rapide
+        ]
+
+    def __str__(self):
+        return f"{self.nom} ({self.date.strftime('%d/%m/%Y')})"
+
+    @classmethod
+    def est_jour_ferie(cls, date, actif_uniquement=True):
+        """
+        Vérifie si une date donnée est un jour férié.
+
+        Args:
+            date: datetime.date ou datetime.datetime
+            actif_uniquement: Si True, ne considère que les jours fériés actifs
+
+        Returns:
+            bool: True si jour férié, False sinon
+        """
+        from datetime import datetime
+
+        # Convertir en date si datetime
+        if isinstance(date, datetime):
+            date = date.date()
+
+        queryset = cls.objects.filter(date=date)
+        if actif_uniquement:
+            queryset = queryset.filter(actif=True)
+
+        return queryset.exists()
+
+    @classmethod
+    def get_jours_feries_dans_plage(cls, date_debut, date_fin, actif_uniquement=True):
+        """
+        Retourne tous les jours fériés dans une plage de dates.
+
+        Args:
+            date_debut: datetime.date
+            date_fin: datetime.date
+            actif_uniquement: Si True, ne retourne que les jours fériés actifs
+
+        Returns:
+            QuerySet[JourFerie]: Jours fériés dans la plage
+        """
+        queryset = cls.objects.filter(
+            date__gte=date_debut,
+            date__lte=date_fin
+        )
+        if actif_uniquement:
+            queryset = queryset.filter(actif=True)
+
+        return queryset.order_by('date')
 
 
 # ==============================================================================

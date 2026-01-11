@@ -242,8 +242,8 @@ class EquipeFilter(django_filters.FilterSet):
     # Filtres simples
     actif = django_filters.BooleanFilter()
 
-    # Filtre par site
-    site = django_filters.NumberFilter(field_name='site_id')
+    # Filtre par site (principal OU secondaire)
+    site = django_filters.NumberFilter(method='filter_by_site')
 
     # Filtre par chef
     chef_equipe = django_filters.NumberFilter(field_name='chef_equipe_id')
@@ -277,6 +277,14 @@ class EquipeFilter(django_filters.FilterSet):
                 Q(site__superviseur__utilisateur__nom__icontains=value) |
                 Q(site__superviseur__utilisateur__prenom__icontains=value)
             )
+        return queryset
+
+    def filter_by_site(self, queryset, name, value):
+        """Filtre les équipes affectées à un site (principal OU secondaire)."""
+        if value:
+            return queryset.filter(
+                Q(site_principal_id=value) | Q(sites_secondaires__id=value)
+            ).distinct()
         return queryset
 
     def filter_statut_operationnel(self, queryset, name, value):
