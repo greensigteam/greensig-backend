@@ -2,16 +2,33 @@ from django.db import models
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from .models import Tache, TypeTache, ParticipationTache, RatioProductivite
+from .models import Tache, TypeTache, ParticipationTache, RatioProductivite, DistributionCharge
 from .serializers import (
     TacheSerializer, TacheCreateUpdateSerializer,
     TypeTacheSerializer, ParticipationTacheSerializer,
-    RatioProductiviteSerializer
+    RatioProductiviteSerializer, DistributionChargeSerializer
 )
 from .services import RecurrenceService, WorkloadCalculationService
 from django.utils import timezone
+from rest_framework.pagination import PageNumberPagination
 from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
 from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur
+
+
+# ==============================================================================
+# PAGINATION PERSONNALISÉE
+# ==============================================================================
+
+class SmallPageNumberPagination(PageNumberPagination):
+    """Pagination avec 20 items par page pour les ressources système."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+# ==============================================================================
+# VIEWSETS
+# ==============================================================================
 
 class TypeTacheViewSet(viewsets.ModelViewSet):
     """
@@ -20,10 +37,13 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
     Permissions:
     - ADMIN: CRUD complet
     - SUPERVISEUR, CLIENT: Lecture seule
+
+    Pagination: 20 items par page.
     """
     queryset = TypeTache.objects.all()
     serializer_class = TypeTacheSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]
+    pagination_class = SmallPageNumberPagination
 
     @action(detail=False, methods=['get'])
     def applicables(self, request):
@@ -489,12 +509,16 @@ class RatioProductiviteViewSet(viewsets.ModelViewSet):
     Permissions:
     - ADMIN: CRUD complet
     - SUPERVISEUR, CLIENT: Lecture seule
+
+    Pagination: 20 items par page.
     """
     queryset = RatioProductivite.objects.select_related('id_type_tache').all()
     serializer_class = RatioProductiviteSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]
+    pagination_class = SmallPageNumberPagination
 
     def get_queryset(self):
+        from django.db.models import Q
         qs = super().get_queryset()
 
         # Filtrer par type de tâche
@@ -512,4 +536,83 @@ class RatioProductiviteViewSet(viewsets.ModelViewSet):
         if actif is not None:
             qs = qs.filter(actif=actif.lower() == 'true')
 
+        # Recherche textuelle (type de tâche, type d'objet, description)
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(id_type_tache__nom_tache__icontains=search) |
+                Q(type_objet__icontains=search) |
+                Q(description__icontains=search)
+            )
+
         return qs
+
+
+# ==============================================================================
+# DISTRIBUTION DE CHARGE (TÂCHES MULTI-JOURS)
+# ==============================================================================
+
+class DistributionChargeViewSet(viewsets.ModelViewSet):
+    """
+    ✅ API endpoint pour gérer les distributions de charge journalières.
+
+    Permet de définir précisément la charge planifiée par jour pour des tâches
+    s'étendant sur plusieurs jours.
+
+    Permissions:
+    - ADMIN: CRUD complet
+    - SUPERVISEUR: CRUD pour les tâches de ses équipes
+    - CLIENT: Lecture seule
+
+    Filtres disponibles:
+    - ?tache={id} : Distributions pour une tâche spécifique
+    - ?date={YYYY-MM-DD} : Distributions pour une date spécifique
+    - ?date_debut={YYYY-MM-DD}&date_fin={YYYY-MM-DD} : Distributions dans une période
+
+    Exemples:
+    - GET /api/planification/distributions/?tache=123
+    - GET /api/planification/distributions/?date=2024-01-15
+    - GET /api/planification/distributions/?date_debut=2024-01-15&date_fin=2024-01-20
+    """
+    queryset = DistributionCharge.objects.select_related('tache').all()
+    serializer_class = DistributionChargeSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+
+        # Filtrer par tâche
+        tache_id = self.request.query_params.get('tache')
+        if tache_id:
+            qs = qs.filter(tache_id=tache_id)
+
+        # Filtrer par date exacte
+        date = self.request.query_params.get('date')
+        if date:
+            qs = qs.filter(date=date)
+
+        # Filtrer par période
+        date_debut = self.request.query_params.get('date_debut')
+        date_fin = self.request.query_params.get('date_fin')
+        if date_debut:
+            qs = qs.filter(date__gte=date_debut)
+        if date_fin:
+            qs = qs.filter(date__lte=date_fin)
+
+        return qs.order_by('date')
+
+    def get_permissions(self):
+        """
+        Permissions adaptées par action:
+        - ADMIN: Tout
+        - SUPERVISEUR: CRUD pour ses équipes
+        - CLIENT: Lecture seule
+        """
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            # Écriture: ADMIN ou SUPERVISEUR
+            permission_classes = [permissions.IsAuthenticated, IsAdmin | IsSuperviseur]
+        else:
+            # Lecture: Tous authentifiés
+            permission_classes = [permissions.IsAuthenticated]
+
+        return [permission() for permission in permission_classes]

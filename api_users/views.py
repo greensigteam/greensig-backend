@@ -1125,7 +1125,11 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
     # Les relations supplémentaires sont chargées uniquement pour retrieve()
     queryset = Equipe.objects.select_related(
         'chef_equipe',
-        'site'  # Simplifié: juste le site, pas la chaîne complète
+        'site_principal'  # ✅ Multi-site architecture: site principal
+    ).prefetch_related(
+        'sites_secondaires'  # ✅ Multi-site architecture: sites secondaires
+    ).annotate(
+        nombre_membres_count=Count('operateurs', filter=Q(operateurs__statut='ACTIF'))
     ).all()
     filterset_class = EquipeFilter
 
@@ -1451,6 +1455,118 @@ class HoraireTravailViewSet(viewsets.ModelViewSet):
         return Response({
             'message': f'{len(horaires_crees)} horaires créés avec succès.',
             'horaires': serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAdmin])
+    def creer_semaine_globale(self, request):
+        """
+        ✅ NOUVEAU: Crée les horaires pour toutes les équipes actives en une seule fois.
+
+        Permet de configurer rapidement toutes les équipes avec les mêmes horaires,
+        avec possibilité d'exclure certaines équipes.
+
+        Body:
+        {
+            "lundi_vendredi": {
+                "heure_debut": "08:00",
+                "heure_fin": "17:00",
+                "duree_pause_minutes": 60
+            },
+            "samedi": {
+                "heure_debut": "08:00",
+                "heure_fin": "12:00",
+                "duree_pause_minutes": 0
+            },
+            "dimanche": null,
+            "equipes_exclues": [1, 5, 12]  // IDs des équipes à ne pas configurer (optionnel)
+        }
+
+        Returns:
+        {
+            "message": "Horaires créés pour 25 équipes sur 28 actives.",
+            "equipes_configurees": 25,
+            "equipes_actives": 28,
+            "equipes_exclues": 3,
+            "details": [...]
+        }
+        """
+        lundi_vendredi = request.data.get('lundi_vendredi')
+        samedi = request.data.get('samedi')
+        dimanche = request.data.get('dimanche')
+        equipes_exclues = request.data.get('equipes_exclues', [])
+
+        if not lundi_vendredi:
+            return Response(
+                {'error': 'Le champ "lundi_vendredi" est requis.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupérer toutes les équipes actives
+        equipes = Equipe.objects.filter(actif=True)
+        if equipes_exclues:
+            equipes = equipes.exclude(id__in=equipes_exclues)
+
+        equipes_count = equipes.count()
+        equipes_actives_total = Equipe.objects.filter(actif=True).count()
+
+        if equipes_count == 0:
+            return Response(
+                {'error': 'Aucune équipe à configurer après exclusions.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        jours_mapping = {
+            'LUN': lundi_vendredi,
+            'MAR': lundi_vendredi,
+            'MER': lundi_vendredi,
+            'JEU': lundi_vendredi,
+            'VEN': lundi_vendredi,
+            'SAM': samedi,
+            'DIM': dimanche,
+        }
+
+        total_horaires_crees = 0
+        details_equipes = []
+
+        for equipe in equipes:
+            horaires_equipe = []
+
+            for jour, config in jours_mapping.items():
+                if config is None:
+                    continue
+
+                # Supprimer l'ancien horaire actif si existe
+                HoraireTravail.objects.filter(
+                    equipe=equipe,
+                    jour_semaine=jour,
+                    actif=True
+                ).delete()
+
+                # Créer le nouvel horaire
+                horaire = HoraireTravail.objects.create(
+                    equipe=equipe,
+                    jour_semaine=jour,
+                    heure_debut=config['heure_debut'],
+                    heure_fin=config['heure_fin'],
+                    duree_pause_minutes=config.get('duree_pause_minutes', 60),
+                    actif=True
+                )
+                horaires_equipe.append(horaire)
+
+            total_horaires_crees += len(horaires_equipe)
+            details_equipes.append({
+                'equipe_id': equipe.id,
+                'equipe_nom': equipe.nom_equipe,
+                'horaires_crees': len(horaires_equipe)
+            })
+
+        return Response({
+            'message': f'Horaires créés pour {equipes_count} équipe(s) sur {equipes_actives_total} active(s).',
+            'equipes_configurees': equipes_count,
+            'equipes_actives': equipes_actives_total,
+            'equipes_exclues': len(equipes_exclues),
+            'total_horaires_crees': total_horaires_crees,
+            'details': details_equipes
         }, status=status.HTTP_201_CREATED)
 
 

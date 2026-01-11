@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TypeTache, Tache, ParticipationTache, RatioProductivite
+from .models import TypeTache, Tache, ParticipationTache, RatioProductivite, DistributionCharge
 from api_users.models import Equipe, Client, StructureClient
 from api.models import Objet
 
@@ -142,6 +142,45 @@ class EquipeLightSerializer(serializers.ModelSerializer):
         return obj.nombre_membres
 
 
+# ==============================================================================
+# DISTRIBUTION DE CHARGE (TÂCHES MULTI-JOURS)
+# ==============================================================================
+
+class DistributionChargeSerializer(serializers.ModelSerializer):
+    """
+    ✅ Serializer pour les distributions de charge journalières.
+
+    Permet de définir précisément la charge planifiée par jour
+    pour des tâches s'étendant sur plusieurs jours.
+    """
+
+    class Meta:
+        model = DistributionCharge
+        fields = [
+            'id', 'tache', 'date',
+            'heures_planifiees', 'heures_reelles',
+            'commentaire', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        """Validation de la distribution"""
+        # Vérifier que la date est dans la période de la tâche
+        tache = data.get('tache')
+        date = data.get('date')
+
+        if tache and date:
+            date_debut = tache.date_debut_planifiee.date()
+            date_fin = tache.date_fin_planifiee.date()
+
+            if date < date_debut or date > date_fin:
+                raise serializers.ValidationError({
+                    'date': f"La date doit être entre {date_debut} et {date_fin}"
+                })
+
+        return data
+
+
 class TacheSerializer(serializers.ModelSerializer):
     """Serializer COMPLET pour GET (lecture)
 
@@ -164,6 +203,11 @@ class TacheSerializer(serializers.ModelSerializer):
 
     reclamation_numero = serializers.CharField(source='reclamation.numero_reclamation', read_only=True, allow_null=True)
 
+    # ✅ NOUVEAU: Distributions de charge pour tâches multi-jours
+    distributions_charge = DistributionChargeSerializer(many=True, read_only=True)
+    charge_totale_distributions = serializers.FloatField(read_only=True)
+    nombre_jours_travail = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Tache
         fields = '__all__'
@@ -179,6 +223,14 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         write_only=True
     )
 
+    # ✅ NOUVEAU: Distributions de charge (write-only pour création/update)
+    distributions_charge_data = serializers.ListField(
+        child=serializers.DictField(),
+        write_only=True,
+        required=False,
+        help_text="Liste des distributions: [{'date': '2024-01-15', 'heures_planifiees': 2.0}, ...]"
+    )
+
     class Meta:
         model = Tache
         fields = '__all__'
@@ -188,21 +240,11 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         start = data.get('date_debut_planifiee')
         end = data.get('date_fin_planifiee')
 
-        # Validation uniquement si les deux dates sont présentes (cas création ou update complet)
+        # ✅ CHANGEMENT: Contrainte "même jour" retirée pour permettre tâches multi-jours
+        # La distribution de charge par jour est gérée via le modèle DistributionCharge
         if start and end:
             if end < start:
                 raise serializers.ValidationError({"date_fin_planifiee": "La date de fin ne peut pas être antérieure à la date de début."})
-
-            # RÈGLE D'OR: Une tâche doit avoir lieu sur le MÊME jour calendaire
-            # Pour éviter la confusion entre "Chantier" (macro) et "Intervention" (micro)
-            if start.date() != end.date():
-                raise serializers.ValidationError({
-                    "date_fin_planifiee":
-                        "Une tâche doit obligatoirement avoir lieu sur le même jour calendaire. "
-                        f"Début: {start.date().strftime('%d/%m/%Y')}, "
-                        f"Fin: {end.date().strftime('%d/%m/%Y')}. "
-                        "Pour planifier sur plusieurs jours, créez plusieurs tâches ou utilisez la récurrence."
-                })
 
         # Si une charge est fournie manuellement, activer le flag charge_manuelle
         if 'charge_estimee_heures' in data and data['charge_estimee_heures'] is not None:
@@ -262,6 +304,9 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         equipes = validated_data.pop('equipes', None)
         objets = validated_data.pop('objets', None)
 
+        # ✅ NOUVEAU: Extract distributions de charge
+        distributions_data = validated_data.pop('distributions_charge_data', None)
+
         # AUTO-ASSIGN CLIENT & STRUCTURE: Si non fournis, les déduire des objets
         if objets:
             for obj in objets:
@@ -286,6 +331,16 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         if objets is not None:
             instance.objets.set(objets)
 
+        # ✅ NOUVEAU: Créer les distributions de charge
+        if distributions_data:
+            for dist_data in distributions_data:
+                DistributionCharge.objects.create(
+                    tache=instance,
+                    date=dist_data['date'],
+                    heures_planifiees=dist_data['heures_planifiees'],
+                    commentaire=dist_data.get('commentaire', '')
+                )
+
         return instance
 
     def update(self, instance, validated_data):
@@ -302,6 +357,9 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         # Extract M2M fields
         equipes = validated_data.pop('equipes', None)
         objets = validated_data.pop('objets', None)
+
+        # ✅ NOUVEAU: Extract distributions de charge
+        distributions_data = validated_data.pop('distributions_charge_data', None)
 
         print(f"[PERF] Extracted M2M - equipes: {len(equipes) if equipes else 0}, objets: {len(objets) if objets else 0}")
 
@@ -325,5 +383,57 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         else:
             print(f"[PERF] SKIPPED objets.set() for {len(objets) if objets else 0} objects")
 
+        # ✅ NOUVEAU: Mettre à jour les distributions de charge
+        if distributions_data is not None:
+            # Supprimer les anciennes distributions
+            instance.distributions_charge.all().delete()
+            # Créer les nouvelles
+            for dist_data in distributions_data:
+                DistributionCharge.objects.create(
+                    tache=instance,
+                    date=dist_data['date'],
+                    heures_planifiees=dist_data['heures_planifiees'],
+                    commentaire=dist_data.get('commentaire', '')
+                )
+
         print(f"[PERF] UPDATE TOTAL took {time.time() - start_total:.2f}s")
         return instance
+
+
+# ==============================================================================
+# DISTRIBUTION DE CHARGE (TÂCHES MULTI-JOURS)
+# ==============================================================================
+
+class DistributionChargeSerializer(serializers.ModelSerializer):
+    """
+    ✅ Serializer pour les distributions de charge journalières.
+
+    Permet de définir précisément la charge planifiée par jour
+    pour des tâches s'étendant sur plusieurs jours.
+    """
+
+    class Meta:
+        model = DistributionCharge
+        fields = [
+            'id', 'tache', 'date',
+            'heures_planifiees', 'heures_reelles',
+            'commentaire', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        """Validation de la distribution"""
+        # Vérifier que la date est dans la période de la tâche
+        tache = data.get('tache')
+        date = data.get('date')
+
+        if tache and date:
+            date_debut = tache.date_debut_planifiee.date()
+            date_fin = tache.date_fin_planifiee.date()
+
+            if date < date_debut or date > date_fin:
+                raise serializers.ValidationError({
+                    'date': f"La date doit être entre {date_debut} et {date_fin}"
+                })
+
+        return data

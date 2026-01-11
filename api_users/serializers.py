@@ -668,27 +668,30 @@ class EquipeListSerializer(serializers.ModelSerializer):
         allow_null=True
     )
 
-    # Champs simples (pas de calculs, pas de méthodes)
-    site_nom = serializers.CharField(
-        source='site.nom_site',
+    # ✅ Multi-site architecture: site principal
+    site_principal_nom = serializers.CharField(
+        source='site_principal.nom_site',
         read_only=True,
         allow_null=True
     )
 
     # ⚠️ DÉSACTIVÉ: Ces champs font des requêtes N+1 (réactivés dans DetailSerializer)
-    # nombre_membres = serializers.IntegerField(read_only=True)  # Property avec query
     # statut_operationnel = serializers.CharField(read_only=True)  # Property avec query
     # superviseur_nom = ...  # SerializerMethodField avec query
     # sites_secondaires_noms = ...  # .all() sur chaque équipe
     # tous_les_sites = ...  # Property avec queries
+
+    # ✅ RÉACTIVÉ avec annotation pour éviter N+1 queries
+    nombre_membres = serializers.IntegerField(source='nombre_membres_count', read_only=True, default=0)
 
     class Meta:
         model = Equipe
         fields = [
             'id', 'nom_equipe',
             'chef_equipe', 'chef_equipe_nom',
-            'site', 'site_nom',
+            'site_principal', 'site_principal_nom',  # ✅ Multi-site architecture
             'actif', 'date_creation',
+            'nombre_membres',  # ✅ Ajouté (utilisé annotation pour perf)
             # Champs désactivés pour performance, voir EquipeDetailSerializer
         ]
 
@@ -994,20 +997,22 @@ class AffecterMembresSerializer(serializers.Serializer):
 
 class HoraireTravailSerializer(serializers.ModelSerializer):
     """
-    Serializer pour les horaires de travail d'une équipe.
+    Serializer pour les horaires de travail.
 
-    ✅ PHASE 2: Permet de définir les horaires de travail par équipe et jour de la semaine.
-    Utilisé pour calculer la charge de travail réelle dans la génération de récurrence.
+    ✅ PHASE 2: Permet de définir les horaires de travail globaux ou par équipe.
+    - equipe = null : Configuration globale (par défaut pour toutes les équipes)
+    - equipe = ID : Configuration spécifique à une équipe
     """
-    equipe_nom = serializers.CharField(
-        source='equipe.nom_equipe',
-        read_only=True
-    )
+    equipe_nom = serializers.SerializerMethodField()
     jour_semaine_display = serializers.CharField(
         source='get_jour_semaine_display',
         read_only=True
     )
     heures_travaillables = serializers.FloatField(read_only=True)
+
+    def get_equipe_nom(self, obj):
+        """Retourne le nom de l'équipe ou 'Configuration Globale' si equipe est null."""
+        return obj.equipe.nom_equipe if obj.equipe else "Configuration Globale"
 
     class Meta:
         model = HoraireTravail

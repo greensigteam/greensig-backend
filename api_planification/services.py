@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 from dateutil.rrule import rrule, DAILY, WEEKLY, MONTHLY, MO, TU, WE, TH, FR, SA, SU
 from django.db import transaction
 from django.db.models import QuerySet
-from .models import Tache, RatioProductivite
+from .models import Tache, RatioProductivite, DistributionCharge
 from api_users.models import HoraireTravail, JourFerie, Absence, StatutAbsence
 
 logger = logging.getLogger(__name__)
@@ -65,12 +65,17 @@ class RecurrenceService:
             )
             return horaire.heures_travaillables
         except HoraireTravail.DoesNotExist:
-            # Pas d'horaire défini, retourner défaut 8h
-            logger.warning(
-                f"Pas d'horaire défini pour équipe {equipe.id} le {jour_code}. "
-                f"Utilisation de 8h par défaut."
-            )
-            return 8.0
+            # Pas d'horaire défini, utiliser des valeurs par défaut intelligentes
+            # Samedi : 4h (08:00-12:00), Dimanche : 0h, Autres jours : 8h
+            if jour_code == 'SAM':
+                logger.debug(f"Pas d'horaire pour équipe {equipe.id} le samedi. Défaut: 4h (08:00-12:00)")
+                return 4.0
+            elif jour_code == 'DIM':
+                logger.debug(f"Pas d'horaire pour équipe {equipe.id} le dimanche. Défaut: 0h (repos)")
+                return 0.0
+            else:
+                logger.debug(f"Pas d'horaire pour équipe {equipe.id} le {jour_code}. Défaut: 8h")
+                return 8.0
         except HoraireTravail.MultipleObjectsReturned:
             # Plusieurs horaires actifs (ne devrait pas arriver avec validation)
             logger.error(
@@ -87,19 +92,21 @@ class RecurrenceService:
     @staticmethod
     def _est_weekend(date):
         """
-        ✅ PHASE 3: Vérifie si une date tombe un weekend (samedi ou dimanche).
+        ✅ PHASE 3: Vérifie si une date tombe un weekend (dimanche uniquement).
+
+        Note: Le samedi est considéré comme jour travaillé (demi-journée jusqu'à midi).
 
         Args:
             date: datetime.date ou datetime.datetime
 
         Returns:
-            bool: True si weekend, False sinon
+            bool: True si dimanche, False sinon
         """
         if isinstance(date, datetime.datetime):
             date = date.date()
 
-        # 5 = samedi, 6 = dimanche
-        return date.weekday() in [5, 6]
+        # 6 = dimanche (samedi retiré car travaillé jusqu'à midi)
+        return date.weekday() == 6
 
     @staticmethod
     def _est_jour_ferie(date):
@@ -591,9 +598,94 @@ class WorkloadCalculationService:
         return length_deg * 111000 * cos_lat
 
     @classmethod
+    def create_default_distributions(cls, tache: Tache, charge_totale: float) -> int:
+        """
+        ✅ NOUVEAU: Crée des distributions de charge par défaut pour une tâche multi-jours.
+
+        Distribue la charge totale uniformément sur les jours travaillables dans la période de la tâche.
+
+        Args:
+            tache: Instance de Tache
+            charge_totale: Charge totale en heures à distribuer
+
+        Returns:
+            int: Nombre de distributions créées
+        """
+        if not tache.date_debut_planifiee or not tache.date_fin_planifiee:
+            logger.warning(f"Tache {tache.id}: dates manquantes, distributions non créées")
+            return 0
+
+        if charge_totale <= 0:
+            logger.info(f"Tache {tache.id}: charge nulle, distributions non créées")
+            return 0
+
+        # Convertir en dates
+        date_debut = tache.date_debut_planifiee.date()
+        date_fin = tache.date_fin_planifiee.date()
+
+        # Récupérer l'équipe pour vérifier jours travaillables
+        equipe = tache.id_equipe
+        if not equipe and hasattr(tache, 'equipes') and tache.equipes.exists():
+            equipe = tache.equipes.first()
+
+        # Lister tous les jours travaillables dans la période
+        jours_travaillables = []
+        current_date = date_debut
+
+        while current_date <= date_fin:
+            # Vérifier si jour travaillable
+            if RecurrenceService._est_jour_travaillable(
+                equipe=equipe,
+                date=current_date,
+                skip_weekends=True,
+                skip_holidays=True,
+                check_availability=False  # Pas de check disponibilité pour distribution par défaut
+            ):
+                heures_jour = RecurrenceService._get_work_hours_for_day(equipe, current_date)
+                if heures_jour > 0:
+                    jours_travaillables.append(current_date)
+
+            current_date += datetime.timedelta(days=1)
+
+        if not jours_travaillables:
+            logger.warning(f"Tache {tache.id}: aucun jour travaillable trouvé dans la période")
+            return 0
+
+        # Distribuer uniformément la charge
+        nombre_jours = len(jours_travaillables)
+        heures_par_jour = charge_totale / nombre_jours
+
+        # Supprimer anciennes distributions si elles existent
+        tache.distributions_charge.all().delete()
+
+        # Créer les distributions
+        distributions_to_create = []
+        for jour in jours_travaillables:
+            distributions_to_create.append(
+                DistributionCharge(
+                    tache=tache,
+                    date=jour,
+                    heures_planifiees=round(heures_par_jour, 2),
+                    commentaire="Distribution automatique basée sur objets GIS"
+                )
+            )
+
+        # Bulk create
+        DistributionCharge.objects.bulk_create(distributions_to_create)
+
+        logger.info(
+            f"✅ Tache {tache.id}: {len(distributions_to_create)} distributions créées "
+            f"({heures_par_jour:.2f}h/jour × {nombre_jours} jours = {charge_totale}h total)"
+        )
+
+        return len(distributions_to_create)
+
+    @classmethod
     def recalculate_and_save(cls, tache: Tache, force: bool = False) -> Tuple[Optional[float], bool]:
         """
         Calcule et sauvegarde la charge estimée pour une tâche.
+
+        ✅ MODIFIÉ: Crée aussi des distributions de charge par défaut si la tâche a des objets GIS.
 
         Args:
             tache: Instance de Tache
@@ -608,10 +700,16 @@ class WorkloadCalculationService:
             return tache.charge_estimee_heures, True
 
         try:
+            # Calculer la charge totale
             charge = cls.calculate_workload(tache)
             tache.charge_estimee_heures = charge
             tache.save(update_fields=['charge_estimee_heures'])
             logger.info(f"Tache {tache.id}: charge estimée = {charge}h")
+
+            # ✅ NOUVEAU: Créer distributions par défaut si objets GIS
+            if charge and charge > 0 and tache.objets.exists():
+                cls.create_default_distributions(tache, charge)
+
             return charge, True
         except Exception as e:
             logger.error(f"Erreur calcul charge tâche {tache.id}: {e}")

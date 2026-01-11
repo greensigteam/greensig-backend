@@ -161,26 +161,136 @@ class Tache(models.Model):
         """Validation métier de la tâche"""
         super().clean()
 
-        # RÈGLE D'OR: Une tâche doit avoir lieu sur le MÊME jour calendaire
+        # ✅ CHANGEMENT: Contrainte "même jour" retirée pour permettre tâches multi-jours
+        # Désormais une tâche peut s'étendre sur plusieurs jours avec distribution de charge par jour
+        # via le modèle DistributionCharge
         if self.date_debut_planifiee and self.date_fin_planifiee:
-            if self.date_debut_planifiee.date() != self.date_fin_planifiee.date():
-                raise ValidationError({
-                    'date_fin_planifiee':
-                        f"Une tâche doit obligatoirement avoir lieu sur le même jour calendaire. "
-                        f"Début: {self.date_debut_planifiee.date().strftime('%d/%m/%Y')}, "
-                        f"Fin: {self.date_fin_planifiee.date().strftime('%d/%m/%Y')}. "
-                        f"Pour planifier sur plusieurs jours, créez plusieurs tâches ou utilisez la récurrence."
-                })
-
             if self.date_fin_planifiee < self.date_debut_planifiee:
                 raise ValidationError({
                     'date_fin_planifiee': "La date de fin ne peut pas être antérieure à la date de début."
                 })
 
+    @property
+    def charge_totale_distributions(self):
+        """
+        ✅ Calcule la charge totale depuis les distributions journalières.
+
+        Returns:
+            float: Somme des heures planifiées de toutes les distributions
+        """
+        return self.distributions_charge.aggregate(
+            total=models.Sum('heures_planifiees')
+        )['total'] or 0.0
+
+    @property
+    def nombre_jours_travail(self):
+        """
+        Calcule le nombre de jours travaillés (avec distribution > 0).
+
+        Returns:
+            int: Nombre de jours avec des heures planifiées
+        """
+        return self.distributions_charge.filter(heures_planifiees__gt=0).count()
+
     def delete(self, using=None, keep_parents=False):
         """Soft delete implementation"""
         self.deleted_at = timezone.now()
         self.save()
+
+
+class DistributionCharge(models.Model):
+    """
+    ✅ Distribution journalière de la charge pour tâches multi-jours.
+
+    Permet de planifier précisément combien d'heures sont allouées chaque jour
+    pour une tâche qui s'étend sur plusieurs jours.
+
+    Exemple:
+        Tâche "Élagage Parc" du 15/01 au 17/01, charge totale 6h:
+        - 15/01 (Lun): 2.0h planifiées
+        - 16/01 (Mar): 3.0h planifiées
+        - 17/01 (Mer): 1.0h planifiées
+
+    Avantages:
+    - Planification précise par jour
+    - Calcul correct de la disponibilité des équipes
+    - Analyses statistiques justes (1 tâche = 1 entrée, pas N occurrences)
+    - Suivi de l'avancement jour par jour
+    """
+
+    tache = models.ForeignKey(
+        Tache,
+        on_delete=models.CASCADE,
+        related_name='distributions_charge',
+        verbose_name="Tâche"
+    )
+
+    date = models.DateField(
+        verbose_name="Date",
+        help_text="Jour de travail"
+    )
+
+    heures_planifiees = models.FloatField(
+        verbose_name="Heures planifiées",
+        help_text="Nombre d'heures prévues ce jour"
+    )
+
+    heures_reelles = models.FloatField(
+        null=True,
+        blank=True,
+        verbose_name="Heures réelles",
+        help_text="Heures réellement travaillées (rempli après exécution)"
+    )
+
+    commentaire = models.TextField(
+        blank=True,
+        verbose_name="Commentaire",
+        help_text="Notes pour ce jour (équipe réduite, météo, etc.)"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Distribution de charge"
+        verbose_name_plural = "Distributions de charge"
+        unique_together = ['tache', 'date']
+        ordering = ['date']
+        indexes = [
+            models.Index(fields=['tache', 'date']),
+        ]
+
+    def __str__(self):
+        return f"{self.tache.id} - {self.date}: {self.heures_planifiees}h"
+
+    def clean(self):
+        """Validation métier"""
+        super().clean()
+
+        # Vérifier que la date est dans la période de la tâche
+        if self.tache_id and self.date:
+            tache = self.tache
+            if tache.date_debut_planifiee and tache.date_fin_planifiee:
+                date_debut = tache.date_debut_planifiee.date()
+                date_fin = tache.date_fin_planifiee.date()
+
+                if self.date < date_debut or self.date > date_fin:
+                    raise ValidationError({
+                        'date': f"Date {self.date.strftime('%d/%m/%Y')} hors période "
+                                f"({date_debut.strftime('%d/%m/%Y')} - {date_fin.strftime('%d/%m/%Y')})"
+                    })
+
+        # Vérifier que les heures sont positives
+        if self.heures_planifiees is not None and self.heures_planifiees < 0:
+            raise ValidationError({
+                'heures_planifiees': "Les heures planifiées doivent être positives"
+            })
+
+        if self.heures_reelles is not None and self.heures_reelles < 0:
+            raise ValidationError({
+                'heures_reelles': "Les heures réelles doivent être positives"
+            })
+
 
 class RatioProductivite(models.Model):
     """

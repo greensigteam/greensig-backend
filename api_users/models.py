@@ -917,8 +917,11 @@ class HoraireTravail(models.Model):
     equipe = models.ForeignKey(
         Equipe,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='horaires',
-        verbose_name="Équipe"
+        verbose_name="Équipe",
+        help_text="Laisser vide pour une configuration globale (par défaut)"
     )
 
     jour_semaine = models.CharField(
@@ -952,8 +955,20 @@ class HoraireTravail(models.Model):
     class Meta:
         verbose_name = "Horaire de travail"
         verbose_name_plural = "Horaires de travail"
-        unique_together = ['equipe', 'jour_semaine']
+        # Note: unique_together avec equipe nullable géré par validation custom si nécessaire
         ordering = ['equipe', 'jour_semaine']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['equipe', 'jour_semaine'],
+                name='unique_equipe_jour',
+                condition=models.Q(equipe__isnull=False)
+            ),
+            models.UniqueConstraint(
+                fields=['jour_semaine'],
+                name='unique_global_jour',
+                condition=models.Q(equipe__isnull=True)
+            ),
+        ]
 
     @property
     def heures_travaillables(self):

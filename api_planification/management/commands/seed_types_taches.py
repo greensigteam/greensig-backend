@@ -157,12 +157,69 @@ class Command(BaseCommand):
                 'productivite_theorique': 18,
                 'unite_productivite': 'ml'
             },
+            # ========== NOUVEAUX TYPES DE TÂCHES ==========
             {
-                'nom_tache': 'Arrachage des plantes mortes',
-                'symbole': 'APM',
-                'description': 'Extraction des végétaux morts',
-                'productivite_theorique': 18,
+                'nom_tache': 'Topdressing gazon',
+                'symbole': 'TDG',
+                'description': 'Application de compost ou sable fin sur le gazon',
+                'productivite_theorique': 40,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Compactage du gazon',
+                'symbole': 'CPG',
+                'description': 'Compactage et raffermissement de la surface du gazon',
+                'productivite_theorique': 500,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Sursemis',
+                'symbole': 'SUR',
+                'description': 'Semis complémentaire pour régénérer le gazon',
+                'productivite_theorique': 2100,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Arrachage des arbres morts',
+                'symbole': 'AAM',
+                'description': 'Extraction des arbres morts ou malades',
+                'productivite_theorique': 1,
                 'unite_productivite': 'arbres'
+            },
+            {
+                'nom_tache': 'Arrachage des palmiers morts',
+                'symbole': 'APM',
+                'description': 'Extraction des palmiers morts ou malades',
+                'productivite_theorique': 0.8,
+                'unite_productivite': 'arbres'
+            },
+            {
+                'nom_tache': 'Arrachage des arbustes morts',
+                'symbole': 'ABM',
+                'description': 'Extraction des arbustes morts ou malades',
+                'productivite_theorique': 5,
+                'unite_productivite': 'arbres'
+            },
+            {
+                'nom_tache': 'Arrachage des graminées mortes',
+                'symbole': 'AGM',
+                'description': 'Extraction des graminées mortes',
+                'productivite_theorique': 20,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Arrachage des cactus morts',
+                'symbole': 'ACM',
+                'description': 'Extraction des cactus morts',
+                'productivite_theorique': 2,
+                'unite_productivite': 'unite'
+            },
+            {
+                'nom_tache': 'Arrachage des vivaces mortes',
+                'symbole': 'AVM',
+                'description': 'Extraction des vivaces mortes',
+                'productivite_theorique': 8,
+                'unite_productivite': 'unite'
             },
             {
                 'nom_tache': 'Réparation des fuites',

@@ -34,7 +34,11 @@ COPY . .
 
 # Copier et rendre exécutable le script d'entrypoint
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Convertir les fins de ligne Windows (CRLF) en Unix (LF) et rendre exécutable
+RUN apt-get update && apt-get install -y dos2unix && \
+    dos2unix /entrypoint.sh && \
+    chmod +x /entrypoint.sh && \
+    rm -rf /var/lib/apt/lists/*
 
 # Collecter les fichiers statiques (variables temporaires pour le build uniquement)
 RUN SECRET_KEY=build-secret-key-not-for-production \
