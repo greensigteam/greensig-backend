@@ -160,7 +160,8 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
             'heure_debut', 'heure_fin',
-            'commentaire', 'created_at', 'updated_at'
+            'commentaire', 'status',  # ✅ Ajouté: statut de la distribution
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -503,7 +504,8 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
             'heure_debut', 'heure_fin',
-            'commentaire', 'created_at', 'updated_at'
+            'commentaire', 'status',  # ✅ Ajouté: statut de la distribution
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

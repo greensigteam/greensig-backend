@@ -262,6 +262,20 @@ class DistributionCharge(models.Model):
         help_text="Heure de fin de travail prévue (ex: 17:00)"
     )
 
+    # ✅ NOUVEAU: Statut de la distribution
+    STATUT_CHOICES = [
+        ('NON_REALISEE', 'Non Réalisée'),
+        ('REALISEE', 'Réalisée'),
+    ]
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUT_CHOICES,
+        default='NON_REALISEE',
+        verbose_name="Statut",
+        help_text="État de la distribution de charge"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

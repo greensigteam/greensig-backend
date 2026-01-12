@@ -703,7 +703,7 @@ class DistributionChargeViewSet(viewsets.ModelViewSet):
         - SUPERVISEUR: CRUD pour ses équipes
         - CLIENT: Lecture seule
         """
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'marquer_realisee', 'marquer_non_realisee']:
             # Écriture: ADMIN ou SUPERVISEUR
             permission_classes = [permissions.IsAuthenticated, IsAdmin | IsSuperviseur]
         else:
@@ -711,3 +711,88 @@ class DistributionChargeViewSet(viewsets.ModelViewSet):
             permission_classes = [permissions.IsAuthenticated]
 
         return [permission() for permission in permission_classes]
+
+    @action(detail=True, methods=['post'], url_path='marquer-realisee')
+    def marquer_realisee(self, request, pk=None):
+        """
+        Marque une distribution de charge comme réalisée.
+        POST /api/planification/distributions/{id}/marquer-realisee/
+
+        Body (optionnel):
+        {
+            "heures_reelles": 7.5  // Heures réellement travaillées
+        }
+
+        Logique automatique:
+        - Si c'est la première distribution marquée comme réalisée
+        - Et que la tâche est en statut PLANIFIEE
+        - Alors la tâche passe automatiquement en statut EN_COURS
+        """
+        distribution = self.get_object()
+        tache = distribution.tache
+
+        # Vérifier si c'est la première distribution réalisée
+        nombre_distributions_realisees = tache.distributions_charge.filter(status='REALISEE').count()
+        est_premiere_distribution = nombre_distributions_realisees == 0
+
+        # Mettre à jour le statut de la distribution
+        distribution.status = 'REALISEE'
+
+        # Optionnellement, enregistrer les heures réelles
+        heures_reelles = request.data.get('heures_reelles')
+        if heures_reelles is not None:
+            distribution.heures_reelles = heures_reelles
+
+        distribution.save()
+
+        # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE,
+        # passer la tâche en EN_COURS
+        if est_premiere_distribution and tache.statut == 'PLANIFIEE':
+            tache.statut = 'EN_COURS'
+            tache.save()
+
+        serializer = self.get_serializer(distribution)
+        return Response({
+            'message': 'Distribution marquée comme réalisée',
+            'distribution': serializer.data,
+            'tache_statut_modifie': est_premiere_distribution and tache.statut == 'EN_COURS'
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='marquer-non-realisee')
+    def marquer_non_realisee(self, request, pk=None):
+        """
+        Marque une distribution comme non réalisée (la remet en statut NON_REALISEE).
+        POST /api/planification/distributions/{id}/marquer-non-realisee/
+
+        Logique automatique:
+        - Si c'était la dernière distribution réalisée
+        - Et que la tâche est en statut EN_COURS
+        - Alors la tâche repasse automatiquement en statut PLANIFIEE
+        """
+        distribution = self.get_object()
+        tache = distribution.tache
+
+        if distribution.status != 'REALISEE':
+            return Response({
+                'error': 'Seules les distributions réalisées peuvent être marquées comme non réalisées'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Vérifier si c'est la dernière distribution réalisée
+        nombre_distributions_realisees = tache.distributions_charge.filter(status='REALISEE').count()
+        est_derniere_distribution = nombre_distributions_realisees == 1
+
+        distribution.status = 'NON_REALISEE'
+        distribution.save()
+
+        # Si c'était la dernière distribution réalisée et que la tâche est EN_COURS,
+        # remettre la tâche en PLANIFIEE
+        if est_derniere_distribution and tache.statut == 'EN_COURS':
+            tache.statut = 'PLANIFIEE'
+            tache.save()
+
+        serializer = self.get_serializer(distribution)
+        return Response({
+            'message': 'Distribution marquée comme non réalisée',
+            'distribution': serializer.data,
+            'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE'
+        }, status=status.HTTP_200_OK)
