@@ -142,6 +142,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         'update': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
         'partial_update': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
         'destroy': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
+        'update_distributions': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
         'valider': [permissions.IsAuthenticated, IsAdmin],
         'default': [permissions.IsAuthenticated],
     }
@@ -409,6 +410,100 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             'frequence': frequence,
             'message': message
         })
+
+    @action(detail=True, methods=['post'])
+    def update_distributions(self, request, pk=None):
+        """
+        Met à jour les distributions de charge pour une tâche.
+        POST /api/planification/taches/{id}/update_distributions/
+
+        Body: {
+            "distributions": [
+                {
+                    "date": "2024-01-15",
+                    "heure_debut": "08:00",
+                    "heure_fin": "17:00",
+                    "commentaire": ""
+                },
+                ...
+            ]
+        }
+
+        Cette action permet de sélectionner les jours de travail depuis le modal frontend
+        et de créer automatiquement les distributions de charge correspondantes.
+
+        Permission: IsAdmin ou IsSuperviseur
+        """
+        tache = self.get_object()
+        distributions_data = request.data.get('distributions', [])
+
+        if not isinstance(distributions_data, list):
+            return Response(
+                {'error': 'Le champ "distributions" doit être une liste'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Supprimer les anciennes distributions
+        tache.distributions_charge.all().delete()
+
+        # Créer les nouvelles distributions
+        created_distributions = []
+        for dist_data in distributions_data:
+            # Validation des champs requis
+            if 'date' not in dist_data:
+                return Response(
+                    {'error': 'Chaque distribution doit avoir un champ "date"'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if 'heure_debut' not in dist_data or 'heure_fin' not in dist_data:
+                return Response(
+                    {'error': 'Chaque distribution doit avoir "heure_debut" et "heure_fin"'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Calculer les heures planifiées
+            from datetime import datetime
+            try:
+                heure_debut = datetime.strptime(dist_data['heure_debut'], '%H:%M').time()
+                heure_fin = datetime.strptime(dist_data['heure_fin'], '%H:%M').time()
+            except ValueError:
+                return Response(
+                    {'error': 'Format d\'heure invalide. Utilisez HH:MM'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Créer la distribution via le serializer pour bénéficier de la validation
+            serializer = DistributionChargeSerializer(data={
+                'tache': tache.id,
+                'date': dist_data['date'],
+                'heure_debut': heure_debut,
+                'heure_fin': heure_fin,
+                'commentaire': dist_data.get('commentaire', '')
+            })
+
+            if serializer.is_valid():
+                distribution = serializer.save()
+                created_distributions.append(serializer.data)
+            else:
+                # Rollback: supprimer les distributions déjà créées
+                for created in created_distributions:
+                    DistributionCharge.objects.filter(id=created['id']).delete()
+
+                return Response(
+                    {'error': 'Erreur de validation', 'details': serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Calculer le total des heures
+        total_heures = sum(d['heures_planifiees'] for d in created_distributions)
+
+        return Response({
+            'message': f'{len(created_distributions)} distribution(s) créée(s) avec succès',
+            'distributions': created_distributions,
+            'total_heures': round(total_heures, 2),
+            'nombre_jours': len(created_distributions)
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):

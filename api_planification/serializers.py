@@ -159,6 +159,7 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
+            'heure_debut', 'heure_fin',
             'commentaire', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -177,6 +178,24 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'date': f"La date doit être entre {date_debut} et {date_fin}"
                 })
+
+        # Vérifier que heure_fin > heure_debut
+        heure_debut = data.get('heure_debut')
+        heure_fin = data.get('heure_fin')
+
+        if heure_debut and heure_fin:
+            if heure_fin <= heure_debut:
+                raise serializers.ValidationError({
+                    'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
+                })
+
+            # Calcul automatique des heures_planifiees si heure_debut et heure_fin sont définies
+            from datetime import datetime, timedelta
+            debut = datetime.combine(datetime.today(), heure_debut)
+            fin = datetime.combine(datetime.today(), heure_fin)
+            diff = fin - debut
+            heures = diff.total_seconds() / 3600
+            data['heures_planifiees'] = round(heures, 2) if heures > 0 else 0
 
         return data
 
@@ -333,11 +352,44 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
 
         # ✅ NOUVEAU: Créer les distributions de charge
         if distributions_data:
+            from datetime import datetime
             for dist_data in distributions_data:
+                # Récupérer les heures (assurer qu'elles ne sont pas None)
+                heure_debut_str = dist_data.get('heure_debut') or '08:00'
+                heure_fin_str = dist_data.get('heure_fin') or '17:00'
+
+                # Nettoyer et parser les heures (format HH:MM ou HH:MM:SS)
+                try:
+                    # Prendre seulement les 5 premiers caractères (HH:MM)
+                    if isinstance(heure_debut_str, str):
+                        heure_debut_clean = heure_debut_str.split('.')[0][:5]
+                    else:
+                        heure_debut_clean = '08:00'
+
+                    if isinstance(heure_fin_str, str):
+                        heure_fin_clean = heure_fin_str.split('.')[0][:5]
+                    else:
+                        heure_fin_clean = '17:00'
+
+                    heure_debut = datetime.strptime(heure_debut_clean, '%H:%M').time()
+                    heure_fin = datetime.strptime(heure_fin_clean, '%H:%M').time()
+                except (ValueError, AttributeError) as e:
+                    # Fallback sur des valeurs par défaut
+                    heure_debut = datetime.strptime('08:00', '%H:%M').time()
+                    heure_fin = datetime.strptime('17:00', '%H:%M').time()
+
+                # Calculer les heures
+                debut = datetime.combine(datetime.today(), heure_debut)
+                fin = datetime.combine(datetime.today(), heure_fin)
+                diff = fin - debut
+                heures_planifiees = round(diff.total_seconds() / 3600, 2) if diff.total_seconds() > 0 else 0
+
                 DistributionCharge.objects.create(
                     tache=instance,
                     date=dist_data['date'],
-                    heures_planifiees=dist_data['heures_planifiees'],
+                    heures_planifiees=heures_planifiees,
+                    heure_debut=heure_debut,
+                    heure_fin=heure_fin,
                     commentaire=dist_data.get('commentaire', '')
                 )
 
@@ -385,14 +437,47 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
 
         # ✅ NOUVEAU: Mettre à jour les distributions de charge
         if distributions_data is not None:
+            from datetime import datetime
             # Supprimer les anciennes distributions
             instance.distributions_charge.all().delete()
             # Créer les nouvelles
             for dist_data in distributions_data:
+                # Récupérer les heures (assurer qu'elles ne sont pas None)
+                heure_debut_str = dist_data.get('heure_debut') or '08:00'
+                heure_fin_str = dist_data.get('heure_fin') or '17:00'
+
+                # Nettoyer et parser les heures (format HH:MM ou HH:MM:SS)
+                try:
+                    # Prendre seulement les 5 premiers caractères (HH:MM)
+                    if isinstance(heure_debut_str, str):
+                        heure_debut_clean = heure_debut_str.split('.')[0][:5]
+                    else:
+                        heure_debut_clean = '08:00'
+
+                    if isinstance(heure_fin_str, str):
+                        heure_fin_clean = heure_fin_str.split('.')[0][:5]
+                    else:
+                        heure_fin_clean = '17:00'
+
+                    heure_debut = datetime.strptime(heure_debut_clean, '%H:%M').time()
+                    heure_fin = datetime.strptime(heure_fin_clean, '%H:%M').time()
+                except (ValueError, AttributeError) as e:
+                    # Fallback sur des valeurs par défaut
+                    heure_debut = datetime.strptime('08:00', '%H:%M').time()
+                    heure_fin = datetime.strptime('17:00', '%H:%M').time()
+
+                # Calculer les heures
+                debut = datetime.combine(datetime.today(), heure_debut)
+                fin = datetime.combine(datetime.today(), heure_fin)
+                diff = fin - debut
+                heures_planifiees = round(diff.total_seconds() / 3600, 2) if diff.total_seconds() > 0 else 0
+
                 DistributionCharge.objects.create(
                     tache=instance,
                     date=dist_data['date'],
-                    heures_planifiees=dist_data['heures_planifiees'],
+                    heures_planifiees=heures_planifiees,
+                    heure_debut=heure_debut,
+                    heure_fin=heure_fin,
                     commentaire=dist_data.get('commentaire', '')
                 )
 
@@ -417,6 +502,7 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
+            'heure_debut', 'heure_fin',
             'commentaire', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -435,5 +521,23 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'date': f"La date doit être entre {date_debut} et {date_fin}"
                 })
+
+        # Vérifier que heure_fin > heure_debut
+        heure_debut = data.get('heure_debut')
+        heure_fin = data.get('heure_fin')
+
+        if heure_debut and heure_fin:
+            if heure_fin <= heure_debut:
+                raise serializers.ValidationError({
+                    'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
+                })
+
+            # Calcul automatique des heures_planifiees si heure_debut et heure_fin sont définies
+            from datetime import datetime, timedelta
+            debut = datetime.combine(datetime.today(), heure_debut)
+            fin = datetime.combine(datetime.today(), heure_fin)
+            diff = fin - debut
+            heures = diff.total_seconds() / 3600
+            data['heures_planifiees'] = round(heures, 2) if heures > 0 else 0
 
         return data

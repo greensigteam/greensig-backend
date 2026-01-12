@@ -675,14 +675,26 @@ class EquipeListSerializer(serializers.ModelSerializer):
         allow_null=True
     )
 
+    # ✅ Multi-site architecture: sites secondaires
+    # OPTIMISÉ: Utilise le prefetch_related du ViewSet pour éviter N+1 queries
+    sites_secondaires = serializers.SerializerMethodField(read_only=True)
+    sites_secondaires_noms = serializers.SerializerMethodField(read_only=True)
+
     # ⚠️ DÉSACTIVÉ: Ces champs font des requêtes N+1 (réactivés dans DetailSerializer)
     # statut_operationnel = serializers.CharField(read_only=True)  # Property avec query
     # superviseur_nom = ...  # SerializerMethodField avec query
-    # sites_secondaires_noms = ...  # .all() sur chaque équipe
     # tous_les_sites = ...  # Property avec queries
 
     # ✅ RÉACTIVÉ avec annotation pour éviter N+1 queries
     nombre_membres = serializers.IntegerField(source='nombre_membres_count', read_only=True, default=0)
+
+    def get_sites_secondaires(self, obj):
+        """Retourne la liste des IDs des sites secondaires (utilise prefetch_related)."""
+        return [site.id for site in obj.sites_secondaires.all()]
+
+    def get_sites_secondaires_noms(self, obj):
+        """Retourne la liste des noms des sites secondaires (utilise prefetch_related)."""
+        return [site.nom_site for site in obj.sites_secondaires.all()]
 
     class Meta:
         model = Equipe
@@ -690,6 +702,7 @@ class EquipeListSerializer(serializers.ModelSerializer):
             'id', 'nom_equipe',
             'chef_equipe', 'chef_equipe_nom',
             'site_principal', 'site_principal_nom',  # ✅ Multi-site architecture
+            'sites_secondaires', 'sites_secondaires_noms',  # ✅ Ajouté pour filtrage frontend
             'actif', 'date_creation',
             'nombre_membres',  # ✅ Ajouté (utilisé annotation pour perf)
             # Champs désactivés pour performance, voir EquipeDetailSerializer

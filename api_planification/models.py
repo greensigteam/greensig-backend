@@ -86,17 +86,17 @@ class Tache(models.Model):
 
     # Multi-équipes (US-PLAN-013)
     equipes = models.ManyToManyField(Equipe, related_name='taches', blank=True, verbose_name="Équipes assignées")
-    
-    date_debut_planifiee = models.DateTimeField(verbose_name="Date début planifiée")
-    date_fin_planifiee = models.DateTimeField(verbose_name="Date fin planifiée")
+
+    date_debut_planifiee = models.DateField(verbose_name="Date début planifiée")
+    date_fin_planifiee = models.DateField(verbose_name="Date fin planifiée")
     date_echeance = models.DateField(null=True, blank=True, verbose_name="Date d'échéance")
     
     priorite = models.IntegerField(choices=PRIORITE_CHOICES, default=3, verbose_name="Priorité")
     commentaires = models.TextField(blank=True, verbose_name="Commentaires")
     
     date_affectation = models.DateField(null=True, blank=True, verbose_name="Date d'affectation")
-    date_debut_reelle = models.DateTimeField(null=True, blank=True, verbose_name="Date début réelle")
-    date_fin_reelle = models.DateTimeField(null=True, blank=True, verbose_name="Date fin réelle")
+    date_debut_reelle = models.DateField(null=True, blank=True, verbose_name="Date début réelle")
+    date_fin_reelle = models.DateField(null=True, blank=True, verbose_name="Date fin réelle")
     duree_reelle_minutes = models.IntegerField(null=True, blank=True, verbose_name="Durée réelle (minutes)")
     charge_estimee_heures = models.FloatField(null=True, blank=True, verbose_name="Charge estimée (heures)",
         help_text="Calculée automatiquement ou saisie manuellement")
@@ -248,6 +248,20 @@ class DistributionCharge(models.Model):
         help_text="Notes pour ce jour (équipe réduite, météo, etc.)"
     )
 
+    heure_debut = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name="Heure de début",
+        help_text="Heure de début de travail prévue (ex: 08:00)"
+    )
+
+    heure_fin = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name="Heure de fin",
+        help_text="Heure de fin de travail prévue (ex: 17:00)"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -262,6 +276,24 @@ class DistributionCharge(models.Model):
 
     def __str__(self):
         return f"{self.tache.id} - {self.date}: {self.heures_planifiees}h"
+
+    def calculer_heures_depuis_horaires(self):
+        """
+        Calcule les heures planifiées à partir de heure_debut et heure_fin.
+        Retourne le nombre d'heures (float) ou None si les heures ne sont pas définies.
+        """
+        if self.heure_debut and self.heure_fin:
+            # Convertir time en datetime pour calculer la différence
+            from datetime import datetime, timedelta
+            debut = datetime.combine(datetime.today(), self.heure_debut)
+            fin = datetime.combine(datetime.today(), self.heure_fin)
+
+            # Calculer la différence en heures
+            diff = fin - debut
+            heures = diff.total_seconds() / 3600
+
+            return round(heures, 2) if heures > 0 else 0
+        return None
 
     def clean(self):
         """Validation métier"""
@@ -280,6 +312,12 @@ class DistributionCharge(models.Model):
                                 f"({date_debut.strftime('%d/%m/%Y')} - {date_fin.strftime('%d/%m/%Y')})"
                     })
 
+        # Calcul automatique des heures_planifiees si heure_debut et heure_fin sont définies
+        if self.heure_debut and self.heure_fin:
+            heures_calculees = self.calculer_heures_depuis_horaires()
+            if heures_calculees is not None:
+                self.heures_planifiees = heures_calculees
+
         # Vérifier que les heures sont positives
         if self.heures_planifiees is not None and self.heures_planifiees < 0:
             raise ValidationError({
@@ -290,6 +328,13 @@ class DistributionCharge(models.Model):
             raise ValidationError({
                 'heures_reelles': "Les heures réelles doivent être positives"
             })
+
+        # Vérifier que heure_fin > heure_debut
+        if self.heure_debut and self.heure_fin:
+            if self.heure_fin <= self.heure_debut:
+                raise ValidationError({
+                    'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
+                })
 
 
 class RatioProductivite(models.Model):
