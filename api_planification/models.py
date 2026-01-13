@@ -125,12 +125,7 @@ class Tache(models.Model):
         verbose_name="Validée par"
     )
     commentaire_validation = models.TextField(blank=True, verbose_name="Commentaire de validation")
-    
-    parametres_recurrence = models.JSONField(null=True, blank=True, verbose_name="Paramètres récurrence")
-    
-    # Self-referencing FK for recurrence
-    id_recurrence_parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='occurrences', verbose_name="Tâche mère")
-    
+
     notifiee = models.BooleanField(default=False, verbose_name="Notifiée")
     confirmee = models.BooleanField(default=False, verbose_name="Confirmée")
     
@@ -148,6 +143,8 @@ class Tache(models.Model):
 
     # Many-to-Many relation with Inventory Objects
     objets = models.ManyToManyField(Objet, related_name='taches', blank=True, verbose_name="Objets inventaire")
+
+    reference = models.CharField(max_length=100, unique=True, blank=True, null=True, db_index=True, verbose_name="Référence technique")
 
     class Meta:
         verbose_name = "Tâche"
@@ -191,6 +188,42 @@ class Tache(models.Model):
             int: Nombre de jours avec des heures planifiées
         """
         return self.distributions_charge.filter(heures_planifiees__gt=0).count()
+
+    def save(self, *args, **kwargs):
+        # Save first to get an ID if it's new
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        
+        # Now generate reference if it's empty
+        if not self.reference:
+            # Organisation (Client)
+            org_code = "UNK"
+            if self.id_structure_client:
+                org_code = (self.id_structure_client.nom[:3].upper() 
+                           if self.id_structure_client.nom else "UNK")
+            elif self.id_client and self.id_client.structure:
+                org_code = (self.id_client.structure.nom[:3].upper() 
+                           if self.id_client.structure.nom else "UNK")
+            
+            # Site (via premier objet ou vide)
+            site_code = "GEN" # GEN = General
+            first_obj = self.objets.first()
+            if first_obj and first_obj.site:
+                site_code = (first_obj.site.nom_site[:3].upper() 
+                            if first_obj.site.nom_site else "UNK")
+            
+            # Type de tâche
+            type_code = "UNK"
+            if self.id_type_tache:
+                type_code = (self.id_type_tache.nom_tache[:3].upper() 
+                            if self.id_type_tache.nom_tache else "UNK")
+            
+            self.reference = f"{org_code}-{site_code}-{type_code}-{self.id}"
+            # Save the reference
+            super().save(update_fields=['reference'])
+            
+            # Trigger updates for distributions if we just got a first reference? 
+            # (Usually distributions are created after task save)
 
     def delete(self, using=None, keep_parents=False):
         """Soft delete implementation"""
@@ -276,6 +309,8 @@ class DistributionCharge(models.Model):
         help_text="État de la distribution de charge"
     )
 
+    reference = models.CharField(max_length=120, unique=True, blank=True, null=True, db_index=True, verbose_name="Référence")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -289,12 +324,28 @@ class DistributionCharge(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.tache.id} - {self.date}: {self.heures_planifiees}h"
+        return f"{self.reference or self.id}"
+
+    def save(self, *args, **kwargs):
+        # Generate reference if empty
+        if not self.reference:
+            # Format: {TACHE_REF}-D{Counter}
+            # We need task reference. ensure task is saved.
+            if not self.tache.reference:
+                self.tache.save() # This triggers Tache.save() logic
+            
+            # Use a counter based on existing distributions for this task
+            # count() is fine for sequential creation (serializer level)
+            count = self.tache.distributions_charge.count()
+            self.reference = f"{self.tache.reference}-D{count + 1}"
+            
+        super().save(*args, **kwargs)
 
     def calculer_heures_depuis_horaires(self):
         """
         Calcule les heures planifiées à partir de heure_debut et heure_fin.
         Retourne le nombre d'heures (float) ou None si les heures ne sont pas définies.
+        
         """
         if self.heure_debut and self.heure_fin:
             # Convertir time en datetime pour calculer la différence
@@ -317,8 +368,9 @@ class DistributionCharge(models.Model):
         if self.tache_id and self.date:
             tache = self.tache
             if tache.date_debut_planifiee and tache.date_fin_planifiee:
-                date_debut = tache.date_debut_planifiee.date()
-                date_fin = tache.date_fin_planifiee.date()
+                # Les dates sont déjà des DateField (datetime.date)
+                date_debut = tache.date_debut_planifiee
+                date_fin = tache.date_fin_planifiee
 
                 if self.date < date_debut or self.date > date_fin:
                     raise ValidationError({
@@ -344,7 +396,7 @@ class DistributionCharge(models.Model):
             })
 
         # Vérifier que heure_fin > heure_debut
-        if self.heure_debut and self.heure_fin:
+        if self.heure_debut and self.heure_fin :
             if self.heure_fin <= self.heure_debut:
                 raise ValidationError({
                     'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
@@ -352,7 +404,7 @@ class DistributionCharge(models.Model):
 
 
 class RatioProductivite(models.Model):
-    """
+    """    
     Matrice de productivité: ratio par combinaison (TypeTache, type_objet).
     Le ratio représente le nombre d'unités traitables par heure.
     """

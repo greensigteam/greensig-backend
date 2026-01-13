@@ -8,7 +8,7 @@ from .serializers import (
     TypeTacheSerializer, ParticipationTacheSerializer,
     RatioProductiviteSerializer, DistributionChargeSerializer
 )
-from .services import RecurrenceService, WorkloadCalculationService
+from .services import WorkloadCalculationService
 from django.utils import timezone
 from rest_framework.pagination import PageNumberPagination
 from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
@@ -298,118 +298,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-    @action(detail=False, methods=['post'])
-    def calculer_recurrence_recommandee(self, request):
-        """
-        ✅ PHASE 2: Calcule le nombre d'occurrences recommandé basé sur les horaires réels de l'équipe.
 
-        POST /api/planification/taches/calculer_recurrence_recommandee/
-
-        Body:
-        {
-            "equipe_id": 1,
-            "charge_totale_heures": 35.5,
-            "date_debut": "2024-01-15",
-            "frequence": "daily"  // optional, default: daily
-        }
-
-        Returns:
-        {
-            "nombre_occurrences": 4,
-            "heures_par_jour_moyen": 8.5,
-            "detail_horaires": [...],
-            "message": "..."
-        }
-        """
-        from api_users.models import Equipe
-        from datetime import datetime
-
-        equipe_id = request.data.get('equipe_id')
-        charge_totale = request.data.get('charge_totale_heures')
-        date_debut_str = request.data.get('date_debut')
-        frequence = request.data.get('frequence', 'daily')
-
-        # Validation
-        if not equipe_id:
-            return Response(
-                {'error': 'Le champ "equipe_id" est requis.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if not charge_totale or charge_totale <= 0:
-            return Response(
-                {'error': 'Le champ "charge_totale_heures" doit être un nombre positif.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if not date_debut_str:
-            return Response(
-                {'error': 'Le champ "date_debut" est requis (format: YYYY-MM-DD).'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Récupérer l'équipe
-        try:
-            equipe = Equipe.objects.get(id=equipe_id)
-        except Equipe.DoesNotExist:
-            return Response(
-                {'error': f'Équipe avec ID {equipe_id} non trouvée.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        # Parser la date
-        try:
-            date_debut = datetime.strptime(date_debut_str, '%Y-%m-%d').date()
-        except ValueError:
-            return Response(
-                {'error': 'Format de date invalide. Utilisez YYYY-MM-DD.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Calculer le nombre d'occurrences recommandé
-        from .services import RecurrenceService
-        nombre_occurrences = RecurrenceService.calculate_recommended_occurrences(
-            equipe=equipe,
-            charge_totale_heures=charge_totale,
-            date_debut=date_debut,
-            frequence=frequence
-        )
-
-        # Détail des horaires pour les 7 prochains jours (pour daily)
-        detail_horaires = []
-        if frequence == 'daily':
-            import datetime as dt
-            for i in range(min(7, nombre_occurrences)):
-                jour_test = date_debut + dt.timedelta(days=i)
-                heures = RecurrenceService._get_work_hours_for_day(equipe, jour_test)
-                jour_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'][jour_test.weekday()]
-                detail_horaires.append({
-                    'date': jour_test.strftime('%Y-%m-%d'),
-                    'jour': jour_fr,
-                    'heures_travaillables': heures
-                })
-
-        # Calcul heures moyennes par jour
-        if detail_horaires:
-            heures_moyen = sum(d['heures_travaillables'] for d in detail_horaires) / len(detail_horaires)
-        else:
-            heures_moyen = 8.0
-
-        message = (
-            f"Pour une charge de {charge_totale}h, "
-            f"il est recommandé de créer {nombre_occurrences} occurrence(s) "
-            f"(≈ {charge_totale / nombre_occurrences:.1f}h par occurrence)."
-        )
-
-        return Response({
-            'nombre_occurrences': nombre_occurrences,
-            'heures_par_jour_moyen': round(heures_moyen, 1),
-            'charge_totale_heures': charge_totale,
-            'charge_par_occurrence': round(charge_totale / nombre_occurrences, 2),
-            'detail_horaires': detail_horaires,
-            'frequence': frequence,
-            'message': message
-        })
 
     @action(detail=True, methods=['post'])
     def update_distributions(self, request, pk=None):
@@ -562,10 +451,6 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         # Calcul automatique de la charge estimée
         WorkloadCalculationService.recalculate_and_save(tache)
 
-        # Gestion Récurrence
-        if tache.parametres_recurrence:
-            RecurrenceService.generate_occurrences(tache)
-
         # Gestion Statut Réclamation (User 6.6.5.4)
         if tache.reclamation:
             from api_reclamations.models import HistoriqueReclamation
@@ -586,14 +471,23 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
                 )
 
     def perform_update(self, serializer):
+        # Récupérer l'ancien statut avant la sauvegarde
+        instance = self.get_object()
+        ancien_statut = instance.statut if instance else None
+
         tache = serializer.save(_current_user=self.request.user)
+
+        # Si le statut passe à TERMINEE, marquer toutes les distributions non réalisées comme réalisées
+        if tache.statut == 'TERMINEE' and ancien_statut != 'TERMINEE':
+            # Mettre à jour toutes les distributions qui ne sont pas encore réalisées
+            distributions_non_realisees = tache.distributions_charge.filter(status='NON_REALISEE')
+            nombre_mis_a_jour = distributions_non_realisees.update(status='REALISEE')
+
+            if nombre_mis_a_jour > 0:
+                print(f"✅ {nombre_mis_a_jour} distribution(s) marquée(s) comme réalisée(s) automatiquement")
 
         # Recalcul automatique de la charge estimée
         WorkloadCalculationService.recalculate_and_save(tache)
-
-        # On régénère si il y a des param de récurrence (le service nettoie avant)
-        if tache.parametres_recurrence:
-            RecurrenceService.generate_occurrences(tache)
 
 
 class RatioProductiviteViewSet(viewsets.ModelViewSet):

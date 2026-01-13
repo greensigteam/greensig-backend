@@ -208,32 +208,6 @@ def test_multijour_task():
         else:
             print(f"   [WARNING] ATTENTION: Difference entre total distributions ({total_dist}h) et charge estimee ({total_heures}h)")
 
-        # 8. Test de la recommandation de récurrence
-        print("\n[8] Test de calcul de recurrence recommandee...")
-
-        from api_planification.services import RecurrenceService
-
-        nb_occurrences = RecurrenceService.calculate_recommended_occurrences(
-            equipe=equipe,
-            charge_totale_heures=total_heures,
-            date_debut=date_debut,
-            frequence='daily'
-        )
-
-        print(f"   [INFO] Recommandation RecurrenceService:")
-        print(f"      - Charge totale: {total_heures}h")
-        print(f"      - Occurrences recommandees: {nb_occurrences}")
-        print(f"      - Charge par occurrence: {total_heures / nb_occurrences:.2f}h")
-
-        # Afficher les horaires réels de l'équipe pour les 5 prochains jours
-        print(f"\n   [INFO] Horaires equipe pour la periode:")
-        current = date_debut
-        for i in range(5):
-            heures_jour = RecurrenceService._get_work_hours_for_day(equipe, current)
-            jour_nom = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'][current.weekday()]
-            print(f"      - {current} ({jour_nom}): {heures_jour}h travaillables")
-            current += timedelta(days=1)
-
         print("\n" + "=" * 80)
         print("[SUCCESS] TEST REUSSI - Tache multi-jours creee avec succes!")
         print("=" * 80)
