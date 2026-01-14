@@ -338,94 +338,9 @@ class WorkloadCalculationService:
         return length_deg * 111000 * cos_lat
 
     @classmethod
-    def create_default_distributions(cls, tache: Tache, charge_totale: float) -> int:
-        """
-        Crée des distributions de charge par défaut pour une tâche multi-jours.
-
-        Distribue la charge totale uniformément sur les jours travaillables dans la période de la tâche.
-
-        Args:
-            tache: Instance de Tache
-            charge_totale: Charge totale en heures à distribuer
-
-        Returns:
-            int: Nombre de distributions créées
-        """
-        if not tache.date_debut_planifiee or not tache.date_fin_planifiee:
-            logger.warning(f"Tache {tache.id}: dates manquantes, distributions non créées")
-            return 0
-
-        if charge_totale <= 0:
-            logger.info(f"Tache {tache.id}: charge nulle, distributions non créées")
-            return 0
-
-        # Les dates sont déjà des DateField (datetime.date), pas besoin de .date()
-        date_debut = tache.date_debut_planifiee
-        date_fin = tache.date_fin_planifiee
-
-        # Récupérer l'équipe pour vérifier jours travaillables
-        equipe = tache.id_equipe
-        if not equipe and hasattr(tache, 'equipes') and tache.equipes.exists():
-            equipe = tache.equipes.first()
-
-        # Lister tous les jours travaillables dans la période
-        jours_travaillables = []
-        current_date = date_debut
-
-        while current_date <= date_fin:
-            # Vérifier si jour travaillable
-            if cls._est_jour_travaillable(
-                equipe=equipe,
-                date=current_date,
-                skip_weekends=True,
-                skip_holidays=True,
-                check_availability=False  # Pas de check disponibilité pour distribution par défaut
-            ):
-                heures_jour = cls._get_work_hours_for_day(equipe, current_date)
-                if heures_jour > 0:
-                    jours_travaillables.append(current_date)
-
-            current_date += datetime.timedelta(days=1)
-
-        if not jours_travaillables:
-            logger.warning(f"Tache {tache.id}: aucun jour travaillable trouvé dans la période")
-            return 0
-
-        # Distribuer uniformément la charge
-        nombre_jours = len(jours_travaillables)
-        heures_par_jour = charge_totale / nombre_jours
-
-        # Supprimer anciennes distributions si elles existent
-        tache.distributions_charge.all().delete()
-
-        # Créer les distributions
-        distributions_to_create = []
-        for jour in jours_travaillables:
-            distributions_to_create.append(
-                DistributionCharge(
-                    tache=tache,
-                    date=jour,
-                    heures_planifiees=round(heures_par_jour, 2),
-                    commentaire="Distribution automatique basée sur objets GIS"
-                )
-            )
-
-        # Bulk create
-        DistributionCharge.objects.bulk_create(distributions_to_create)
-
-        logger.info(
-            f"✅ Tache {tache.id}: {len(distributions_to_create)} distributions créées "
-            f"({heures_par_jour:.2f}h/jour × {nombre_jours} jours = {charge_totale}h total)"
-        )
-
-        return len(distributions_to_create)
-
-    @classmethod
     def recalculate_and_save(cls, tache: Tache, force: bool = False) -> Tuple[Optional[float], bool]:
         """
         Calcule et sauvegarde la charge estimée pour une tâche.
-
-        Crée aussi des distributions de charge par défaut si la tâche a des objets GIS.
 
         Args:
             tache: Instance de Tache
@@ -445,10 +360,6 @@ class WorkloadCalculationService:
             tache.charge_estimee_heures = charge
             tache.save(update_fields=['charge_estimee_heures'])
             logger.info(f"Tache {tache.id}: charge estimée = {charge}h")
-
-            # Créer distributions par défaut si objets GIS
-            if charge and charge > 0 and tache.objets.exists():
-                cls.create_default_distributions(tache, charge)
 
             return charge, True
         except Exception as e:

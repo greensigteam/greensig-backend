@@ -356,8 +356,8 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         # ✅ NOUVEAU: Créer les distributions de charge
         from datetime import datetime
 
+        # ✅ Créer les distributions de charge uniquement si fournies explicitement par le frontend
         if distributions_data:
-            # Cas 1: Distributions fournies explicitement
             for dist_data in distributions_data:
                 # Récupérer les heures (assurer qu'elles ne sont pas None)
                 heure_debut_str = dist_data.get('heure_debut') or '08:00'
@@ -397,27 +397,7 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                     heure_fin=heure_fin,
                     commentaire=dist_data.get('commentaire', '')
                 )
-        elif instance.date_debut_planifiee == instance.date_fin_planifiee:
-            # Cas 2: Tâche d'un seul jour sans distributions explicites
-            # Créer automatiquement une distribution avec heures par défaut
-            heure_debut = datetime.strptime('08:00', '%H:%M').time()
-            heure_fin = datetime.strptime('17:00', '%H:%M').time()
-
-            # Calculer les heures
-            debut = datetime.combine(datetime.today(), heure_debut)
-            fin = datetime.combine(datetime.today(), heure_fin)
-            diff = fin - debut
-            heures_planifiees = round(diff.total_seconds() / 3600, 2)
-
-            DistributionCharge.objects.create(
-                tache=instance,
-                date=instance.date_debut_planifiee,
-                heures_planifiees=heures_planifiees,
-                heure_debut=heure_debut,
-                heure_fin=heure_fin,
-                commentaire='Distribution automatique pour tâche d\'un jour'
-            )
-            print(f"✅ Distribution automatique créée pour tâche #{instance.id} (jour unique: {instance.date_debut_planifiee})")
+            print(f"✅ {len(distributions_data)} distribution(s) créée(s) pour tâche #{instance.id}")
 
         return instance
 
