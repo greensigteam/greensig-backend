@@ -15,6 +15,7 @@ class CustomPageNumberPagination(PageNumberPagination):
     Utilisé par tous les ViewSets de l'API pour permettre au frontend
     de récupérer tous les résultats quand nécessaire.
     """
-    page_size = 50
+    display_page_controls = True
+    page_size = 1000000
     page_size_query_param = 'page_size'
-    max_page_size = 10000
+    max_page_size = None

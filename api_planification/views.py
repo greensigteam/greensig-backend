@@ -135,6 +135,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
     queryset = Tache.objects.all()
     serializer_class = TacheSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
 
     # Permissions par action (RoleBasedPermissionMixin)
     permission_classes_by_action = {
@@ -178,7 +179,8 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         # EquipeMinimalSerializer: id, nom_equipe → aucun prefetch nécessaire
         qs = qs.prefetch_related(
             'equipes',  # Juste les IDs et noms (pas de relations supplémentaires)
-            'objets__site'  # Site ID + nom seulement (via ObjetMinimalSerializer)
+            'objets__site',  # Site ID + nom seulement (via ObjetMinimalSerializer)
+            'distributions_charge'  # ✅ Evite N+1 pour les distributions
         )
 
         # Filtres optionnels via query params
@@ -269,7 +271,11 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
     def add_participation(self, request, pk=None):
         tache = self.get_object()
         # On force l'id_tache dans les données
-        data = request.data.copy()
+        # ✅ FIX: Éviter .copy() sur un QueryDict (Multipart data) car il fait un deepcopy
+        if hasattr(request.data, 'dict'):
+            data = request.data.dict()
+        else:
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         data['id_tache'] = tache.id
 
         serializer = ParticipationTacheSerializer(data=data)

@@ -327,19 +327,33 @@ class DistributionCharge(models.Model):
         return f"{self.reference or self.id}"
 
     def save(self, *args, **kwargs):
-        # Generate reference if empty
+        # 1. Si nouvel objet (pas d'ID), on sauvegarde d'abord pour obtenir un ID
+        is_new = self._state.adding or not self.id
+        if is_new:
+            super().save(*args, **kwargs)
+            # On passe en mode update
+            kwargs['force_insert'] = False
+
+        # 2. Générer la référence si elle manque (maintenant on a un ID)
         if not self.reference:
-            # Format: {TACHE_REF}-D{Counter}
-            # We need task reference. ensure task is saved.
+            # Format: {TACHE_REF}-D{ID}
+            # S'assurer que la tâche a une référence
             if not self.tache.reference:
-                self.tache.save() # This triggers Tache.save() logic
+                self.tache.save() 
             
-            # Use a counter based on existing distributions for this task
-            # count() is fine for sequential creation (serializer level)
-            count = self.tache.distributions_charge.count()
-            self.reference = f"{self.tache.reference}-D{count + 1}"
+            # Utiliser l'ID unique pour la référence
+            self.reference = f"{self.tache.reference}-D{self.id}"
             
-        super().save(*args, **kwargs)
+            # Sauvegarder la nouvelle référence
+            # Si c'était un nouvel objet, on a déjà tout sauvegardé, on update juste la ref
+            if is_new:
+                super().save(update_fields=['reference'])
+                return
+
+        # 3. Si ce n'était pas un nouvel objet, on sauvegarde normalement
+        # (Si c'était nouveau, on a déjà return plus haut)
+        if not is_new:
+            super().save(*args, **kwargs)
 
     def calculer_heures_depuis_horaires(self):
         """

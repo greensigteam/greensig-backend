@@ -339,6 +339,14 @@ class StructureClientViewSet(viewsets.ModelViewSet):
                 except AttributeError:
                     pass
 
+            # SUPERVISEUR voit les structures de ses sites
+            if 'SUPERVISEUR' in roles:
+                try:
+                    superviseur = user.superviseur_profile
+                    return qs.filter(sites__superviseur=superviseur).distinct()
+                except AttributeError:
+                    pass
+
         return qs.none()
 
     def get_serializer_class(self):

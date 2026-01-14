@@ -208,7 +208,12 @@ class PhotoCreateSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         """Convertit les IDs string en int avant la validation des FK."""
-        mutable_data = data.copy() if hasattr(data, 'copy') else dict(data)
+        # ✅ FIX: Éviter .copy() sur un QueryDict (Multipart data) car il fait un deepcopy
+        # qui échoue sur Windows avec des fichiers (BufferedRandom pickling error).
+        if hasattr(data, 'dict'):
+            mutable_data = data.dict()
+        else:
+            mutable_data = data.copy() if hasattr(data, 'copy') else dict(data)
 
         # Convertir les strings en int pour les FK
         for field in ['tache', 'objet', 'reclamation']:

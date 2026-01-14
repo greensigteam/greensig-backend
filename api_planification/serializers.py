@@ -461,12 +461,17 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         else:
             print(f"[PERF] SKIPPED objets.set() for {len(objets) if objets else 0} objects")
 
-        # ✅ NOUVEAU: Mettre à jour les distributions de charge
+        # ✅ NOUVEAU: Mettre à jour les distributions de charge (Smart Update)
         if distributions_data is not None:
             from datetime import datetime
-            # Supprimer les anciennes distributions
-            instance.distributions_charge.all().delete()
-            # Créer les nouvelles
+            
+            # 1. Identifier les IDs à conserver (ceux présents dans la payload)
+            ids_to_keep = [item.get('id') for item in distributions_data if item.get('id')]
+            
+            # 2. Supprimer les distributions qui ne sont plus dans la liste
+            instance.distributions_charge.exclude(id__in=ids_to_keep).delete()
+
+            # 3. Créer ou Mettre à jour
             for dist_data in distributions_data:
                 # Récupérer les heures (assurer qu'elles ne sont pas None)
                 heure_debut_str = dist_data.get('heure_debut') or '08:00'
@@ -498,74 +503,66 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                 diff = fin - debut
                 heures_planifiees = round(diff.total_seconds() / 3600, 2) if diff.total_seconds() > 0 else 0
 
-                DistributionCharge.objects.create(
-                    tache=instance,
-                    date=dist_data['date'],
-                    heures_planifiees=heures_planifiees,
-                    heure_debut=heure_debut,
-                    heure_fin=heure_fin,
-                    commentaire=dist_data.get('commentaire', '')
-                )
+                # ✅ FIX: Extraire l'ID de la distribution (si elle existe déjà)
+                dist_id = dist_data.get('id')
+
+                if dist_id:
+                    # --- UPDATE ---
+                    try:
+                        dist = instance.distributions_charge.get(id=dist_id)
+                        
+                        # ✅ PROTECTION: Si REALISEE, on interdit la modification des données planifiées
+                        if dist.status == 'REALISEE':
+                            print(f"🔒 Distribution #{dist.id} est REALISEE -> Modifications ignorées")
+                            # Autoriser seulement l'update du commentaire pour les distributions réalisées
+                            if 'commentaire' in dist_data and dist_data['commentaire'] != dist.commentaire:
+                                dist.commentaire = dist_data['commentaire']
+                                dist.save(update_fields=['commentaire'])
+                        else:
+                            # Mise à jour complète pour les distributions non réalisées
+                            dist.date = dist_data['date']
+                            dist.heures_planifiees = heures_planifiees
+                            dist.heure_debut = heure_debut
+                            dist.heure_fin = heure_fin
+                            dist.commentaire = dist_data.get('commentaire', '')
+                            if 'status' in dist_data:
+                                dist.status = dist_data['status']
+                            # ❌ NE JAMAIS modifier 'reference' - elle est immuable une fois créée
+                            # if 'reference' in dist_data:
+                            #     dist.reference = dist_data['reference']
+                            dist.save()
+                            print(f"✅ Distribution #{dist.id} mise à jour")
+                    except DistributionCharge.DoesNotExist:
+                        # Si l'ID fourni n'existe pas (ou n'appartient pas à cette tâche), on crée
+                        # ❌ NE PAS passer 'reference' - elle sera auto-générée par le modèle
+                        DistributionCharge.objects.create(
+                            tache=instance,
+                            date=dist_data['date'],
+                            heures_planifiees=heures_planifiees,
+                            heure_debut=heure_debut,
+                            heure_fin=heure_fin,
+                            commentaire=dist_data.get('commentaire', ''),
+                            status=dist_data.get('status', 'NON_REALISEE')
+                            # reference sera auto-générée
+                        )
+                        print(f"✅ Distribution créée (ID fourni mais non trouvé)")
+                else:
+                    # --- CREATE ---
+                    # ❌ NE PAS passer 'reference' - elle sera auto-générée par le modèle
+                    new_dist = DistributionCharge.objects.create(
+                        tache=instance,
+                        date=dist_data['date'],
+                        heures_planifiees=heures_planifiees,
+                        heure_debut=heure_debut,
+                        heure_fin=heure_fin,
+                        commentaire=dist_data.get('commentaire', ''),
+                        status=dist_data.get('status', 'NON_REALISEE')
+                        # reference sera auto-générée
+                    )
+                    print(f"✅ Nouvelle distribution #{new_dist.id} créée pour la date {new_dist.date}")
 
         print(f"[PERF] UPDATE TOTAL took {time.time() - start_total:.2f}s")
         return instance
 
 
-# ==============================================================================
-# DISTRIBUTION DE CHARGE (TÂCHES MULTI-JOURS)
-# ==============================================================================
 
-class DistributionChargeSerializer(serializers.ModelSerializer):
-    """
-    ✅ Serializer pour les distributions de charge journalières.
-
-    Permet de définir précisément la charge planifiée par jour
-    pour des tâches s'étendant sur plusieurs jours.
-    """
-
-    class Meta:
-        model = DistributionCharge
-        fields = [
-            'id', 'tache', 'date',
-            'heures_planifiees', 'heures_reelles',
-            'heure_debut', 'heure_fin',
-            'commentaire', 'status',  # ✅ Ajouté: statut de la distribution
-            'created_at', 'updated_at'
-        ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-    def validate(self, data):
-        """Validation de la distribution"""
-        # Vérifier que la date est dans la période de la tâche
-        tache = data.get('tache')
-        date = data.get('date')
-
-        if tache and date:
-            # Les dates sont déjà des DateField (datetime.date)
-            date_debut = tache.date_debut_planifiee
-            date_fin = tache.date_fin_planifiee
-
-            if date < date_debut or date > date_fin:
-                raise serializers.ValidationError({
-                    'date': f"La date doit être entre {date_debut} et {date_fin}"
-                })
-
-        # Vérifier que heure_fin > heure_debut
-        heure_debut = data.get('heure_debut')
-        heure_fin = data.get('heure_fin')
-
-        if heure_debut and heure_fin:
-            if heure_fin <= heure_debut:
-                raise serializers.ValidationError({
-                    'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
-                })
-
-            # Calcul automatique des heures_planifiees si heure_debut et heure_fin sont définies
-            from datetime import datetime, timedelta
-            debut = datetime.combine(datetime.today(), heure_debut)
-            fin = datetime.combine(datetime.today(), heure_fin)
-            diff = fin - debut
-            heures = diff.total_seconds() / 3600
-            data['heures_planifiees'] = round(heures, 2) if heures > 0 else 0
-
-        return data
