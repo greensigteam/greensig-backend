@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -6,10 +7,19 @@ from .models import Tache, TypeTache, ParticipationTache, RatioProductivite, Dis
 from .serializers import (
     TacheSerializer, TacheCreateUpdateSerializer,
     TypeTacheSerializer, ParticipationTacheSerializer,
-    RatioProductiviteSerializer, DistributionChargeSerializer
+    RatioProductiviteSerializer, DistributionChargeSerializer,
+    DupliquerTacheSerializer, DupliquerTacheRecurrenceSerializer,
+    DupliquerTacheDatesSpecifiquesSerializer, TacheRecurrenceResponseSerializer
 )
 from .services import WorkloadCalculationService
 from django.utils import timezone
+from .utils import (
+    dupliquer_tache_avec_distributions,
+    dupliquer_tache_recurrence_multiple,
+    dupliquer_tache_dates_specifiques,
+    obtenir_frequences_compatibles,
+    calculer_duree_tache
+)
 from rest_framework.pagination import PageNumberPagination
 from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
 from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur
@@ -696,3 +706,290 @@ class DistributionChargeViewSet(viewsets.ModelViewSet):
             'distribution': serializer.data,
             'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE'
         }, status=status.HTTP_200_OK)
+
+
+class TacheViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour les tâches avec fonctionnalité de récurrence/duplication.
+    """
+    queryset = Tache.objects.filter(deleted_at__isnull=True)
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action == 'create' or self.action == 'update':
+            return TacheCreateUpdateSerializer
+        return TacheSerializer
+
+    @action(detail=True, methods=['post'], url_path='dupliquer')
+    def dupliquer(self, request, pk=None):
+        """
+        Duplique une tâche avec décalage personnalisé.
+
+        **Exemple de requête:**
+        ```json
+        {
+            "decalage_jours": 7,
+            "nombre_occurrences": 4,
+            "conserver_equipes": true,
+            "conserver_objets": true,
+            "nouveau_statut": "PLANIFIEE"
+        }
+        ```
+
+        **Retourne:**
+        - Liste des nouvelles tâches créées avec leurs distributions
+        """
+        tache = self.get_object()
+        print(f"[API] dupliquer appelé pour tâche #{tache.id}")
+        print(f"[API] Données reçues: {request.data}")
+
+        serializer = DupliquerTacheSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            print(f"[API] Erreur validation: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        print(f"[API] Données validées: {serializer.validated_data}")
+
+        try:
+            nouvelles_taches = dupliquer_tache_avec_distributions(
+                tache_id=tache.id,
+                **serializer.validated_data
+            )
+            print(f"[API] {len(nouvelles_taches)} tâche(s) créée(s)")
+
+            response_serializer = TacheRecurrenceResponseSerializer({
+                'message': f'{len(nouvelles_taches)} tâche(s) créée(s) avec succès',
+                'nombre_taches_creees': len(nouvelles_taches),
+                'taches_creees': nouvelles_taches,
+                'tache_source_id': tache.id
+            })
+
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        except DjangoValidationError as e:
+            print(f"[API] ValidationError: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
+            print(f"[API] ValueError: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            print(f"[API] Exception: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': f'Erreur lors de la duplication: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], url_path='dupliquer-recurrence')
+    def dupliquer_recurrence(self, request, pk=None):
+        """
+        Duplique une tâche selon une fréquence prédéfinie.
+
+        **Fréquences disponibles:**
+        - `DAILY`: Quotidien (chaque jour)
+        - `WEEKLY`: Hebdomadaire (chaque semaine, +7 jours)
+        - `MONTHLY`: Mensuel (chaque mois, +30 jours)
+        - `YEARLY`: Annuel (chaque année, +365 jours)
+
+        **Exemple de requête:**
+        ```json
+        {
+            "frequence": "WEEKLY",
+            "nombre_occurrences": 12,
+            "conserver_equipes": true,
+            "conserver_objets": true,
+            "nouveau_statut": "PLANIFIEE"
+        }
+        ```
+
+        **Retourne:**
+        - Liste des nouvelles tâches créées avec leurs distributions
+        """
+        tache = self.get_object()
+        print(f"[API] dupliquer-recurrence appelé pour tâche #{tache.id}")
+        print(f"[API] Données reçues: {request.data}")
+
+        serializer = DupliquerTacheRecurrenceSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            print(f"[API] Erreur validation: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        print(f"[API] Données validées: {serializer.validated_data}")
+
+        try:
+            nouvelles_taches = dupliquer_tache_recurrence_multiple(
+                tache_id=tache.id,
+                **serializer.validated_data
+            )
+            print(f"[API] {len(nouvelles_taches)} tâche(s) créée(s)")
+
+            response_serializer = TacheRecurrenceResponseSerializer({
+                'message': f'{len(nouvelles_taches)} tâche(s) récurrente(s) créée(s) avec succès',
+                'nombre_taches_creees': len(nouvelles_taches),
+                'taches_creees': nouvelles_taches,
+                'tache_source_id': tache.id
+            })
+
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        except DjangoValidationError as e:
+            print(f"[API] ValidationError: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
+            print(f"[API] ValueError: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            print(f"[API] Exception: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': f'Erreur lors de la création des récurrences: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], url_path='dupliquer-dates')
+    def dupliquer_dates_specifiques(self, request, pk=None):
+        """
+        Duplique une tâche à des dates spécifiques.
+
+        **Exemple de requête:**
+        ```json
+        {
+            "dates_cibles": ["2026-02-15", "2026-03-15", "2026-04-15"],
+            "conserver_equipes": true,
+            "conserver_objets": true,
+            "nouveau_statut": "PLANIFIEE"
+        }
+        ```
+
+        **Notes:**
+        - Les dates doivent être dans l'ordre chronologique
+        - Les dates doivent être postérieures à la date de début de la tâche source
+        - Maximum 100 dates
+
+        **Retourne:**
+        - Liste des nouvelles tâches créées avec leurs distributions
+        """
+        tache = self.get_object()
+        serializer = DupliquerTacheDatesSpecifiquesSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            nouvelles_taches = dupliquer_tache_dates_specifiques(
+                tache_id=tache.id,
+                **serializer.validated_data
+            )
+
+            response_serializer = TacheRecurrenceResponseSerializer({
+                'message': f'{len(nouvelles_taches)} tâche(s) créée(s) aux dates spécifiées',
+                'nombre_taches_creees': len(nouvelles_taches),
+                'taches_creees': nouvelles_taches,
+                'tache_source_id': tache.id
+            })
+
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        except DjangoValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {'error': f'Erreur lors de la duplication aux dates spécifiques: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['get'], url_path='frequences-compatibles')
+    def frequences_compatibles(self, request, pk=None):
+        """
+        Retourne les fréquences de récurrence compatibles avec la durée de la tâche.
+
+        **Utilisation:**
+        Appelez cet endpoint AVANT de créer une récurrence pour afficher
+        seulement les options valides à l'utilisateur.
+
+        **Règle de compatibilité:**
+        Le décalage de la fréquence doit être >= durée de la tâche
+        pour éviter le chevauchement des occurrences.
+
+        **Exemples de réponse:**
+
+        Tâche de 1 jour:
+        ```json
+        {
+            "duree_tache_jours": 1,
+            "date_debut": "2026-01-14",
+            "date_fin": "2026-01-14",
+            "frequences_compatibles": ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"],
+            "frequences_incompatibles": []
+        }
+        ```
+
+        Tâche de 10 jours:
+        ```json
+        {
+            "duree_tache_jours": 10,
+            "date_debut": "2026-01-14",
+            "date_fin": "2026-01-24",
+            "frequences_compatibles": ["MONTHLY", "YEARLY"],
+            "frequences_incompatibles": [
+                {
+                    "frequence": "DAILY",
+                    "decalage_jours": 1,
+                    "raison": "Décalage (1j) < Durée tâche (10j)"
+                },
+                {
+                    "frequence": "WEEKLY",
+                    "decalage_jours": 7,
+                    "raison": "Décalage (7j) < Durée tâche (10j)"
+                }
+            ]
+        }
+        ```
+        """
+        tache = self.get_object()
+
+        try:
+            duree_tache = calculer_duree_tache(tache)
+            frequences_compatibles_list = obtenir_frequences_compatibles(tache)
+
+            # Mapping fréquence -> décalage
+            frequences_mapping = {
+                'DAILY': 1,
+                'WEEKLY': 7,
+                'MONTHLY': 30,
+                'YEARLY': 365,
+            }
+
+            # Identifier les fréquences incompatibles avec raison
+            frequences_incompatibles = []
+            for freq, decalage in frequences_mapping.items():
+                if freq not in frequences_compatibles_list:
+                    frequences_incompatibles.append({
+                        'frequence': freq,
+                        'decalage_jours': decalage,
+                        'raison': f'Décalage ({decalage}j) < Durée tâche ({duree_tache}j)'
+                    })
+
+            return Response({
+                'duree_tache_jours': duree_tache,
+                'date_debut': tache.date_debut_planifiee.strftime('%Y-%m-%d'),
+                'date_fin': tache.date_fin_planifiee.strftime('%Y-%m-%d'),
+                'frequences_compatibles': frequences_compatibles_list,
+                'frequences_incompatibles': frequences_incompatibles,
+                'message': (
+                    f'Cette tâche dure {duree_tache} jour(s). '
+                    f'Fréquences compatibles : {", ".join(frequences_compatibles_list) if frequences_compatibles_list else "Aucune"}'
+                )
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {'error': f'Erreur lors du calcul des fréquences: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

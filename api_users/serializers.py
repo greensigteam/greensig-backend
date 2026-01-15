@@ -150,33 +150,22 @@ class UtilisateurRoleSerializer(serializers.ModelSerializer):
 class StructureClientSerializer(serializers.ModelSerializer):
     """
     ⚡ Serializer OPTIMISÉ pour les structures clientes.
-
-    Désactive les champs calculés coûteux pour éviter les N+1 queries.
+    Utilise des annotations SQL pour les compteurs.
     """
-    # ⚠️ DÉSACTIVÉ: Ces champs font des .count() sur chaque structure (N+1)
-    # utilisateurs_count = serializers.SerializerMethodField()  # obj.nombre_utilisateurs fait .count()
-    # sites_count = serializers.SerializerMethodField()  # obj.nombre_sites fait .count()
-    # logo_display = serializers.SerializerMethodField()  # Propriété calculée
+    # ✅ RÉACTIVÉ : Utilise des annotations performantes injectées par le ViewSet
+    utilisateurs_count = serializers.IntegerField(source='annotated_utilisateurs_count', read_only=True)
+    sites_count = serializers.IntegerField(source='annotated_sites_count', read_only=True)
+    logo_display = serializers.CharField(read_only=True)
 
     class Meta:
         model = StructureClient
         fields = [
             'id', 'nom', 'adresse', 'telephone',
             'contact_principal', 'email_facturation', 'logo', 'logo_url',
-            'actif', 'date_creation'
-            # Champs désactivés pour performance: utilisateurs_count, sites_count, logo_display
+            'logo_display', 'actif', 'date_creation',
+            'utilisateurs_count', 'sites_count'
         ]
-        read_only_fields = ['id', 'date_creation']
-
-    # def get_utilisateurs_count(self, obj):
-    #     return obj.nombre_utilisateurs
-    #
-    # def get_sites_count(self, obj):
-    #     return obj.nombre_sites
-    #
-    # def get_logo_display(self, obj):
-    #     """Retourne l'URL du logo (fichier ou URL externe)."""
-    #     return obj.logo_display
+        read_only_fields = ['id', 'date_creation', 'logo_display']
 
 
 class StructureClientDetailSerializer(StructureClientSerializer):

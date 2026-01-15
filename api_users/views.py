@@ -343,11 +343,16 @@ class StructureClientViewSet(viewsets.ModelViewSet):
             if 'SUPERVISEUR' in roles:
                 try:
                     superviseur = user.superviseur_profile
-                    return qs.filter(sites__superviseur=superviseur).distinct()
+                    qs = qs.filter(sites__superviseur=superviseur).distinct()
                 except AttributeError:
-                    pass
+                    return qs.none()
 
-        return qs.none()
+        # Optimisation : Ajouter les compteurs via des annotations SQL
+        # distinct=True est crucial ici car on a deux jointures différentes
+        return qs.annotate(
+            annotated_utilisateurs_count=Count('utilisateurs', distinct=True),
+            annotated_sites_count=Count('sites', distinct=True)
+        )
 
     def get_serializer_class(self):
         """Retourne le serializer approprié selon l'action."""

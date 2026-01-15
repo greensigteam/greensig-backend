@@ -253,6 +253,13 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         help_text="Liste des distributions: [{'date': '2024-01-15', 'heures_planifiees': 2.0}, ...]"
     )
 
+    # ✅ NOUVEAU: Configuration de récurrence (ignorée par le backend, gérée par le frontend)
+    recurrence_config = serializers.DictField(
+        write_only=True,
+        required=False,
+        help_text="Configuration de récurrence (géré côté frontend après création)"
+    )
+
     class Meta:
         model = Tache
         fields = '__all__'
@@ -328,6 +335,9 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
 
         # ✅ NOUVEAU: Extract distributions de charge
         distributions_data = validated_data.pop('distributions_charge_data', None)
+
+        # ✅ NOUVEAU: Extract recurrence config (ignoré, géré côté frontend)
+        recurrence_config = validated_data.pop('recurrence_config', None)
 
         # AUTO-ASSIGN CLIENT & STRUCTURE: Si non fournis, les déduire des objets
         if objets:
@@ -418,6 +428,9 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
 
         # ✅ NOUVEAU: Extract distributions de charge
         distributions_data = validated_data.pop('distributions_charge_data', None)
+
+        # ✅ NOUVEAU: Extract recurrence config (ignoré en update, seulement pour create)
+        recurrence_config = validated_data.pop('recurrence_config', None)
 
         print(f"[PERF] Extracted M2M - equipes: {len(equipes) if equipes else 0}, objets: {len(objets) if objets else 0}")
 
@@ -543,6 +556,141 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
 
         print(f"[PERF] UPDATE TOTAL took {time.time() - start_total:.2f}s")
         return instance
+
+
+# =============================================================================
+# SERIALIZERS POUR LA RÉCURRENCE DES TÂCHES
+# =============================================================================
+
+class DupliquerTacheSerializer(serializers.Serializer):
+    """
+    Serializer pour dupliquer une tâche avec décalage personnalisé.
+    """
+    decalage_jours = serializers.IntegerField(
+        min_value=1,
+        help_text="Décalage en jours entre chaque occurrence"
+    )
+    nombre_occurrences = serializers.IntegerField(
+        min_value=1,
+        max_value=100,
+        required=False,
+        allow_null=True,
+        help_text="Nombre max de tâches à créer (optionnel, max 100)"
+    )
+    date_fin_recurrence = serializers.DateField(
+        required=False,
+        allow_null=True,
+        help_text="Date limite pour créer des occurrences (optionnel). Si non fournie, génère jusqu'au 31/12 de l'année en cours"
+    )
+    conserver_equipes = serializers.BooleanField(
+        default=True,
+        help_text="Conserver les équipes assignées"
+    )
+    conserver_objets = serializers.BooleanField(
+        default=True,
+        help_text="Conserver les objets liés (sites/inventaire)"
+    )
+    nouveau_statut = serializers.ChoiceField(
+        choices=Tache.STATUT_CHOICES,
+        default='PLANIFIEE',
+        help_text="Statut des nouvelles tâches créées"
+    )
+
+    def validate(self, data):
+        """Validation globale."""
+        nombre_occurrences = data.get('nombre_occurrences')
+        date_fin_recurrence = data.get('date_fin_recurrence')
+
+        # Au moins un des deux doit être fourni (ou aucun pour défaut)
+        # Cette logique est OK
+
+        return data
+
+
+class DupliquerTacheRecurrenceSerializer(serializers.Serializer):
+    """
+    Serializer pour dupliquer une tâche selon une fréquence prédéfinie.
+    """
+    FREQUENCE_CHOICES = [
+        ('DAILY', 'Quotidien'),
+        ('WEEKLY', 'Hebdomadaire'),
+        ('MONTHLY', 'Mensuel'),
+        ('YEARLY', 'Annuel'),
+    ]
+
+    frequence = serializers.ChoiceField(
+        choices=FREQUENCE_CHOICES,
+        help_text="Fréquence de récurrence"
+    )
+    nombre_occurrences = serializers.IntegerField(
+        min_value=1,
+        max_value=100,
+        required=False,
+        allow_null=True,
+        help_text="Nombre max d'occurrences (optionnel, max 100)"
+    )
+    date_fin_recurrence = serializers.DateField(
+        required=False,
+        allow_null=True,
+        help_text="Date limite pour créer des occurrences (optionnel). Si non fournie, génère jusqu'au 31/12 de l'année en cours"
+    )
+    conserver_equipes = serializers.BooleanField(
+        default=True,
+        help_text="Conserver les équipes assignées"
+    )
+    conserver_objets = serializers.BooleanField(
+        default=True,
+        help_text="Conserver les objets liés (sites/inventaire)"
+    )
+    nouveau_statut = serializers.ChoiceField(
+        choices=Tache.STATUT_CHOICES,
+        default='PLANIFIEE',
+        help_text="Statut des nouvelles tâches créées"
+    )
+
+
+class DupliquerTacheDatesSpecifiquesSerializer(serializers.Serializer):
+    """
+    Serializer pour dupliquer une tâche à des dates spécifiques.
+    """
+    dates_cibles = serializers.ListField(
+        child=serializers.DateField(),
+        min_length=1,
+        max_length=100,
+        help_text="Liste des dates de début pour les nouvelles tâches (max 100)"
+    )
+    conserver_equipes = serializers.BooleanField(
+        default=True,
+        help_text="Conserver les équipes assignées"
+    )
+    conserver_objets = serializers.BooleanField(
+        default=True,
+        help_text="Conserver les objets liés (sites/inventaire)"
+    )
+    nouveau_statut = serializers.ChoiceField(
+        choices=Tache.STATUT_CHOICES,
+        default='PLANIFIEE',
+        help_text="Statut des nouvelles tâches créées"
+    )
+
+    def validate_dates_cibles(self, value):
+        """Valide que les dates sont dans l'ordre croissant."""
+        dates_sorted = sorted(value)
+        if dates_sorted != value:
+            raise serializers.ValidationError(
+                "Les dates doivent être fournies dans l'ordre chronologique"
+            )
+        return value
+
+
+class TacheRecurrenceResponseSerializer(serializers.Serializer):
+    """
+    Serializer pour la réponse après duplication de tâches.
+    """
+    message = serializers.CharField()
+    nombre_taches_creees = serializers.IntegerField()
+    taches_creees = TacheSerializer(many=True)
+    tache_source_id = serializers.IntegerField()
 
 
 
