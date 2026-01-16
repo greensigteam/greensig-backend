@@ -26,6 +26,13 @@ from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur
 
 
 # ==============================================================================
+# VIEWSET POUR LES DISTRIBUTIONS
+# ==============================================================================
+# ⚠️ SUPPRIMÉ: Ancienne version dupliquée (ligne 32-163)
+# Voir la version complète avec RoleBasedQuerySetMixin à la ligne ~700
+
+
+# ==============================================================================
 # PAGINATION PERSONNALISÉE
 # ==============================================================================
 
@@ -486,6 +493,128 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
                     commentaire=f"Passage en cours automatique suite à la création de tâches"
                 )
 
+    @action(detail=True, methods=['post'], url_path='dupliquer-recurrence')
+    def dupliquer_recurrence(self, request, pk=None):
+        """
+        Duplique une tâche selon une fréquence prédéfinie.
+
+        **Fréquences disponibles:**
+        - `DAILY`: Quotidien (chaque jour)
+        - `WEEKLY`: Hebdomadaire (chaque semaine, +7 jours)
+        - `MONTHLY`: Mensuel (chaque mois, +30 jours)
+        - `YEARLY`: Annuel (chaque année, +365 jours)
+
+        **Exemple de requête:**
+        ```json
+        {
+            "frequence": "WEEKLY",
+            "nombre_occurrences": 12,
+            "conserver_equipes": true,
+            "conserver_objets": true,
+            "nouveau_statut": "PLANIFIEE"
+        }
+        ```
+
+        **Retourne:**
+        - Liste des nouvelles tâches créées avec leurs distributions
+        """
+        tache = self.get_object()
+        print(f"[API] dupliquer-recurrence appelé pour tâche #{tache.id}")
+        print(f"[API] Données reçues: {request.data}")
+
+        serializer = DupliquerTacheRecurrenceSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            print(f"[API] Erreur validation: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        print(f"[API] Données validées: {serializer.validated_data}")
+
+        try:
+            nouvelles_taches = dupliquer_tache_recurrence_multiple(
+                tache_id=tache.id,
+                **serializer.validated_data
+            )
+            print(f"[API] {len(nouvelles_taches)} tâche(s) créée(s)")
+
+            response_serializer = TacheRecurrenceResponseSerializer({
+                'message': f'{len(nouvelles_taches)} tâche(s) récurrente(s) créée(s) avec succès',
+                'nombre_taches_creees': len(nouvelles_taches),
+                'taches_creees': nouvelles_taches,
+                'tache_source_id': tache.id
+            })
+
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        except DjangoValidationError as e:
+            print(f"[API] ValidationError: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
+            print(f"[API] ValueError: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            print(f"[API] Exception: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': f'Erreur lors de la création des récurrences: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], url_path='dupliquer-dates')
+    def dupliquer_dates_specifiques(self, request, pk=None):
+        """
+        Duplique une tâche à des dates spécifiques.
+
+        **Exemple de requête:**
+        ```json
+        {
+            "dates_cibles": ["2026-02-15", "2026-03-15", "2026-04-15"],
+            "conserver_equipes": true,
+            "conserver_objets": true,
+            "nouveau_statut": "PLANIFIEE"
+        }
+        ```
+
+        **Notes:**
+        - Les dates doivent être dans l'ordre chronologique
+        - Les dates doivent être postérieures à la date de début de la tâche source
+        - Maximum 100 dates
+
+        **Retourne:**
+        - Liste des nouvelles tâches créées avec leurs distributions
+        """
+        tache = self.get_object()
+        serializer = DupliquerTacheDatesSpecifiquesSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            nouvelles_taches = dupliquer_tache_dates_specifiques(
+                tache_id=tache.id,
+                **serializer.validated_data
+            )
+
+            response_serializer = TacheRecurrenceResponseSerializer({
+                'message': f'{len(nouvelles_taches)} tâche(s) créée(s) aux dates spécifiées',
+                'nombre_taches_creees': len(nouvelles_taches),
+                'taches_creees': nouvelles_taches,
+                'tache_source_id': tache.id
+            })
+
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        except DjangoValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {'error': f'Erreur lors de la duplication aux dates spécifiques: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     def perform_update(self, serializer):
         # Récupérer l'ancien statut avant la sauvegarde
         instance = self.get_object()
@@ -557,7 +686,7 @@ class RatioProductiviteViewSet(viewsets.ModelViewSet):
 # DISTRIBUTION DE CHARGE (TÂCHES MULTI-JOURS)
 # ==============================================================================
 
-class DistributionChargeViewSet(viewsets.ModelViewSet):
+class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
     """
     ✅ API endpoint pour gérer les distributions de charge journalières.
 
@@ -565,9 +694,14 @@ class DistributionChargeViewSet(viewsets.ModelViewSet):
     s'étendant sur plusieurs jours.
 
     Permissions:
-    - ADMIN: CRUD complet
-    - SUPERVISEUR: CRUD pour les tâches de ses équipes
-    - CLIENT: Lecture seule
+    - ADMIN: CRUD complet + voit toutes les distributions
+    - SUPERVISEUR: CRUD pour les distributions des tâches sur ses sites
+    - CLIENT: Lecture seule pour les distributions des tâches de sa structure
+
+    Filtrage automatique (via RoleBasedQuerySetMixin):
+    - ADMIN: Voit toutes les distributions
+    - SUPERVISEUR: Voit uniquement les distributions des tâches sur ses sites
+    - CLIENT: Voit uniquement les distributions des tâches de sa structure
 
     Filtres disponibles:
     - ?tache={id} : Distributions pour une tâche spécifique
@@ -621,6 +755,108 @@ class DistributionChargeViewSet(viewsets.ModelViewSet):
             permission_classes = [permissions.IsAuthenticated]
 
         return [permission() for permission in permission_classes]
+
+    def perform_update(self, serializer):
+        """
+        Validation supplémentaire lors de la mise à jour.
+        Double couche de sécurité en plus de la validation du serializer.
+        """
+        distribution = self.get_object()
+        tache = distribution.tache
+
+        # Récupérer les nouvelles données (avec fallback sur les valeurs actuelles)
+        new_date = serializer.validated_data.get('date', distribution.date)
+        new_heure_debut = serializer.validated_data.get('heure_debut', distribution.heure_debut)
+        new_heure_fin = serializer.validated_data.get('heure_fin', distribution.heure_fin)
+
+        from rest_framework.exceptions import ValidationError
+        from django.db import IntegrityError
+
+        # Valider que la nouvelle date est dans la période de la tâche
+        if new_date < tache.date_debut_planifiee or new_date > tache.date_fin_planifiee:
+            raise ValidationError({
+                'date': f"La date doit être comprise entre {tache.date_debut_planifiee} et {tache.date_fin_planifiee}"
+            })
+
+        # Valider que heure_fin > heure_debut
+        if new_heure_debut and new_heure_fin:
+            if new_heure_fin <= new_heure_debut:
+                raise ValidationError({
+                    'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
+                })
+
+        # Tenter la sauvegarde avec gestion de l'erreur d'unicité
+        try:
+            serializer.save()
+        except IntegrityError as e:
+            # Attraper l'erreur d'unicité de contrainte (tache, date)
+            if 'tache_id_date' in str(e):
+                raise ValidationError({
+                    'date': f"Une distribution existe déjà pour cette tâche à la date du {new_date.strftime('%d/%m/%Y')}"
+                })
+            # Si c'est une autre erreur d'intégrité, la relancer
+            raise
+
+    def perform_create(self, serializer):
+        """
+        Validation lors de la création d'une distribution.
+
+        Vérifie que :
+        - La date est comprise entre la date de début et fin de la tâche
+        - L'heure de fin est après l'heure de début
+        - Pas de doublon (tache, date)
+        """
+        from rest_framework.exceptions import ValidationError
+        from django.db import IntegrityError
+
+        tache = serializer.validated_data.get('tache')
+        date = serializer.validated_data.get('date')
+        heure_debut = serializer.validated_data.get('heure_debut')
+        heure_fin = serializer.validated_data.get('heure_fin')
+
+        # Valider que la date est dans la période de la tâche
+        if date < tache.date_debut_planifiee or date > tache.date_fin_planifiee:
+            raise ValidationError({
+                'date': f"La date doit être comprise entre {tache.date_debut_planifiee} et {tache.date_fin_planifiee}"
+            })
+
+        # Valider que heure_fin > heure_debut
+        if heure_debut and heure_fin:
+            if heure_fin <= heure_debut:
+                raise ValidationError({
+                    'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
+                })
+
+        # Tenter la sauvegarde avec gestion de l'erreur d'unicité
+        try:
+            serializer.save()
+        except IntegrityError as e:
+            # Attraper l'erreur d'unicité de contrainte (tache, date)
+            if 'tache_id_date' in str(e):
+                raise ValidationError({
+                    'date': f"Une distribution existe déjà pour cette tâche à la date du {date.strftime('%d/%m/%Y')}"
+                })
+            # Si c'est une autre erreur d'intégrité, la relancer
+            raise
+
+    def perform_destroy(self, instance):
+        """
+        Validation et nettoyage lors de la suppression d'une distribution.
+
+        Vérifie que la tâche n'est pas terminée avant de supprimer.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        tache = instance.tache
+
+        # Vérifier que la tâche n'est pas terminée
+        if tache.statut == 'TERMINEE':
+            raise ValidationError({
+                'detail': "Impossible de supprimer une distribution d'une tâche terminée"
+            })
+
+        # Supprimer la distribution
+        instance.delete()
 
     @action(detail=True, methods=['post'], url_path='marquer-realisee')
     def marquer_realisee(self, request, pk=None):
@@ -708,9 +944,16 @@ class DistributionChargeViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_200_OK)
 
 
-class TacheViewSet(viewsets.ModelViewSet):
+class TacheRecurrenceViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
     """
+    ⚠️ RENOMMÉ: Ancien TacheViewSet pour éviter collision avec le TacheViewSet principal (ligne 140)
+
     ViewSet pour les tâches avec fonctionnalité de récurrence/duplication.
+
+    Filtrage automatique (via RoleBasedQuerySetMixin):
+    - ADMIN: Toutes les tâches
+    - SUPERVISEUR: Tâches sur ses sites uniquement
+    - CLIENT: Tâches de sa structure uniquement
     """
     queryset = Tache.objects.filter(deleted_at__isnull=True)
     permission_classes = [permissions.IsAuthenticated]

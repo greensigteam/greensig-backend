@@ -16,6 +16,6 @@ class CustomPageNumberPagination(PageNumberPagination):
     de récupérer tous les résultats quand nécessaire.
     """
     display_page_controls = True
-    page_size = 1000000
+    page_size = 100000
     page_size_query_param = 'page_size'
     max_page_size = None

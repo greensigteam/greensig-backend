@@ -153,6 +153,8 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
     Permet de définir précisément la charge planifiée par jour
     pour des tâches s'étendant sur plusieurs jours.
     """
+    # ✅ FIX: heures_planifiees est auto-calculé depuis heure_debut/heure_fin dans validate()
+    heures_planifiees = serializers.FloatField(required=False)
 
     class Meta:
         model = DistributionCharge
@@ -160,18 +162,33 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
             'heure_debut', 'heure_fin',
-            'commentaire', 'status', 
+            'commentaire', 'status',
             'reference', # ✅ NOUVEAU: Référence persistante
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
 
+    def get_fields(self):
+        """Rendre 'tache' read-only uniquement lors de l'update"""
+        fields = super().get_fields()
+        # Si c'est un update (instance existe), rendre 'tache' read-only
+        if self.instance is not None:
+            fields['tache'].read_only = True
+        return fields
+
     def validate(self, data):
         """Validation de la distribution"""
-        # Vérifier que la date est dans la période de la tâche
+        # Récupérer la tâche (depuis data pour création, depuis instance pour update)
         tache = data.get('tache')
-        date = data.get('date')
+        if not tache and self.instance:
+            tache = self.instance.tache
 
+        # Récupérer la date (depuis data ou depuis instance pour update partiel)
+        date = data.get('date')
+        if not date and self.instance:
+            date = self.instance.date
+
+        # Vérifier que la date est dans la période de la tâche
         if tache and date:
             # Les dates sont déjà des DateField (datetime.date)
             date_debut = tache.date_debut_planifiee
@@ -179,13 +196,32 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
 
             if date < date_debut or date > date_fin:
                 raise serializers.ValidationError({
-                    'date': f"La date doit être entre {date_debut} et {date_fin}"
+                    'date': f"La date doit être comprise entre {date_debut} et {date_fin}"
                 })
 
-        # Vérifier que heure_fin > heure_debut
-        heure_debut = data.get('heure_debut')
-        heure_fin = data.get('heure_fin')
+            # Vérifier l'unicité (tache, date) sauf pour l'instance en cours de modification
+            from api_planification.models import DistributionCharge
+            existing_query = DistributionCharge.objects.filter(tache=tache, date=date)
 
+            # Si c'est un update, exclure l'instance actuelle
+            if self.instance:
+                existing_query = existing_query.exclude(id=self.instance.id)
+
+            if existing_query.exists():
+                raise serializers.ValidationError({
+                    'date': f"Une distribution existe déjà pour cette tâche à la date du {date.strftime('%d/%m/%Y')}"
+                })
+
+        # Récupérer heure_debut et heure_fin (depuis data ou depuis instance pour update partiel)
+        heure_debut = data.get('heure_debut')
+        if not heure_debut and self.instance:
+            heure_debut = self.instance.heure_debut
+
+        heure_fin = data.get('heure_fin')
+        if not heure_fin and self.instance:
+            heure_fin = self.instance.heure_fin
+
+        # Vérifier que heure_fin > heure_debut
         if heure_debut and heure_fin:
             if heure_fin <= heure_debut:
                 raise serializers.ValidationError({

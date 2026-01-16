@@ -215,6 +215,12 @@ class RoleBasedQuerySetMixin:
                 objets__site__superviseur=superviseur
             ).distinct()
 
+        # Distributions de charge : Distributions des tâches sur les sites du superviseur
+        if model_name == 'DistributionCharge':
+            return queryset.filter(
+                tache__objets__site__superviseur=superviseur
+            ).distinct()
+
         # Réclamations : Réclamations sur les sites affectés au superviseur
         if model_name == 'Reclamation':
             return queryset.filter(site__superviseur=superviseur)
@@ -261,6 +267,10 @@ class RoleBasedQuerySetMixin:
         if model_name == 'Tache':
             return queryset.filter(id_structure_client=client.structure)
 
+        # Distributions de charge : Distributions des tâches de sa structure
+        if model_name == 'DistributionCharge':
+            return queryset.filter(tache__id_structure_client=client.structure)
+
         # Réclamations : Ses réclamations (via structure_client)
         if model_name == 'Reclamation':
             return queryset.filter(structure_client=client.structure)
@@ -268,32 +278,60 @@ class RoleBasedQuerySetMixin:
         # Équipes : Équipes travaillant sur ses sites (via structure_client)
         # Une équipe est visible si son site principal OU un site secondaire appartient au client
         if model_name == 'Equipe':
+            # 🔍 DEBUG
+            from api.models import Site
+            logger.info(f"[RoleBasedQuerySetMixin] Equipe: CLIENT structure={client.structure.nom}")
+
+            sites_client = Site.objects.filter(structure_client=client.structure)
+            logger.info(f"[RoleBasedQuerySetMixin] Equipe: {sites_client.count()} sites pour ce client → {list(sites_client.values_list('nom_site', flat=True))}")
+
             equipes_site_principal = Q(site_principal__structure_client=client.structure)
             equipes_site_secondaire = Q(sites_secondaires__structure_client=client.structure)
             equipes_legacy = Q(site__structure_client=client.structure)  # Legacy
-            return queryset.filter(
+
+            filtered = queryset.filter(
                 equipes_site_principal |
                 equipes_site_secondaire |
                 equipes_legacy
             ).distinct()
 
+            logger.info(f"[RoleBasedQuerySetMixin] Equipe: {filtered.count()} équipes après filtrage")
+            if filtered.exists():
+                for eq in filtered[:5]:  # Log les 5 premières
+                    logger.info(f"[RoleBasedQuerySetMixin] Equipe: → {eq.nom_equipe} (site_principal={eq.site_principal}, sites_secondaires={list(eq.sites_secondaires.values_list('nom_site', flat=True))})")
+
+            return filtered
+
         # Opérateurs : Opérateurs des équipes travaillant sur ses sites (via structure_client)
         if model_name == 'Operateur':
             from api_planification.models import Tache
+            from api_users.models import Equipe
 
-            # 1. Opérateurs dont l'équipe est affectée aux sites du client
-            equipes_affectees_ids = set()
+            # 🔍 DEBUG
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: CLIENT structure={client.structure.nom}")
+
+            # 1. Opérateurs dont l'équipe est affectée aux sites du client (via site principal ou secondaire)
             from api.models import Site
             sites_client = Site.objects.filter(structure_client=client.structure)
-            equipes_affectees_ids.update(
-                sites_client.values_list('equipes_affectees__id', flat=True)
-            )
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: {sites_client.count()} sites pour ce client")
+
+            # Équipes avec site principal = sites du client
+            equipes_via_principal = Equipe.objects.filter(site_principal__in=sites_client)
+            # Équipes avec sites secondaires = sites du client
+            equipes_via_secondaire = Equipe.objects.filter(sites_secondaires__in=sites_client)
+
+            equipes_affectees_ids = set()
+            equipes_affectees_ids.update(equipes_via_principal.values_list('id', flat=True))
+            equipes_affectees_ids.update(equipes_via_secondaire.values_list('id', flat=True))
+
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: {len(equipes_affectees_ids)} équipes affectées aux sites")
 
             # 2. Opérateurs dont l'équipe a des tâches sur les sites du client
             taches_sur_sites_client = Tache.objects.filter(
                 deleted_at__isnull=True,
                 objets__site__structure_client=client.structure
             ).distinct()
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: {taches_sur_sites_client.count()} tâches sur les sites du client")
 
             # M2M relation
             equipes_ids_avec_taches = set()
@@ -304,15 +342,20 @@ class RoleBasedQuerySetMixin:
             equipes_ids_avec_taches.update(
                 taches_sur_sites_client.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
             )
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: {len(equipes_ids_avec_taches)} équipes avec tâches")
 
             # Combiner tous les IDs d'équipes
             all_equipes_ids = equipes_affectees_ids | equipes_ids_avec_taches
             all_equipes_ids.discard(None)
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: {len(all_equipes_ids)} équipes au total → {list(all_equipes_ids)}")
 
             if not all_equipes_ids:
+                logger.warning(f"[RoleBasedQuerySetMixin] Operateur: Aucune équipe trouvée pour ce client → queryset.none()")
                 return queryset.none()
 
-            return queryset.filter(equipe__id__in=all_equipes_ids).distinct()
+            filtered = queryset.filter(equipe__id__in=all_equipes_ids).distinct()
+            logger.info(f"[RoleBasedQuerySetMixin] Operateur: {filtered.count()} opérateurs après filtrage")
+            return filtered
 
         # Absences : Absences des opérateurs de ses équipes (via structure_client)
         if model_name == 'Absence':

@@ -677,6 +677,13 @@ class EquipeListSerializer(serializers.ModelSerializer):
     # ✅ RÉACTIVÉ avec annotation pour éviter N+1 queries
     nombre_membres = serializers.IntegerField(source='nombre_membres_count', read_only=True, default=0)
 
+    # ✅ RÉACTIVÉ : Statut opérationnel (property du modèle)
+    # Note : Fait quelques queries mais nécessaire pour l'affichage dans la liste
+    statut_operationnel = serializers.CharField(read_only=True)
+
+    # ✅ RÉACTIVÉ : Nom du superviseur (via SerializerMethodField)
+    superviseur_nom = serializers.SerializerMethodField(read_only=True)
+
     def get_sites_secondaires(self, obj):
         """Retourne la liste des IDs des sites secondaires (utilise prefetch_related)."""
         return [site.id for site in obj.sites_secondaires.all()]
@@ -684,6 +691,12 @@ class EquipeListSerializer(serializers.ModelSerializer):
     def get_sites_secondaires_noms(self, obj):
         """Retourne la liste des noms des sites secondaires (utilise prefetch_related)."""
         return [site.nom_site for site in obj.sites_secondaires.all()]
+
+    def get_superviseur_nom(self, obj):
+        """Retourne le nom complet du superviseur (déduit du site principal)."""
+        if obj.superviseur and hasattr(obj.superviseur, 'utilisateur'):
+            return obj.superviseur.utilisateur.get_full_name()
+        return None
 
     class Meta:
         model = Equipe
@@ -694,7 +707,8 @@ class EquipeListSerializer(serializers.ModelSerializer):
             'sites_secondaires', 'sites_secondaires_noms',  # ✅ Ajouté pour filtrage frontend
             'actif', 'date_creation',
             'nombre_membres',  # ✅ Ajouté (utilisé annotation pour perf)
-            # Champs désactivés pour performance, voir EquipeDetailSerializer
+            'statut_operationnel',  # ✅ Réactivé (property du modèle)
+            'superviseur_nom',  # ✅ Réactivé (SerializerMethodField)
         ]
 
 
@@ -892,7 +906,12 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         """Met à jour l'équipe."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[EquipeUpdateSerializer] validated_data: {validated_data}")
+
         sites_secondaires = validated_data.pop('sites_secondaires', None)
+        logger.info(f"[EquipeUpdateSerializer] sites_secondaires: {sites_secondaires}")
 
         # Mettre à jour les champs simples
         for attr, value in validated_data.items():
@@ -902,6 +921,7 @@ class EquipeUpdateSerializer(serializers.ModelSerializer):
         # Mettre à jour les sites secondaires si fournis
         if sites_secondaires is not None:
             instance.sites_secondaires.set(sites_secondaires)
+            logger.info(f"[EquipeUpdateSerializer] Sites secondaires mis à jour: {list(instance.sites_secondaires.values_list('id', flat=True))}")
 
         return instance
 

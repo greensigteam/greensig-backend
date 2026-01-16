@@ -326,28 +326,29 @@ class StructureClientViewSet(viewsets.ModelViewSet):
         if user.is_authenticated:
             roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
 
-            # ADMIN voit tout
-            if 'ADMIN' in roles:
-                return qs
+            # ADMIN voit tout (pas de filtre)
+            if 'ADMIN' not in roles:
+                # CLIENT voit uniquement sa propre structure
+                if 'CLIENT' in roles:
+                    try:
+                        client_profile = user.client_profile
+                        if client_profile.structure:
+                            qs = qs.filter(id=client_profile.structure.id)
+                        else:
+                            return qs.none()
+                    except AttributeError:
+                        return qs.none()
 
-            # CLIENT voit uniquement sa propre structure
-            if 'CLIENT' in roles:
-                try:
-                    client_profile = user.client_profile
-                    if client_profile.structure:
-                        return qs.filter(id=client_profile.structure.id)
-                except AttributeError:
-                    pass
+                # SUPERVISEUR voit les structures de ses sites
+                elif 'SUPERVISEUR' in roles:
+                    try:
+                        superviseur = user.superviseur_profile
+                        qs = qs.filter(sites__superviseur=superviseur).distinct()
+                    except AttributeError:
+                        return qs.none()
 
-            # SUPERVISEUR voit les structures de ses sites
-            if 'SUPERVISEUR' in roles:
-                try:
-                    superviseur = user.superviseur_profile
-                    qs = qs.filter(sites__superviseur=superviseur).distinct()
-                except AttributeError:
-                    return qs.none()
-
-        # Optimisation : Ajouter les compteurs via des annotations SQL
+        # ✅ Optimisation : Ajouter les compteurs via des annotations SQL
+        # IMPORTANT: Ceci doit être fait APRÈS les filtres mais AVANT le return
         # distinct=True est crucial ici car on a deux jointures différentes
         return qs.annotate(
             annotated_utilisateurs_count=Count('utilisateurs', distinct=True),
@@ -2037,8 +2038,12 @@ class StatistiquesUtilisateursView(APIView):
                     Q(superviseur=superviseur) | Q(equipe__id__in=equipes_ids)
                 ).distinct()
 
+                # ✅ Équipes : Utilise la nouvelle architecture multi-sites
+                equipes_via_principal = Q(site_principal__superviseur=superviseur)
+                equipes_via_secondaire = Q(sites_secondaires__superviseur=superviseur)
+                equipes_legacy = Q(site__superviseur=superviseur)  # Legacy fallback
                 equipes_qs = Equipe.objects.filter(
-                    Q(site__superviseur=superviseur) | Q(id__in=equipes_ids)
+                    equipes_via_principal | equipes_via_secondaire | equipes_legacy | Q(id__in=equipes_ids)
                 ).distinct()
 
                 absences_qs = Absence.objects.filter(operateur__in=operateurs_qs)
@@ -2062,14 +2067,32 @@ class StatistiquesUtilisateursView(APIView):
                         'Absence': Absence.objects.none(),
                     }
 
-                # Équipes travaillant sur ses sites (via structure_client)
-                equipes_qs = Equipe.objects.filter(site__structure_client=client.structure)
+                # ✅ Équipes travaillant sur ses sites (via structure_client)
+                # Utilise la nouvelle architecture multi-sites (site_principal + sites_secondaires)
+                equipes_via_principal = Q(site_principal__structure_client=client.structure)
+                equipes_via_secondaire = Q(sites_secondaires__structure_client=client.structure)
+                equipes_legacy = Q(site__structure_client=client.structure)  # Legacy fallback
+                equipes_qs = Equipe.objects.filter(
+                    equipes_via_principal | equipes_via_secondaire | equipes_legacy
+                ).distinct()
 
-                # Opérateurs des équipes de ses sites (via structure_client)
-                operateurs_qs = Operateur.objects.filter(equipe__site__structure_client=client.structure)
+                # ✅ Opérateurs des équipes de ses sites (via structure_client)
+                # Utilise la nouvelle architecture multi-sites
+                operateurs_via_principal = Q(equipe__site_principal__structure_client=client.structure)
+                operateurs_via_secondaire = Q(equipe__sites_secondaires__structure_client=client.structure)
+                operateurs_legacy = Q(equipe__site__structure_client=client.structure)  # Legacy fallback
+                operateurs_qs = Operateur.objects.filter(
+                    operateurs_via_principal | operateurs_via_secondaire | operateurs_legacy
+                ).distinct()
 
-                # Absences des opérateurs de ses équipes (via structure_client)
-                absences_qs = Absence.objects.filter(operateur__equipe__site__structure_client=client.structure)
+                # ✅ Absences des opérateurs de ses équipes (via structure_client)
+                # Utilise la nouvelle architecture multi-sites
+                absences_via_principal = Q(operateur__equipe__site_principal__structure_client=client.structure)
+                absences_via_secondaire = Q(operateur__equipe__sites_secondaires__structure_client=client.structure)
+                absences_legacy = Q(operateur__equipe__site__structure_client=client.structure)  # Legacy fallback
+                absences_qs = Absence.objects.filter(
+                    absences_via_principal | absences_via_secondaire | absences_legacy
+                ).distinct()
 
                 return {
                     'Operateur': operateurs_qs,
