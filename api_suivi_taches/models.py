@@ -338,3 +338,130 @@ class Photo(models.Model):
             raise ValidationError(
                 "Une photo doit être liée à au moins une entité (tâche, réclamation ou objet)."
             )
+
+
+# ==============================================================================
+# MODELE FERTILISANT
+# ==============================================================================
+
+class Fertilisant(models.Model):
+    """
+    Représente un fertilisant ou amendement utilisé pour l'entretien des espaces verts.
+
+    Types: chimique, organique, biologique, minéral, substrat.
+    """
+    TYPE_CHOICES = [
+        ('CHIMIQUE', 'Chimique'),
+        ('ORGANIQUE', 'Organique'),
+        ('BIOLOGIQUE', 'Biologique'),
+        ('MINERAL', 'Amendement minéral'),
+        ('SUBSTRAT', 'Substrat organique'),
+    ]
+    FORMAT_CHOICES = [
+        ('GRANULE', 'Granulé'),
+        ('LIQUIDE', 'Liquide'),
+        ('POUDRE', 'Poudre'),
+        ('SOLIDE', 'Solide'),
+        ('DECOMPOSE', 'Décomposé'),
+    ]
+
+    nom = models.CharField(
+        max_length=255,
+        verbose_name="Nom du fertilisant",
+        help_text="Ex: Engrais NPK, Compost, Biostimulant"
+    )
+    type_fertilisant = models.CharField(
+        max_length=20,
+        choices=TYPE_CHOICES,
+        verbose_name="Type",
+        help_text="Catégorie du fertilisant"
+    )
+    format_fertilisant = models.CharField(
+        max_length=20,
+        choices=FORMAT_CHOICES,
+        verbose_name="Format",
+        help_text="Forme physique du produit"
+    )
+    description = models.TextField(
+        blank=True,
+        verbose_name="Description",
+        help_text="Informations complémentaires sur le fertilisant"
+    )
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif",
+        help_text="Désactiver si produit non disponible"
+    )
+    date_creation = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Date de création"
+    )
+
+    class Meta:
+        verbose_name = "Fertilisant"
+        verbose_name_plural = "Fertilisants"
+        ordering = ['nom', 'type_fertilisant']
+
+    def __str__(self):
+        return f"{self.nom} ({self.get_type_fertilisant_display()} - {self.get_format_fertilisant_display()})"
+
+
+# ==============================================================================
+# MODELE RAVAGEUR_MALADIE
+# ==============================================================================
+
+class RavageurMaladie(models.Model):
+    """
+    Représente un ravageur ou une maladie affectant les végétaux.
+
+    Inclut les symptômes et les produits phytosanitaires recommandés.
+    """
+    CATEGORIE_CHOICES = [
+        ('RAVAGEUR', 'Ravageur'),
+        ('MALADIE', 'Maladie'),
+    ]
+
+    nom = models.CharField(
+        max_length=255,
+        verbose_name="Nom",
+        help_text="Ex: Cochenilles, Mildiou, Pucerons"
+    )
+    categorie = models.CharField(
+        max_length=20,
+        choices=CATEGORIE_CHOICES,
+        verbose_name="Catégorie",
+        help_text="Ravageur (insecte) ou Maladie (fongique/bactérienne)"
+    )
+    symptomes = models.TextField(
+        verbose_name="Symptômes",
+        help_text="Description des signes visibles de l'infestation/infection"
+    )
+    partie_atteinte = models.CharField(
+        max_length=255,
+        verbose_name="Partie atteinte",
+        help_text="Ex: Feuilles, Tiges, Racines, Écorce, Fruits"
+    )
+    produits_recommandes = models.ManyToManyField(
+        Produit,
+        blank=True,
+        related_name='ravageurs_maladies',
+        verbose_name="Produits recommandés",
+        help_text="Produits phytosanitaires efficaces contre ce ravageur/maladie"
+    )
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif",
+        help_text="Désactiver si entrée obsolète"
+    )
+    date_creation = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Date de création"
+    )
+
+    class Meta:
+        verbose_name = "Ravageur / Maladie"
+        verbose_name_plural = "Ravageurs et Maladies"
+        ordering = ['categorie', 'nom']
+
+    def __str__(self):
+        return f"{self.nom} ({self.get_categorie_display()})"
