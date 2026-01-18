@@ -7,7 +7,9 @@ from .models import (
     ProduitMatiereActive,
     DoseProduit,
     ConsommationProduit,
-    Photo
+    Photo,
+    Fertilisant,
+    RavageurMaladie
 )
 
 
@@ -153,3 +155,72 @@ class PhotoAdmin(admin.ModelAdmin):
         return obj.latitude is not None and obj.longitude is not None
     has_geolocation.short_description = 'Géolocalisée'
     has_geolocation.boolean = True
+
+
+@admin.register(Fertilisant)
+class FertilisantAdmin(admin.ModelAdmin):
+    """Administration des fertilisants."""
+    list_display = [
+        'nom',
+        'type_fertilisant',
+        'format_fertilisant',
+        'actif',
+        'date_creation'
+    ]
+    list_filter = ['type_fertilisant', 'format_fertilisant', 'actif', 'date_creation']
+    search_fields = ['nom', 'description']
+    readonly_fields = ['date_creation']
+
+    fieldsets = (
+        ('Informations générales', {
+            'fields': ('nom', 'type_fertilisant', 'format_fertilisant', 'description')
+        }),
+        ('Statut', {
+            'fields': ('actif',)
+        }),
+        ('Métadonnées', {
+            'fields': ('date_creation',),
+            'classes': ('collapse',)
+        }),
+    )
+
+
+@admin.register(RavageurMaladie)
+class RavageurMaladieAdmin(admin.ModelAdmin):
+    """Administration des ravageurs et maladies."""
+    list_display = [
+        'nom',
+        'categorie',
+        'partie_atteinte',
+        'produits_count',
+        'actif',
+        'date_creation'
+    ]
+    list_filter = ['categorie', 'actif', 'date_creation']
+    search_fields = ['nom', 'symptomes', 'partie_atteinte']
+    readonly_fields = ['date_creation']
+    filter_horizontal = ['produits_recommandes']
+
+    fieldsets = (
+        ('Identification', {
+            'fields': ('nom', 'categorie')
+        }),
+        ('Diagnostic', {
+            'fields': ('symptomes', 'partie_atteinte')
+        }),
+        ('Traitement', {
+            'fields': ('produits_recommandes',)
+        }),
+        ('Statut', {
+            'fields': ('actif',)
+        }),
+        ('Métadonnées', {
+            'fields': ('date_creation',),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def produits_count(self, obj):
+        """Nombre de produits recommandés."""
+        return obj.produits_recommandes.count()
+    produits_count.short_description = 'Produits'

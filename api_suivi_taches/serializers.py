@@ -7,7 +7,9 @@ from .models import (
     ProduitMatiereActive,
     DoseProduit,
     ConsommationProduit,
-    Photo
+    Photo,
+    Fertilisant,
+    RavageurMaladie
 )
 
 
@@ -237,10 +239,10 @@ class PhotoCreateSerializer(serializers.ModelSerializer):
 
 class PhotoListSerializer(serializers.ModelSerializer):
     """Serializer simplifié pour la liste des photos."""
-    
+
     type_photo_display = serializers.CharField(source='get_type_photo_display', read_only=True)
     url_fichier = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Photo
         fields = [
@@ -251,7 +253,7 @@ class PhotoListSerializer(serializers.ModelSerializer):
             'date_prise',
             'legende'
         ]
-    
+
     def get_url_fichier(self, obj):
         """Retourne l'URL complète du fichier image."""
         if obj.fichier:
@@ -260,3 +262,172 @@ class PhotoListSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.fichier.url)
             return obj.fichier.url
         return None
+
+
+# ==============================================================================
+# SERIALIZERS - FERTILISANT
+# ==============================================================================
+
+class FertilisantListSerializer(serializers.ModelSerializer):
+    """Serializer pour la liste des fertilisants."""
+
+    type_fertilisant_display = serializers.CharField(
+        source='get_type_fertilisant_display', read_only=True
+    )
+    format_fertilisant_display = serializers.CharField(
+        source='get_format_fertilisant_display', read_only=True
+    )
+
+    class Meta:
+        model = Fertilisant
+        fields = [
+            'id',
+            'nom',
+            'type_fertilisant',
+            'type_fertilisant_display',
+            'format_fertilisant',
+            'format_fertilisant_display',
+            'actif',
+            'date_creation'
+        ]
+
+
+class FertilisantDetailSerializer(serializers.ModelSerializer):
+    """Serializer détaillé pour un fertilisant."""
+
+    type_fertilisant_display = serializers.CharField(
+        source='get_type_fertilisant_display', read_only=True
+    )
+    format_fertilisant_display = serializers.CharField(
+        source='get_format_fertilisant_display', read_only=True
+    )
+
+    class Meta:
+        model = Fertilisant
+        fields = [
+            'id',
+            'nom',
+            'type_fertilisant',
+            'type_fertilisant_display',
+            'format_fertilisant',
+            'format_fertilisant_display',
+            'description',
+            'actif',
+            'date_creation'
+        ]
+
+
+class FertilisantCreateSerializer(serializers.ModelSerializer):
+    """Serializer pour créer/modifier un fertilisant."""
+
+    class Meta:
+        model = Fertilisant
+        fields = [
+            'nom',
+            'type_fertilisant',
+            'format_fertilisant',
+            'description',
+            'actif'
+        ]
+
+
+# ==============================================================================
+# SERIALIZERS - RAVAGEUR / MALADIE
+# ==============================================================================
+
+class RavageurMaladieListSerializer(serializers.ModelSerializer):
+    """Serializer pour la liste des ravageurs/maladies."""
+
+    categorie_display = serializers.CharField(
+        source='get_categorie_display', read_only=True
+    )
+    produits_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RavageurMaladie
+        fields = [
+            'id',
+            'nom',
+            'categorie',
+            'categorie_display',
+            'symptomes',
+            'partie_atteinte',
+            'produits_count',
+            'actif',
+            'date_creation'
+        ]
+
+    def get_produits_count(self, obj):
+        """Retourne le nombre de produits recommandés."""
+        return obj.produits_recommandes.count()
+
+
+class RavageurMaladieDetailSerializer(serializers.ModelSerializer):
+    """Serializer détaillé pour un ravageur/maladie."""
+
+    categorie_display = serializers.CharField(
+        source='get_categorie_display', read_only=True
+    )
+    produits_recommandes = ProduitListSerializer(many=True, read_only=True)
+    produits_recommandes_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Produit.objects.all(),
+        many=True,
+        write_only=True,
+        source='produits_recommandes',
+        required=False
+    )
+
+    class Meta:
+        model = RavageurMaladie
+        fields = [
+            'id',
+            'nom',
+            'categorie',
+            'categorie_display',
+            'symptomes',
+            'partie_atteinte',
+            'produits_recommandes',
+            'produits_recommandes_ids',
+            'actif',
+            'date_creation'
+        ]
+
+
+class RavageurMaladieCreateSerializer(serializers.ModelSerializer):
+    """Serializer pour créer/modifier un ravageur/maladie."""
+
+    produits_recommandes_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Produit.objects.all(),
+        many=True,
+        write_only=True,
+        required=False
+    )
+
+    class Meta:
+        model = RavageurMaladie
+        fields = [
+            'nom',
+            'categorie',
+            'symptomes',
+            'partie_atteinte',
+            'produits_recommandes_ids',
+            'actif'
+        ]
+
+    def create(self, validated_data):
+        """Crée un ravageur/maladie avec les produits recommandés."""
+        produits = validated_data.pop('produits_recommandes_ids', [])
+        instance = RavageurMaladie.objects.create(**validated_data)
+        if produits:
+            instance.produits_recommandes.set(produits)
+        return instance
+
+    def update(self, instance, validated_data):
+        """Met à jour un ravageur/maladie avec les produits recommandés."""
+        produits = validated_data.pop('produits_recommandes_ids', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if produits is not None:
+            instance.produits_recommandes.set(produits)
+        return instance

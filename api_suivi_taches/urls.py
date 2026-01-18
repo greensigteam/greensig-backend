@@ -8,7 +8,9 @@ from .views import (
     ProduitMatiereActiveViewSet,
     DoseProduitViewSet,
     ConsommationProduitViewSet,
-    PhotoViewSet
+    PhotoViewSet,
+    FertilisantViewSet,
+    RavageurMaladieViewSet
 )
 
 router = DefaultRouter()
@@ -17,6 +19,8 @@ router.register(r'matieres-actives', ProduitMatiereActiveViewSet, basename='mati
 router.register(r'doses', DoseProduitViewSet, basename='dose')
 router.register(r'consommations', ConsommationProduitViewSet, basename='consommation')
 router.register(r'photos', PhotoViewSet, basename='photo')
+router.register(r'fertilisants', FertilisantViewSet, basename='fertilisant')
+router.register(r'ravageurs-maladies', RavageurMaladieViewSet, basename='ravageur-maladie')
 
 urlpatterns = [
     path('', include(router.urls)),
