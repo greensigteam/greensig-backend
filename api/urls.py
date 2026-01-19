@@ -52,6 +52,7 @@ from .views import (
 from .site_statistics_view import SiteStatisticsView
 from .reporting_view import ReportingView
 from .monthly_report_view import MonthlyReportView
+from .kpi_view import KPIView, KPIHistoriqueView
 from .views_notifications import (
     NotificationListView,
     UnreadCountView,
@@ -83,6 +84,8 @@ urlpatterns = [
     path('statistics/', StatisticsView.as_view(), name='statistics'),
     path('reporting/', ReportingView.as_view(), name='reporting'),
     path('monthly-report/', MonthlyReportView.as_view(), name='monthly-report'),
+    path('kpis/', KPIView.as_view(), name='kpis'),
+    path('kpis/historique/', KPIHistoriqueView.as_view(), name='kpis-historique'),
 
     # ==============================================================================
     # EXPORT DONNÉES
