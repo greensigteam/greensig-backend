@@ -26,8 +26,10 @@ class KPIView(APIView):
 
     GET /api/kpis/
     GET /api/kpis/?site_id=1
+    GET /api/kpis/?type_tache_id=5
+    GET /api/kpis/?site_id=1&type_tache_id=5
     GET /api/kpis/?mois=2026-01
-    GET /api/kpis/?site_id=1&mois=2026-01
+    GET /api/kpis/?site_id=1&type_tache_id=5&mois=2026-01
 
     Returns:
         {
@@ -47,7 +49,8 @@ class KPIView(APIView):
                 "mois_precedent": {...},
                 "variation": {...}
             },
-            "sites_disponibles": [...]
+            "sites_disponibles": [...],
+            "types_taches_disponibles": [...]
         }
     """
     permission_classes = [IsAuthenticated]
@@ -55,6 +58,7 @@ class KPIView(APIView):
     def get(self, request):
         # Paramètres de filtrage
         site_id = request.query_params.get('site_id')
+        type_tache_id = request.query_params.get('type_tache_id')
         mois_param = request.query_params.get('mois')  # Format: YYYY-MM
 
         # Déterminer la période (en utilisant des dates, pas des datetimes)
@@ -87,51 +91,58 @@ class KPIView(APIView):
         }
 
         kpis = {
-            'respect_planning': self._get_respect_planning(date_debut, date_fin, site_id),
+            'respect_planning': self._get_respect_planning(date_debut, date_fin, site_id, type_tache_id),
             'taux_realisation_reclamations': self._get_taux_realisation_reclamations(date_debut, date_fin, site_id),
             'temps_moyen_traitement_reclamations': self._get_temps_moyen_traitement_reclamations(date_debut, date_fin, site_id),
-            'temps_realisation_taches': self._get_temps_realisation_taches(date_debut, date_fin, site_id),
-            'temps_travail_par_site': self._get_temps_travail_par_site(date_debut, date_fin, site_id),
+            'temps_realisation_taches': self._get_temps_realisation_taches(date_debut, date_fin, site_id, type_tache_id),
+            'temps_travail_par_site': self._get_temps_travail_par_site(date_debut, date_fin, site_id, type_tache_id),
         }
 
         # Évolution par rapport au mois précédent
         kpis_precedent = {
-            'respect_planning': self._get_respect_planning(date_debut_precedent, date_fin_precedent, site_id),
+            'respect_planning': self._get_respect_planning(date_debut_precedent, date_fin_precedent, site_id, type_tache_id),
             'taux_realisation_reclamations': self._get_taux_realisation_reclamations(date_debut_precedent, date_fin_precedent, site_id),
             'temps_moyen_traitement_reclamations': self._get_temps_moyen_traitement_reclamations(date_debut_precedent, date_fin_precedent, site_id),
-            'temps_realisation_taches': self._get_temps_realisation_taches(date_debut_precedent, date_fin_precedent, site_id),
-            'temps_travail_par_site': self._get_temps_travail_par_site(date_debut_precedent, date_fin_precedent, site_id),
+            'temps_realisation_taches': self._get_temps_realisation_taches(date_debut_precedent, date_fin_precedent, site_id, type_tache_id),
+            'temps_travail_par_site': self._get_temps_travail_par_site(date_debut_precedent, date_fin_precedent, site_id, type_tache_id),
         }
 
         evolution = self._calculer_evolution(kpis, kpis_precedent)
 
-        # Sites disponibles pour le filtre
+        # Sites et types de tâches disponibles pour les filtres
         sites_disponibles = self._get_sites_disponibles(request.user)
+        types_taches_disponibles = self._get_types_taches_disponibles()
 
         return Response({
             'periode': periode,
             'kpis': kpis,
             'evolution': evolution,
             'sites_disponibles': sites_disponibles,
+            'types_taches_disponibles': types_taches_disponibles,
         })
 
-    def _get_respect_planning(self, date_debut, date_fin, site_id=None):
+    def _get_respect_planning(self, date_debut, date_fin, site_id=None, type_tache_id=None):
         """
         KPI 1: Respect du planning de l'entretien
         Objectif: >95%, aucun retard de plus de 7 jours
 
-        Formule: (Tâches terminées dans les délais / Total tâches terminées) × 100
+        ✅ CORRIGÉ: Selon le document KPI page 2 ligne 59-60:
+        "au moins 95 % des tâches d'entretien PLANIFIÉES sont réalisées sans dépasser un retard de 7 jours"
+
+        On filtre par date_fin_planifiee (tâches planifiées dans M), pas date_fin_reelle
+
+        Formule: (Tâches planifiées et terminées sans retard > 7j / Total tâches planifiées et terminées) × 100
         """
         try:
             from api_planification.models import Tache
 
-            # Filtre de base: tâches terminées dans la période (DateField comparison)
+            # ✅ CORRECTION: Filtre de base = tâches PLANIFIÉES dans la période M
             queryset = Tache.objects.filter(
                 deleted_at__isnull=True,
-                statut='TERMINEE',
-                date_fin_reelle__isnull=False,
-                date_fin_reelle__gte=date_debut,
-                date_fin_reelle__lte=date_fin
+                date_fin_planifiee__gte=date_debut,  # ✅ PLANIFIÉES dans M
+                date_fin_planifiee__lte=date_fin,
+                statut='TERMINEE',  # Parmi celles terminées
+                date_fin_reelle__isnull=False
             )
 
             # Filtre par site si spécifié
@@ -141,28 +152,54 @@ class KPIView(APIView):
                     Q(reclamation__site_id=site_id)
                 ).distinct()
 
-            total_terminees = queryset.count()
+            # ✅ NOUVEAU: Filtre par type de tâche si spécifié
+            if type_tache_id:
+                queryset = queryset.filter(id_type_tache_id=type_tache_id)
 
-            # Tâches terminées dans les délais
-            terminees_dans_delais = queryset.filter(
-                date_fin_reelle__lte=F('date_fin_planifiee')
-            ).count()
+            total_planifiees = queryset.count()
 
-            # Tâches avec retard > 7 jours
+            # ✅ CORRECTION: Vérifier DÉBUT ET FIN (dates au pluriel dans le document)
+            # Selon le document: "sans dépasser un retard de 7 jours par rapport aux dates prévues"
+            taches_conformes = 0
             taches_retard_critique = []
+            taches_en_avance = 0
+            taches_retard_1_7j = 0
 
-            for tache in queryset.exclude(date_fin_reelle__lte=F('date_fin_planifiee')):
-                if tache.date_fin_reelle and tache.date_fin_planifiee:
-                    retard = (tache.date_fin_reelle - tache.date_fin_planifiee).days
-                    if retard > 7:
+            for tache in queryset:
+                if tache.date_debut_reelle and tache.date_debut_planifiee and \
+                   tache.date_fin_reelle and tache.date_fin_planifiee:
+
+                    # Calcul des retards sur DÉBUT et FIN
+                    retard_debut = (tache.date_debut_reelle - tache.date_debut_planifiee).days
+                    retard_fin = (tache.date_fin_reelle - tache.date_fin_planifiee).days
+
+                    # Le retard maximum détermine la conformité
+                    retard_max = max(retard_debut, retard_fin)
+
+                    if retard_max <= 0:
+                        # Tâche démarrée et terminée à l'heure ou en avance (conforme)
+                        taches_en_avance += 1
+                        taches_conformes += 1
+                    elif retard_max <= 7:
+                        # Retard acceptable ≤ 7j sur début ou fin (conforme)
+                        taches_retard_1_7j += 1
+                        taches_conformes += 1
+                    else:
+                        # Retard > 7j sur début OU fin (non conforme)
                         taches_retard_critique.append({
                             'id': tache.id,
-                            'titre': tache.titre,
-                            'retard_jours': retard,
+                            'titre': getattr(tache, 'titre', f'Tâche #{tache.id}'),
+                            'retard_debut_jours': retard_debut,
+                            'retard_fin_jours': retard_fin,
+                            'retard_max_jours': retard_max,
+                            'date_debut_planifiee': tache.date_debut_planifiee.strftime('%Y-%m-%d'),
+                            'date_debut_reelle': tache.date_debut_reelle.strftime('%Y-%m-%d'),
+                            'date_fin_planifiee': tache.date_fin_planifiee.strftime('%Y-%m-%d'),
+                            'date_fin_reelle': tache.date_fin_reelle.strftime('%Y-%m-%d'),
                         })
 
             # Calcul du taux
-            taux = (terminees_dans_delais / total_terminees * 100) if total_terminees > 0 else 0
+            taux = (taches_conformes / total_planifiees * 100) if total_planifiees > 0 else 0
             objectif_atteint = taux >= 95 and len(taches_retard_critique) == 0
 
             return {
@@ -171,11 +208,12 @@ class KPIView(APIView):
                 'unite': '%',
                 'objectif_atteint': objectif_atteint,
                 'details': {
-                    'total_terminees': total_terminees,
-                    'terminees_dans_delais': terminees_dans_delais,
-                    'terminees_en_retard': total_terminees - terminees_dans_delais,
-                    'retards_critiques': len(taches_retard_critique),
-                    'taches_retard_critique': taches_retard_critique[:5],  # Top 5
+                    'total_planifiees': total_planifiees,
+                    'taches_conformes': taches_conformes,
+                    'taches_en_avance': taches_en_avance,
+                    'taches_retard_1_7j': taches_retard_1_7j,
+                    'taches_retard_critique': len(taches_retard_critique),
+                    'details_retards_critiques': taches_retard_critique[:10],  # Top 10
                 },
                 'alerte': len(taches_retard_critique) > 0,
                 'message_alerte': f"{len(taches_retard_critique)} tâche(s) avec retard > 7 jours" if taches_retard_critique else None,
@@ -339,7 +377,7 @@ class KPIView(APIView):
                 'error': str(e),
             }
 
-    def _get_temps_realisation_taches(self, date_debut, date_fin, site_id=None):
+    def _get_temps_realisation_taches(self, date_debut, date_fin, site_id=None, type_tache_id=None):
         """
         KPI 4: Temps de réalisation par tâche
 
@@ -347,7 +385,8 @@ class KPIView(APIView):
         - Temps cumulé de réalisation (Tâche A, Site S) = Σ(Heure fin - Heure début) pour chaque tâche de type A dans site S
         - Groupé par TYPE de tâche ET par SITE
 
-        Formule: Σ(date_fin_reelle - date_debut_reelle) par type de tâche et par site
+        ✅ CORRIGÉ: Utilise les DistributionCharge pour un calcul précis basé sur les heures réelles
+        Formule: Σ(heures_reelles) de toutes les distributions de charge
         """
         try:
             from api_planification.models import Tache, ParticipationTache
@@ -368,20 +407,40 @@ class KPIView(APIView):
                     Q(reclamation__site_id=site_id)
                 ).distinct()
 
+            # ✅ NOUVEAU: Filtre par type de tâche si spécifié
+            if type_tache_id:
+                queryset = queryset.filter(id_type_tache_id=type_tache_id)
+
             total_taches = queryset.count()
             durees = []
             details_par_type = {}
+            details_par_site = {}  # ✅ NOUVEAU: Groupement par site uniquement
             details_par_site_type = {}  # Groupement par site ET type
 
-            for tache in queryset.select_related('id_type_tache').prefetch_related('objets', 'reclamation'):
-                # Calculer la durée réelle (en jours car DateField)
-                delta = tache.date_fin_reelle - tache.date_debut_reelle
-                # Convertir en heures (1 jour = 8 heures de travail)
-                heures = (delta.days + 1) * 8  # +1 car même jour = 1 jour de travail
+            for tache in queryset.select_related('id_type_tache').prefetch_related('objets', 'reclamation', 'distributions_charge'):
+                # ✅ CORRECTION: Utiliser les heures réelles des distributions de charge
+                heures_reelles = tache.distributions_charge.filter(
+                    status='REALISEE'
+                ).aggregate(
+                    total=Sum('heures_reelles')
+                )['total']
+
+                # Fallback 1: Si pas d'heures réelles, prendre les heures planifiées
+                if heures_reelles is None or heures_reelles == 0:
+                    heures_reelles = tache.distributions_charge.aggregate(
+                        total=Sum('heures_planifiees')
+                    )['total']
+
+                # Fallback 2: Si pas de distributions du tout, calcul approximatif (legacy)
+                if heures_reelles is None or heures_reelles == 0:
+                    delta = tache.date_fin_reelle - tache.date_debut_reelle
+                    heures_reelles = (delta.days + 1) * 8  # 1 jour = 8 heures
+
+                heures = heures_reelles
                 durees.append(heures)
 
                 # Type de tâche
-                type_nom = tache.id_type_tache.nom if tache.id_type_tache else 'Non défini'
+                type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Non défini'
 
                 # Identifier le site
                 site_nom = "Non attribué"
@@ -400,9 +459,22 @@ class KPIView(APIView):
                     details_par_type[type_nom] = {
                         'count': 0,
                         'total_heures': 0,
+                        'durees': [],  # ✅ Pour calculer écart-type
                     }
                 details_par_type[type_nom]['count'] += 1
                 details_par_type[type_nom]['total_heures'] += heures
+                details_par_type[type_nom]['durees'].append(heures)
+
+                # ✅ NOUVEAU: Grouper par site uniquement
+                if site_nom not in details_par_site:
+                    details_par_site[site_nom] = {
+                        'count': 0,
+                        'total_heures': 0,
+                        'durees': [],
+                    }
+                details_par_site[site_nom]['count'] += 1
+                details_par_site[site_nom]['total_heures'] += heures
+                details_par_site[site_nom]['durees'].append(heures)
 
                 # Grouper par site ET type (conformément au document)
                 if site_nom not in details_par_site_type:
@@ -411,31 +483,90 @@ class KPIView(APIView):
                     details_par_site_type[site_nom][type_nom] = {
                         'count': 0,
                         'total_heures': 0,
+                        'durees': [],
                     }
                 details_par_site_type[site_nom][type_nom]['count'] += 1
                 details_par_site_type[site_nom][type_nom]['total_heures'] += heures
+                details_par_site_type[site_nom][type_nom]['durees'].append(heures)
 
-            # Arrondir les heures
+            # Calcul de la moyenne globale pour comparaisons
+            temps_total = sum(durees) if durees else 0
+            temps_moyen_global = temps_total / total_taches if total_taches > 0 else 0
+
+            # ✅ Calculer écart-type pour identifier inefficacités
+            import statistics
+
+            # Calculer moyennes et écart-types par type
+            par_type_array = []
             for type_tache, data in details_par_type.items():
-                data['total_heures'] = round(data['total_heures'], 1)
-                data['moyenne_heures'] = round(data['total_heures'] / data['count'], 1) if data['count'] > 0 else 0
+                moyenne = data['total_heures'] / data['count'] if data['count'] > 0 else 0
+                ecart_type = round(statistics.stdev(data['durees']), 1) if len(data['durees']) > 1 else 0
+                ecart_moyenne = round(((moyenne - temps_moyen_global) / temps_moyen_global * 100), 1) if temps_moyen_global > 0 else 0
 
+                par_type_array.append({
+                    'type_tache': type_tache,
+                    'count': data['count'],
+                    'total_heures': round(data['total_heures'], 1),
+                    'moyenne_heures': round(moyenne, 1),
+                    'ecart_type': ecart_type,
+                    'ecart_moyenne_global': ecart_moyenne,  # ✅ % écart vs moyenne globale
+                    'inefficace': moyenne > temps_moyen_global * 1.2,  # ✅ +20% = inefficace
+                })
+
+            # Trier par moyenne décroissante (les plus lentes en premier)
+            par_type_array.sort(key=lambda x: x['moyenne_heures'], reverse=True)
+
+            # ✅ Calculer moyennes par site
+            par_site_array = []
+            for site_nom, data in details_par_site.items():
+                moyenne = data['total_heures'] / data['count'] if data['count'] > 0 else 0
+                ecart_type = round(statistics.stdev(data['durees']), 1) if len(data['durees']) > 1 else 0
+                ecart_moyenne = round(((moyenne - temps_moyen_global) / temps_moyen_global * 100), 1) if temps_moyen_global > 0 else 0
+
+                par_site_array.append({
+                    'site_nom': site_nom,
+                    'count': data['count'],
+                    'total_heures': round(data['total_heures'], 1),
+                    'moyenne_heures': round(moyenne, 1),
+                    'ecart_type': ecart_type,
+                    'ecart_moyenne_global': ecart_moyenne,
+                    'inefficace': moyenne > temps_moyen_global * 1.2,
+                })
+
+            # Trier par moyenne décroissante
+            par_site_array.sort(key=lambda x: x['moyenne_heures'], reverse=True)
+
+            # ✅ Convertir site ET type en array
+            par_site_et_type_array = []
             for site_nom, types in details_par_site_type.items():
                 for type_nom, data in types.items():
-                    data['total_heures'] = round(data['total_heures'], 1)
+                    moyenne = data['total_heures'] / data['count'] if data['count'] > 0 else 0
+                    ecart_type = round(statistics.stdev(data['durees']), 1) if len(data['durees']) > 1 else 0
 
-            temps_total = sum(durees) if durees else 0
+                    par_site_et_type_array.append({
+                        'site_nom': site_nom,
+                        'type_tache': type_nom,
+                        'count': data['count'],
+                        'total_heures': round(data['total_heures'], 1),
+                        'moyenne_heures': round(moyenne, 1),
+                        'ecart_type': ecart_type,
+                    })
+
+            # Trier par moyenne décroissante
+            par_site_et_type_array.sort(key=lambda x: x['moyenne_heures'], reverse=True)
 
             return {
-                'valeur': round(temps_total, 1),
+                'valeur': round(temps_moyen_global, 1),
                 'objectif': None,
-                'unite': 'heures',
+                'unite': 'heures/tâche',
                 'objectif_atteint': None,
                 'details': {
                     'total_taches': total_taches,
                     'total_heures': round(temps_total, 1),
-                    'par_type': details_par_type,
-                    'par_site_et_type': details_par_site_type,
+                    'moyenne_globale': round(temps_moyen_global, 1),  # ✅ Pour comparaisons
+                    'par_type': par_type_array,  # ✅ Array avec écart-types et inefficacités
+                    'par_site': par_site_array,  # ✅ NOUVEAU: Groupement par site
+                    'par_site_et_type': par_site_et_type_array,
                 },
             }
         except Exception as e:
@@ -447,14 +578,16 @@ class KPIView(APIView):
                 'error': str(e),
             }
 
-    def _get_temps_travail_par_site(self, date_debut, date_fin, site_id=None):
+    def _get_temps_travail_par_site(self, date_debut, date_fin, site_id=None, type_tache_id=None):
         """
         KPI 5: Temps total de travail par site
 
-        Formule: Somme des heures travaillées par site
+        ✅ CORRIGÉ: Utilise les DistributionCharge pour un calcul précis basé sur les heures réelles
+        Formule: Σ(heures_reelles) de toutes les distributions de charge par site
         """
         try:
             from api_planification.models import Tache, ParticipationTache
+            from django.db.models import Sum
 
             # Tâches terminées dans la période
             queryset = Tache.objects.filter(
@@ -471,44 +604,68 @@ class KPIView(APIView):
                     Q(reclamation__site_id=site_id)
                 ).distinct()
 
+            # ✅ NOUVEAU: Filtre par type de tâche si spécifié
+            if type_tache_id:
+                queryset = queryset.filter(id_type_tache_id=type_tache_id)
+
             sites_heures = {}
             total_heures = 0
 
-            for tache in queryset.prefetch_related('objets', 'reclamation'):
-                # Calculer la durée de la tâche
-                if tache.date_debut_reelle and tache.date_fin_reelle:
-                    delta = tache.date_fin_reelle - tache.date_debut_reelle
-                    heures = delta.total_seconds() / 3600
+            for tache in queryset.prefetch_related('objets', 'reclamation', 'distributions_charge'):
+                # ✅ CORRECTION: Utiliser les heures réelles des distributions de charge
+                heures_reelles = tache.distributions_charge.filter(
+                    status='REALISEE'
+                ).aggregate(
+                    total=Sum('heures_reelles')
+                )['total']
 
-                    # Identifier le site
-                    site = None
-                    site_nom = "Non attribué"
+                # Fallback 1: Si pas d'heures réelles, prendre les heures planifiées
+                if heures_reelles is None or heures_reelles == 0:
+                    heures_reelles = tache.distributions_charge.aggregate(
+                        total=Sum('heures_planifiees')
+                    )['total']
 
-                    # Via les objets liés
-                    for objet in tache.objets.all():
-                        if objet.site:
-                            site = objet.site
-                            site_nom = site.nom_site
-                            break
+                # Fallback 2: Si pas de distributions du tout, calcul approximatif (legacy)
+                if heures_reelles is None or heures_reelles == 0:
+                    if tache.date_debut_reelle and tache.date_fin_reelle:
+                        delta = tache.date_fin_reelle - tache.date_debut_reelle
+                        heures_reelles = (delta.days + 1) * 8  # 1 jour = 8 heures
 
-                    # Via la réclamation
-                    if not site and tache.reclamation and tache.reclamation.site:
-                        site = tache.reclamation.site
+                # Si toujours pas de valeur, passer cette tâche
+                if heures_reelles is None or heures_reelles == 0:
+                    continue
+
+                heures = heures_reelles
+
+                # Identifier le site
+                site = None
+                site_nom = "Non attribué"
+
+                # Via les objets liés
+                for objet in tache.objets.all():
+                    if objet.site:
+                        site = objet.site
                         site_nom = site.nom_site
+                        break
 
-                    site_key = site.id if site else 0
+                # Via la réclamation
+                if not site and tache.reclamation and tache.reclamation.site:
+                    site = tache.reclamation.site
+                    site_nom = site.nom_site
 
-                    if site_key not in sites_heures:
-                        sites_heures[site_key] = {
-                            'site_id': site_key,
-                            'site_nom': site_nom,
-                            'heures': 0,
-                            'nb_taches': 0,
-                        }
+                site_key = site.id if site else 0
 
-                    sites_heures[site_key]['heures'] += heures
-                    sites_heures[site_key]['nb_taches'] += 1
-                    total_heures += heures
+                if site_key not in sites_heures:
+                    sites_heures[site_key] = {
+                        'site_id': site_key,
+                        'site_nom': site_nom,
+                        'heures': 0,
+                        'nb_taches': 0,
+                    }
+
+                sites_heures[site_key]['heures'] += heures
+                sites_heures[site_key]['nb_taches'] += 1
+                total_heures += heures
 
             # Convertir en liste et trier
             sites_list = sorted(
@@ -572,13 +729,22 @@ class KPIView(APIView):
         queryset = Site.objects.filter(actif=True).order_by('nom_site')
         return [{'id': site.id, 'nom': site.nom_site} for site in queryset]
 
+    def _get_types_taches_disponibles(self):
+        """
+        Récupérer tous les types de tâches actifs pour le filtre.
+        """
+        from api_planification.models import TypeTache
+
+        queryset = TypeTache.objects.all().order_by('nom_tache')
+        return [{'id': type_tache.id, 'nom': type_tache.nom_tache} for type_tache in queryset]
+
 
 class KPIHistoriqueView(APIView):
     """
     Vue pour l'historique des KPIs sur plusieurs mois.
 
     GET /api/kpis/historique/
-    GET /api/kpis/historique/?site_id=1&nb_mois=6
+    GET /api/kpis/historique/?site_id=1&type_tache_id=5&nb_mois=6
 
     Returns:
         {
@@ -593,6 +759,7 @@ class KPIHistoriqueView(APIView):
 
     def get(self, request):
         site_id = request.query_params.get('site_id')
+        type_tache_id = request.query_params.get('type_tache_id')
         nb_mois = int(request.query_params.get('nb_mois', 6))
         nb_mois = min(nb_mois, 12)  # Maximum 12 mois
 
@@ -612,11 +779,11 @@ class KPIHistoriqueView(APIView):
             mois_data = {
                 'mois': date_debut.strftime('%Y-%m'),
                 'kpis': {
-                    'respect_planning': kpi_view._get_respect_planning(date_debut, date_fin, site_id)['valeur'],
+                    'respect_planning': kpi_view._get_respect_planning(date_debut, date_fin, site_id, type_tache_id)['valeur'],
                     'taux_realisation_reclamations': kpi_view._get_taux_realisation_reclamations(date_debut, date_fin, site_id)['valeur'],
                     'temps_moyen_traitement_reclamations': kpi_view._get_temps_moyen_traitement_reclamations(date_debut, date_fin, site_id)['valeur'],
-                    'temps_realisation_taches': kpi_view._get_temps_realisation_taches(date_debut, date_fin, site_id)['valeur'],
-                    'temps_travail_par_site': kpi_view._get_temps_travail_par_site(date_debut, date_fin, site_id)['valeur'],
+                    'temps_realisation_taches': kpi_view._get_temps_realisation_taches(date_debut, date_fin, site_id, type_tache_id)['valeur'],
+                    'temps_travail_par_site': kpi_view._get_temps_travail_par_site(date_debut, date_fin, site_id, type_tache_id)['valeur'],
                 }
             }
             historique.append(mois_data)
