@@ -445,6 +445,103 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                 )
             print(f"✅ {len(distributions_data)} distribution(s) créée(s) pour tâche #{instance.id}")
 
+        # ✅ Gérer la récurrence automatique si configurée
+        if recurrence_config and recurrence_config.get('enabled'):
+            print(f"[SERIALIZER-RECURRENCE] Configuration détectée: {recurrence_config}")
+            mode = recurrence_config.get('mode')
+
+            if mode == 'frequency':
+                # Import des fonctions de duplication
+                from .utils import (
+                    dupliquer_tache_recurrence_multiple,
+                    dupliquer_tache_recurrence_jours_semaine,
+                    dupliquer_tache_recurrence_jours_mois
+                )
+                from django.core.exceptions import ValidationError as DjangoValidationError
+
+                frequency = recurrence_config.get('frequency')
+                jours_semaine = recurrence_config.get('jours_semaine')
+                jours_mois = recurrence_config.get('jours_mois')
+                nombre_occurrences = recurrence_config.get('nombre_occurrences')
+                date_fin_recurrence = recurrence_config.get('date_fin_recurrence')
+                conserver_equipes = recurrence_config.get('conserver_equipes', True)
+                conserver_objets = recurrence_config.get('conserver_objets', True)
+
+                # Convertir date_fin_recurrence si c'est une chaîne
+                if date_fin_recurrence and isinstance(date_fin_recurrence, str):
+                    from datetime import datetime as dt
+                    try:
+                        date_fin_recurrence = dt.strptime(date_fin_recurrence, '%Y-%m-%d').date()
+                    except ValueError:
+                        print(f"[SERIALIZER-RECURRENCE] Erreur conversion date: {date_fin_recurrence}")
+                        date_fin_recurrence = None
+
+                try:
+                    nouvelles_taches = []
+
+                    if jours_semaine and frequency == 'WEEKLY':
+                        # Mode sélection jours de la semaine
+                        print(f"[SERIALIZER-RECURRENCE] Mode WEEKLY avec jours: {jours_semaine}")
+                        nouvelles_taches = dupliquer_tache_recurrence_jours_semaine(
+                            tache_id=instance.id,
+                            jours_semaine=jours_semaine,
+                            nombre_occurrences=nombre_occurrences,
+                            date_fin_recurrence=date_fin_recurrence,
+                            conserver_equipes=conserver_equipes,
+                            conserver_objets=conserver_objets,
+                            nouveau_statut='PLANIFIEE'
+                        )
+                    elif jours_mois and frequency == 'MONTHLY':
+                        # Mode sélection jours du mois
+                        print(f"[SERIALIZER-RECURRENCE] Mode MONTHLY avec jours: {jours_mois}")
+                        nouvelles_taches = dupliquer_tache_recurrence_jours_mois(
+                            tache_id=instance.id,
+                            jours_mois=jours_mois,
+                            nombre_occurrences=nombre_occurrences,
+                            date_fin_recurrence=date_fin_recurrence,
+                            conserver_equipes=conserver_equipes,
+                            conserver_objets=conserver_objets,
+                            nouveau_statut='PLANIFIEE'
+                        )
+                    else:
+                        # Mode standard (décalage fixe)
+                        print(f"[SERIALIZER-RECURRENCE] Mode standard: {frequency}")
+                        nouvelles_taches = dupliquer_tache_recurrence_multiple(
+                            tache_id=instance.id,
+                            frequence=frequency,
+                            nombre_occurrences=nombre_occurrences,
+                            date_fin_recurrence=date_fin_recurrence,
+                            conserver_equipes=conserver_equipes,
+                            conserver_objets=conserver_objets,
+                            nouveau_statut='PLANIFIEE'
+                        )
+
+                    # Vérification du nombre de tâches créées
+                    if nombre_occurrences and len(nouvelles_taches) != nombre_occurrences:
+                        print(f"[SERIALIZER-RECURRENCE] ⚠️ Attendu {nombre_occurrences} tâches, créé {len(nouvelles_taches)}")
+                    else:
+                        print(f"[SERIALIZER-RECURRENCE] ✅ {len(nouvelles_taches)} tâche(s) récurrente(s) créée(s)")
+
+                    # Log des dates créées
+                    if nouvelles_taches:
+                        dates_creees = [t.date_debut_planifiee.strftime('%d/%m/%Y') for t in nouvelles_taches[:5]]
+                        print(f"[SERIALIZER-RECURRENCE] Dates (5 premières): {', '.join(dates_creees)}")
+                        if len(nouvelles_taches) > 5:
+                            print(f"[SERIALIZER-RECURRENCE] ... et {len(nouvelles_taches) - 5} autres")
+
+                except DjangoValidationError as e:
+                    print(f"[SERIALIZER-RECURRENCE] ❌ Erreur validation: {e}")
+                    raise serializers.ValidationError({
+                        'recurrence_config': f"Impossible de créer les occurrences: {str(e)}"
+                    })
+                except Exception as e:
+                    print(f"[SERIALIZER-RECURRENCE] ❌ Erreur inattendue: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise serializers.ValidationError({
+                        'recurrence_config': f"Erreur lors de la création des occurrences: {str(e)}"
+                    })
+
         return instance
 
     def update(self, instance, validated_data):
@@ -646,6 +743,7 @@ class DupliquerTacheSerializer(serializers.Serializer):
 class DupliquerTacheRecurrenceSerializer(serializers.Serializer):
     """
     Serializer pour dupliquer une tâche selon une fréquence prédéfinie.
+    Version 2.0 : Support de la sélection de jours de la semaine pour DAILY et WEEKLY.
     """
     FREQUENCE_CHOICES = [
         ('DAILY', 'Quotidien'),
@@ -658,6 +756,29 @@ class DupliquerTacheRecurrenceSerializer(serializers.Serializer):
         choices=FREQUENCE_CHOICES,
         help_text="Fréquence de récurrence"
     )
+
+    # ✅ Sélection des jours de la semaine (WEEKLY uniquement)
+    jours_semaine = serializers.ListField(
+        child=serializers.IntegerField(min_value=0, max_value=6),
+        required=False,
+        allow_null=True,
+        allow_empty=False,
+        help_text="Liste des jours de la semaine (0=Lundi, 6=Dimanche). "
+                  "Compatible avec WEEKLY uniquement. "
+                  "Si non fourni, utilise le décalage standard."
+    )
+
+    # ✅ NOUVEAU: Sélection des jours du mois (MONTHLY)
+    jours_mois = serializers.ListField(
+        child=serializers.IntegerField(min_value=1, max_value=31),
+        required=False,
+        allow_null=True,
+        allow_empty=False,
+        help_text="Liste des jours du mois (1-31). "
+                  "Compatible avec MONTHLY uniquement. "
+                  "Si non fourni, utilise le décalage standard."
+    )
+
     nombre_occurrences = serializers.IntegerField(
         min_value=1,
         max_value=100,
@@ -683,6 +804,82 @@ class DupliquerTacheRecurrenceSerializer(serializers.Serializer):
         default='PLANIFIEE',
         help_text="Statut des nouvelles tâches créées"
     )
+
+    def validate_jours_semaine(self, value):
+        """
+        Validation de la liste des jours de la semaine:
+        - Pas de doublons
+        - Tri automatique
+        - Au moins 1 jour si fourni
+        """
+        if value is None:
+            return value
+
+        if len(value) == 0:
+            raise serializers.ValidationError(
+                "Si vous spécifiez 'jours_semaine', vous devez sélectionner au moins 1 jour"
+            )
+
+        # Vérifier les doublons
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError(
+                "La liste des jours contient des doublons"
+            )
+
+        # Trier la liste (pour cohérence)
+        return sorted(value)
+
+    def validate_jours_mois(self, value):
+        """
+        Validation de la liste des jours du mois:
+        - Pas de doublons
+        - Tri automatique
+        - Au moins 1 jour si fourni
+        """
+        if value is None:
+            return value
+
+        if len(value) == 0:
+            raise serializers.ValidationError(
+                "Si vous spécifiez 'jours_mois', vous devez sélectionner au moins 1 jour"
+            )
+
+        # Vérifier les doublons
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError(
+                "La liste des jours contient des doublons"
+            )
+
+        # Trier la liste (pour cohérence)
+        return sorted(value)
+
+    def validate(self, data):
+        """Validation globale de compatibilité"""
+        frequence = data.get('frequence')
+        jours_semaine = data.get('jours_semaine')
+        jours_mois = data.get('jours_mois')
+
+        # jours_semaine est uniquement compatible avec WEEKLY
+        if jours_semaine and frequence != 'WEEKLY':
+            raise serializers.ValidationError({
+                'jours_semaine': f"La sélection de jours de semaine est uniquement disponible "
+                                f"avec la fréquence WEEKLY (vous avez: {frequence})"
+            })
+
+        # jours_mois est uniquement compatible avec MONTHLY
+        if jours_mois and frequence != 'MONTHLY':
+            raise serializers.ValidationError({
+                'jours_mois': f"La sélection de jours du mois est uniquement disponible "
+                             f"avec la fréquence MONTHLY (vous avez: {frequence})"
+            })
+
+        # Ne pas permettre les deux en même temps
+        if jours_semaine and jours_mois:
+            raise serializers.ValidationError(
+                "Vous ne pouvez pas spécifier à la fois 'jours_semaine' et 'jours_mois'"
+            )
+
+        return data
 
 
 class DupliquerTacheDatesSpecifiquesSerializer(serializers.Serializer):
