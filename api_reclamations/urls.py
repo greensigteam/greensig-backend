@@ -1,6 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import TypeReclamationViewSet, UrgenceViewSet, ReclamationViewSet, SatisfactionClientViewSet
+from .views import (
+    TypeReclamationViewSet, UrgenceViewSet, ReclamationViewSet,
+    SatisfactionClientViewSet, ReclamationExportExcelView
+)
 
 router = DefaultRouter()
 router.register(r'types-reclamations', TypeReclamationViewSet, basename='typereclamation')
@@ -10,4 +13,5 @@ router.register(r'satisfactions', SatisfactionClientViewSet, basename='satisfact
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('export/excel/', ReclamationExportExcelView.as_view(), name='reclamations-export-excel'),
 ]
