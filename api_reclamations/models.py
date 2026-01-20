@@ -69,6 +69,7 @@ class Reclamation(models.Model):
         ('EN_COURS', 'En attente de réalisation'),
         ('RESOLUE', 'Tâche terminée côté administrateur'),
         ('EN_ATTENTE_VALIDATION_CLOTURE', 'En attente de validation de clôture'),
+        ('INTERVENTION_REFUSEE', 'Intervention refusée par le client'),
         ('CLOTUREE', 'Validée côté client'),
         ('REJETEE', 'Rejetée'),
     ]
@@ -119,6 +120,17 @@ class Reclamation(models.Model):
     
     description = models.TextField(verbose_name="Description du problème")
     justification_rejet = models.TextField(blank=True, null=True, verbose_name="Justification rejet/retard")
+
+    # Rejet par l'administrateur
+    rejetee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reclamations_rejetees',
+        verbose_name="Rejetée par"
+    )
+    date_rejet = models.DateTimeField(null=True, blank=True, verbose_name="Date de rejet")
     
     date_constatation = models.DateTimeField(default=timezone.now, verbose_name="Date de constatation")
     date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
@@ -140,6 +152,31 @@ class Reclamation(models.Model):
         verbose_name="Clôture proposée par"
     )
     date_proposition_cloture = models.DateTimeField(null=True, blank=True, verbose_name="Date proposition clôture")
+
+    # Refus de clôture par le client (créateur)
+    cloture_refusee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='clotures_refusees',
+        verbose_name="Clôture refusée par"
+    )
+    date_refus_cloture = models.DateTimeField(null=True, blank=True, verbose_name="Date refus clôture")
+    commentaire_refus_cloture = models.TextField(blank=True, null=True, verbose_name="Commentaire refus clôture")
+
+    # Refus d'intervention par le client
+    intervention_refusee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='interventions_refusees',
+        verbose_name="Intervention refusée par"
+    )
+    date_refus_intervention = models.DateTimeField(null=True, blank=True, verbose_name="Date refus intervention")
+    motif_refus_intervention = models.TextField(blank=True, null=True, verbose_name="Motif du refus (obligatoire)")
+    nombre_refus = models.PositiveIntegerField(default=0, verbose_name="Nombre de refus")
 
     statut = models.CharField(max_length=50, choices=STATUT_CHOICES, default='NOUVELLE', verbose_name="Statut")
     actif = models.BooleanField(default=True, verbose_name="Actif")

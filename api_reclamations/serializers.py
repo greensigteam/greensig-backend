@@ -34,6 +34,9 @@ class ReclamationListSerializer(serializers.ModelSerializer):
     createur_nom = serializers.SerializerMethodField()
     statut_display = serializers.CharField(source='get_statut_display', read_only=True)
     localisation = GeometryField(read_only=True, allow_null=True)
+    intervention_refusee_par_nom = serializers.SerializerMethodField()
+    rejetee_par_nom = serializers.SerializerMethodField()
+    cloture_refusee_par_nom = serializers.SerializerMethodField()
 
     class Meta:
         model = Reclamation
@@ -55,12 +58,40 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'date_resolution',
             'description',
             'createur', 'createur_nom',
-            'localisation'
+            'localisation',
+            # Champs refus intervention (client)
+            'nombre_refus',
+            'date_refus_intervention',
+            'motif_refus_intervention',
+            'intervention_refusee_par_nom',
+            # Champs rejet (admin)
+            'justification_rejet',
+            'rejetee_par_nom',
+            'date_rejet',
+            # Champs refus clôture (client/créateur)
+            'cloture_refusee_par_nom',
+            'date_refus_cloture',
+            'commentaire_refus_cloture',
         ]
 
     def get_createur_nom(self, obj):
         if obj.createur:
             return f"{obj.createur.prenom} {obj.createur.nom}".strip() or obj.createur.email
+        return None
+
+    def get_intervention_refusee_par_nom(self, obj):
+        if obj.intervention_refusee_par:
+            return f"{obj.intervention_refusee_par.prenom} {obj.intervention_refusee_par.nom}".strip() or obj.intervention_refusee_par.email
+        return None
+
+    def get_rejetee_par_nom(self, obj):
+        if obj.rejetee_par:
+            return f"{obj.rejetee_par.prenom} {obj.rejetee_par.nom}".strip() or obj.rejetee_par.email
+        return None
+
+    def get_cloture_refusee_par_nom(self, obj):
+        if obj.cloture_refusee_par:
+            return f"{obj.cloture_refusee_par.prenom} {obj.cloture_refusee_par.nom}".strip() or obj.cloture_refusee_par.email
         return None
 
 
@@ -113,10 +144,31 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
     historique = HistoriqueReclamationSerializer(many=True, read_only=True)
     satisfaction = serializers.SerializerMethodField()
     localisation = GeometryField(read_only=True, allow_null=True)
+    # Champs pour le refus d'intervention (client)
+    intervention_refusee_par_nom = serializers.SerializerMethodField()
+    # Champs pour le rejet (admin)
+    rejetee_par_nom = serializers.SerializerMethodField()
+    # Champs pour le refus de clôture (client/créateur)
+    cloture_refusee_par_nom = serializers.SerializerMethodField()
 
     class Meta:
         model = Reclamation
         fields = '__all__'
+
+    def get_intervention_refusee_par_nom(self, obj):
+        if obj.intervention_refusee_par:
+            return f"{obj.intervention_refusee_par.prenom} {obj.intervention_refusee_par.nom}".strip() or obj.intervention_refusee_par.email
+        return None
+
+    def get_rejetee_par_nom(self, obj):
+        if obj.rejetee_par:
+            return f"{obj.rejetee_par.prenom} {obj.rejetee_par.nom}".strip() or obj.rejetee_par.email
+        return None
+
+    def get_cloture_refusee_par_nom(self, obj):
+        if obj.cloture_refusee_par:
+            return f"{obj.cloture_refusee_par.prenom} {obj.cloture_refusee_par.nom}".strip() or obj.cloture_refusee_par.email
+        return None
 
     def get_taches_liees_details(self, obj):
         """Retourne les infos de base des tâches liées.

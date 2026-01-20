@@ -71,7 +71,10 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'urgence',
             'type_reclamation',
             'equipe_affectee',
-            'equipe_affectee__site__superviseur__utilisateur'
+            'equipe_affectee__site__superviseur__utilisateur',
+            'intervention_refusee_par',  # Pour afficher le nom de celui qui a refusé l'intervention (client)
+            'rejetee_par',  # Pour afficher le nom de l'admin qui a rejeté
+            'cloture_refusee_par'  # Pour afficher le nom du client qui a refusé la clôture
         )
 
         # Prefetch pour le détail (historique, photos, taches, satisfaction)
@@ -385,8 +388,10 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             # Retour au statut RESOLUE (état avant proposition de clôture)
             reclamation.statut = 'RESOLUE'
 
-            # Sauvegarde du commentaire de refus
-            reclamation.justification_rejet = commentaire_refus
+            # Sauvegarde du refus de clôture (champs dédiés)
+            reclamation.cloture_refusee_par = user
+            reclamation.date_refus_cloture = timezone.now()
+            reclamation.commentaire_refus_cloture = commentaire_refus
 
             # Réinitialisation des champs de proposition de clôture
             reclamation.cloture_proposee_par = None
@@ -407,6 +412,137 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         serializer = ReclamationDetailSerializer(reclamation)
         return Response({
             'message': 'Clôture refusée. La réclamation retourne au statut "Résolue" pour permettre de nouvelles interventions.',
+            'reclamation': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def refuser_intervention(self, request, pk=None):
+        """
+        Endpoint pour qu'un CLIENT refuse une intervention effectuée.
+
+        Workflow:
+        - Le client (créateur ou lié à la structure) peut refuser une intervention
+        - La réclamation doit être en statut RESOLUE ou EN_ATTENTE_VALIDATION_CLOTURE
+        - Un commentaire expliquant le refus est OBLIGATOIRE
+        - Passage au statut INTERVENTION_REFUSEE
+        - La réclamation peut ensuite être reprise pour une nouvelle intervention
+        """
+        reclamation = self.get_object()
+        user = request.user
+
+        # Vérification 1: L'utilisateur doit être le créateur ou un client de la structure
+        is_creator = reclamation.createur == user
+        is_structure_client = (
+            hasattr(user, 'client_profile') and
+            reclamation.structure_client and
+            user.client_profile.structure == reclamation.structure_client
+        )
+
+        if not (is_creator or is_structure_client):
+            return Response(
+                {"error": "Seul le créateur de la réclamation ou un client de la structure peut refuser l'intervention."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérification 2: La réclamation doit être en statut approprié (intervention terminée)
+        statuts_valides = ['RESOLUE', 'EN_ATTENTE_VALIDATION_CLOTURE']
+        if reclamation.statut not in statuts_valides:
+            return Response(
+                {"error": f"L'intervention ne peut être refusée que lorsque la réclamation est en statut 'Résolue' ou 'En attente de validation'. Statut actuel: {reclamation.get_statut_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérification 3: Le commentaire de refus est OBLIGATOIRE
+        motif_refus = request.data.get('motif_refus', '').strip()
+        if not motif_refus:
+            return Response(
+                {"error": "Un commentaire expliquant le motif du refus est obligatoire."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            old_statut = reclamation.statut
+
+            # Mise à jour du statut
+            reclamation.statut = 'INTERVENTION_REFUSEE'
+
+            # Enregistrement des détails du refus
+            reclamation.intervention_refusee_par = user
+            reclamation.date_refus_intervention = timezone.now()
+            reclamation.motif_refus_intervention = motif_refus
+            reclamation.nombre_refus = (reclamation.nombre_refus or 0) + 1
+
+            # Réinitialisation des champs de proposition de clôture
+            reclamation.cloture_proposee_par = None
+            reclamation.date_proposition_cloture = None
+
+            reclamation._current_user = user
+            reclamation.save()
+
+            # Historique avec le motif du refus
+            HistoriqueReclamation.objects.create(
+                reclamation=reclamation,
+                statut_precedent=old_statut,
+                statut_nouveau='INTERVENTION_REFUSEE',
+                auteur=user,
+                commentaire=f"Intervention refusée par {user.get_full_name() or user.email}. Motif: {motif_refus}"
+            )
+
+        serializer = ReclamationDetailSerializer(reclamation)
+        return Response({
+            'message': 'Intervention refusée. Une nouvelle intervention peut être planifiée.',
+            'reclamation': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def reprendre_intervention(self, request, pk=None):
+        """
+        Endpoint pour reprendre une réclamation après refus d'intervention.
+
+        Workflow:
+        - ADMIN/SUPERVISEUR uniquement
+        - La réclamation doit être en statut INTERVENTION_REFUSEE
+        - Passage au statut EN_COURS pour permettre une nouvelle intervention
+        """
+        reclamation = self.get_object()
+        user = request.user
+
+        # Vérification: seuls ADMIN/SUPERVISEUR peuvent reprendre
+        is_admin = user.is_staff or user.is_superuser
+        is_superviseur = hasattr(user, 'superviseur_profile')
+
+        if not (is_admin or is_superviseur):
+            return Response(
+                {"error": "Seuls les administrateurs et superviseurs peuvent reprendre une intervention."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérification: la réclamation doit être en statut INTERVENTION_REFUSEE
+        if reclamation.statut != 'INTERVENTION_REFUSEE':
+            return Response(
+                {"error": f"Seules les réclamations avec intervention refusée peuvent être reprises. Statut actuel: {reclamation.get_statut_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            old_statut = reclamation.statut
+            reclamation.statut = 'EN_COURS'
+
+            reclamation._current_user = user
+            reclamation.save()
+
+            # Historique
+            HistoriqueReclamation.objects.create(
+                reclamation=reclamation,
+                statut_precedent=old_statut,
+                statut_nouveau='EN_COURS',
+                auteur=user,
+                commentaire=f"Intervention reprise par {user.get_full_name() or user.email} suite au refus client"
+            )
+
+        serializer = ReclamationDetailSerializer(reclamation)
+        return Response({
+            'message': 'Réclamation reprise. Une nouvelle intervention peut être effectuée.',
             'reclamation': serializer.data
         })
 
@@ -450,6 +586,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             old_statut = reclamation.statut
             reclamation.statut = 'REJETEE'
             reclamation.justification_rejet = justification
+            reclamation.rejetee_par = user
+            reclamation.date_rejet = timezone.now()
 
             reclamation._current_user = user
             reclamation.save()
@@ -549,8 +687,10 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'PRISE_EN_COMPTE': '#f97316', # Orange - en cours de prise en compte
             'EN_COURS': '#eab308',         # Jaune - en cours de traitement
             'RESOLUE': '#22c55e',          # Vert - résolue, en attente de clôture
+            'EN_ATTENTE_VALIDATION_CLOTURE': '#10b981', # Vert clair - en attente validation
+            'INTERVENTION_REFUSEE': '#dc2626', # Rouge foncé - intervention refusée par client
             'REJETEE': '#6b7280',          # Gris - rejetée
-            # CLOTUREE et REJETEE ne sont pas affichées sur la carte principale
+            # CLOTUREE ne sont pas affichées sur la carte principale
             # (mais visibles dans les mini-cartes des fiches détails)
         }
 
@@ -772,3 +912,313 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
             )
         except Exception as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ==============================================================================
+# VUE EXPORT EXCEL DES RÉCLAMATIONS
+# ==============================================================================
+
+from rest_framework.views import APIView
+from django.http import HttpResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from datetime import datetime
+from io import BytesIO
+
+
+class ReclamationExportExcelView(APIView):
+    """
+    Vue pour l'export Excel des réclamations avec horodatage de toutes les étapes.
+
+    Paramètres de requête:
+    - statut: filtrer par statut
+    - urgence: filtrer par urgence
+    - type_reclamation: filtrer par type
+    - site: filtrer par site
+    - date_debut: date de création minimum
+    - date_fin: date de création maximum
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    # Labels français pour les statuts
+    STATUT_LABELS = {
+        'NOUVELLE': 'En attente de lecture',
+        'PRISE_EN_COMPTE': 'Prise en compte',
+        'EN_COURS': 'En attente de réalisation',
+        'RESOLUE': 'Tâche terminée',
+        'EN_ATTENTE_VALIDATION_CLOTURE': 'En attente de validation',
+        'INTERVENTION_REFUSEE': 'Intervention refusée',
+        'CLOTUREE': 'Clôturée',
+        'REJETEE': 'Rejetée',
+    }
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+
+        # Construire le queryset de base selon le rôle
+        roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
+
+        if 'ADMIN' in roles:
+            queryset = Reclamation.objects.all()
+        elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
+            structure = user.client_profile.structure
+            if structure:
+                queryset = Reclamation.objects.filter(
+                    Q(structure_client=structure) | Q(createur=user)
+                )
+            else:
+                queryset = Reclamation.objects.filter(createur=user)
+        elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+            superviseur = user.superviseur_profile
+            queryset = Reclamation.objects.filter(site__superviseur=superviseur)
+        else:
+            queryset = Reclamation.objects.filter(createur=user)
+
+        # Appliquer les filtres
+        statut = request.query_params.get('statut')
+        if statut:
+            queryset = queryset.filter(statut=statut)
+
+        urgence = request.query_params.get('urgence')
+        if urgence:
+            queryset = queryset.filter(urgence_id=urgence)
+
+        type_rec = request.query_params.get('type_reclamation')
+        if type_rec:
+            queryset = queryset.filter(type_reclamation_id=type_rec)
+
+        site = request.query_params.get('site')
+        if site:
+            queryset = queryset.filter(site_id=site)
+
+        date_debut = request.query_params.get('date_debut')
+        if date_debut:
+            queryset = queryset.filter(date_creation__gte=date_debut)
+
+        date_fin = request.query_params.get('date_fin')
+        if date_fin:
+            queryset = queryset.filter(date_creation__lte=date_fin)
+
+        # Optimiser avec select_related et prefetch_related
+        queryset = queryset.select_related(
+            'type_reclamation',
+            'urgence',
+            'createur',
+            'site',
+            'zone',
+            'equipe_affectee',
+            'rejetee_par',
+            'cloture_proposee_par',
+            'cloture_refusee_par',
+            'intervention_refusee_par'
+        ).prefetch_related('historique__auteur').order_by('-date_creation')
+
+        if not queryset.exists():
+            return Response({'error': 'Aucune réclamation à exporter'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Créer le workbook
+        wb = Workbook()
+
+        # ========== ONGLET 1: LISTE DES RÉCLAMATIONS ==========
+        ws_list = wb.active
+        ws_list.title = "Réclamations"
+
+        # Styles
+        header_font = Font(bold=True, color='FFFFFF', size=11)
+        header_fill = PatternFill(start_color='1565C0', end_color='1565C0', fill_type='solid')
+        header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        header_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        # En-têtes pour la liste
+        headers = [
+            'N° Réclamation',
+            'Type',
+            'Urgence',
+            'Statut',
+            'Site',
+            'Zone',
+            'Créateur',
+            'Équipe affectée',
+            'Description',
+            'Date constatation',
+            'Date création',
+            'Date prise en compte',
+            'Date début traitement',
+            'Date résolution',
+            'Date clôture prévue',
+            'Date clôture réelle',
+            'Délai traitement (h)',
+        ]
+        ws_list.append(headers)
+
+        # Appliquer le style d'en-tête
+        for cell in ws_list[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = header_border
+
+        # Couleurs par statut
+        statut_colors = {
+            'NOUVELLE': 'E3F2FD',       # Bleu clair
+            'PRISE_EN_COMPTE': 'FFF3E0', # Orange clair
+            'EN_COURS': 'FFF9C4',        # Jaune clair
+            'RESOLUE': 'E8F5E9',         # Vert clair
+            'EN_ATTENTE_VALIDATION_CLOTURE': 'F3E5F5',  # Violet clair
+            'INTERVENTION_REFUSEE': 'FFCCBC',  # Orange
+            'CLOTUREE': 'C8E6C9',        # Vert
+            'REJETEE': 'FFCDD2',         # Rouge clair
+        }
+
+        # Données
+        for rec in queryset:
+            # Calcul du délai de traitement en heures
+            delai = None
+            if rec.date_cloture_reelle and rec.date_creation:
+                delta = rec.date_cloture_reelle - rec.date_creation
+                delai = round(delta.total_seconds() / 3600, 1)
+
+            row = [
+                rec.numero_reclamation,
+                rec.type_reclamation.nom_reclamation if rec.type_reclamation else '-',
+                rec.urgence.niveau_urgence if rec.urgence else '-',
+                self.STATUT_LABELS.get(rec.statut, rec.statut),
+                rec.site.nom_site if rec.site else '-',
+                rec.zone.nom if rec.zone else '-',
+                f"{rec.createur.prenom} {rec.createur.nom}".strip() if rec.createur else '-',
+                rec.equipe_affectee.nom_equipe if rec.equipe_affectee else '-',
+                rec.description[:100] + '...' if len(rec.description) > 100 else rec.description,
+                rec.date_constatation.strftime('%d/%m/%Y %H:%M') if rec.date_constatation else '-',
+                rec.date_creation.strftime('%d/%m/%Y %H:%M') if rec.date_creation else '-',
+                rec.date_prise_en_compte.strftime('%d/%m/%Y %H:%M') if rec.date_prise_en_compte else '-',
+                rec.date_debut_traitement.strftime('%d/%m/%Y %H:%M') if rec.date_debut_traitement else '-',
+                rec.date_resolution.strftime('%d/%m/%Y %H:%M') if rec.date_resolution else '-',
+                rec.date_cloture_prevue.strftime('%d/%m/%Y %H:%M') if rec.date_cloture_prevue else '-',
+                rec.date_cloture_reelle.strftime('%d/%m/%Y %H:%M') if rec.date_cloture_reelle else '-',
+                delai if delai else '-',
+            ]
+            ws_list.append(row)
+
+            # Couleur selon statut
+            if rec.statut in statut_colors:
+                fill = PatternFill(start_color=statut_colors[rec.statut], end_color=statut_colors[rec.statut], fill_type='solid')
+                for cell in ws_list[ws_list.max_row]:
+                    cell.fill = fill
+
+        # Ajuster les largeurs de colonnes
+        column_widths = [18, 20, 12, 25, 20, 15, 20, 20, 40, 18, 18, 18, 18, 18, 18, 18, 15]
+        for i, width in enumerate(column_widths, 1):
+            ws_list.column_dimensions[ws_list.cell(1, i).column_letter].width = width
+
+        # Activer les filtres
+        ws_list.auto_filter.ref = ws_list.dimensions
+
+        # ========== ONGLET 2: HISTORIQUE DÉTAILLÉ ==========
+        ws_hist = wb.create_sheet(title="Historique")
+
+        # En-têtes historique
+        hist_headers = [
+            'N° Réclamation',
+            'Type',
+            'Date changement',
+            'Ancien statut',
+            'Nouveau statut',
+            'Modifié par',
+            'Commentaire'
+        ]
+        ws_hist.append(hist_headers)
+
+        # Style en-tête
+        for cell in ws_hist[1]:
+            cell.font = header_font
+            cell.fill = PatternFill(start_color='7B1FA2', end_color='7B1FA2', fill_type='solid')
+            cell.alignment = header_alignment
+            cell.border = header_border
+
+        # Données historique
+        for rec in queryset:
+            for hist in rec.historique.all().order_by('date_changement'):
+                hist_row = [
+                    rec.numero_reclamation,
+                    rec.type_reclamation.nom_reclamation if rec.type_reclamation else '-',
+                    hist.date_changement.strftime('%d/%m/%Y %H:%M:%S') if hist.date_changement else '-',
+                    self.STATUT_LABELS.get(hist.statut_precedent, hist.statut_precedent) if hist.statut_precedent else '(Création)',
+                    self.STATUT_LABELS.get(hist.statut_nouveau, hist.statut_nouveau),
+                    f"{hist.auteur.prenom} {hist.auteur.nom}".strip() if hist.auteur else '-',
+                    hist.commentaire or '-'
+                ]
+                ws_hist.append(hist_row)
+
+        # Largeurs colonnes historique
+        hist_widths = [18, 20, 20, 25, 25, 20, 50]
+        for i, width in enumerate(hist_widths, 1):
+            ws_hist.column_dimensions[ws_hist.cell(1, i).column_letter].width = width
+
+        ws_hist.auto_filter.ref = ws_hist.dimensions
+
+        # ========== ONGLET 3: STATISTIQUES ==========
+        ws_stats = wb.create_sheet(title="Statistiques")
+
+        stats_title_fill = PatternFill(start_color='1565C0', end_color='1565C0', fill_type='solid')
+        stats_title_font = Font(bold=True, color='FFFFFF', size=12)
+
+        # Titre
+        ws_stats.append(['STATISTIQUES DES RÉCLAMATIONS'])
+        ws_stats.merge_cells('A1:B1')
+        ws_stats['A1'].font = stats_title_font
+        ws_stats['A1'].fill = stats_title_fill
+        ws_stats['A1'].alignment = Alignment(horizontal='center')
+
+        ws_stats.append([])
+        ws_stats.append(['Date d\'export:', datetime.now().strftime('%d/%m/%Y à %H:%M')])
+        ws_stats.append(['Total réclamations:', queryset.count()])
+        ws_stats.append([])
+
+        # Stats par statut
+        ws_stats.append(['RÉPARTITION PAR STATUT'])
+        ws_stats[ws_stats.max_row][0].font = Font(bold=True)
+        statut_counts = queryset.values('statut').annotate(count=Count('id'))
+        for item in statut_counts:
+            ws_stats.append([self.STATUT_LABELS.get(item['statut'], item['statut']), item['count']])
+
+        ws_stats.append([])
+
+        # Stats par urgence
+        ws_stats.append(['RÉPARTITION PAR URGENCE'])
+        ws_stats[ws_stats.max_row][0].font = Font(bold=True)
+        urgence_counts = queryset.values('urgence__niveau_urgence').annotate(count=Count('id'))
+        for item in urgence_counts:
+            ws_stats.append([item['urgence__niveau_urgence'] or '-', item['count']])
+
+        ws_stats.append([])
+
+        # Stats par type
+        ws_stats.append(['RÉPARTITION PAR TYPE'])
+        ws_stats[ws_stats.max_row][0].font = Font(bold=True)
+        type_counts = queryset.values('type_reclamation__nom_reclamation').annotate(count=Count('id'))
+        for item in type_counts:
+            ws_stats.append([item['type_reclamation__nom_reclamation'] or '-', item['count']])
+
+        # Largeurs
+        ws_stats.column_dimensions['A'].width = 35
+        ws_stats.column_dimensions['B'].width = 15
+
+        # Sauvegarder dans un buffer
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        # Réponse HTTP
+        response = HttpResponse(
+            buffer.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        filename = f"reclamations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        return response

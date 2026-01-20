@@ -31,9 +31,19 @@ def reclamation_pre_save(sender, instance, **kwargs):
             # Mise à jour automatique des dates si le statut a changé
             if old_statut != instance.statut:
                 now = timezone.now()
-                if instance.statut == 'PRISE_EN_COMPTE' and not instance.date_prise_en_compte:
+
+                # Statuts qui impliquent que la réclamation a été prise en compte
+                STATUTS_APRES_PRISE_EN_COMPTE = [
+                    'PRISE_EN_COMPTE', 'EN_COURS', 'RESOLUE',
+                    'EN_ATTENTE_VALIDATION_CLOTURE', 'CLOTUREE', 'INTERVENTION_REFUSEE'
+                ]
+
+                # Remplir date_prise_en_compte si on passe à un statut >= PRISE_EN_COMPTE
+                if instance.statut in STATUTS_APRES_PRISE_EN_COMPTE and not instance.date_prise_en_compte:
                     instance.date_prise_en_compte = now
-                elif instance.statut == 'EN_COURS' and not instance.date_debut_traitement:
+
+                # Remplir les autres dates selon le statut
+                if instance.statut == 'EN_COURS' and not instance.date_debut_traitement:
                     instance.date_debut_traitement = now
                 elif instance.statut in ['RESOLUE', 'EN_ATTENTE_VALIDATION_CLOTURE'] and not instance.date_resolution:
                     instance.date_resolution = now

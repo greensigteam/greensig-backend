@@ -713,14 +713,47 @@ class ExportPDFView(APIView):
         pdf.setFont("Helvetica-Bold", 11)
         pdf.drawString(2*cm, page_height - 2*cm, user_info)
 
-        # Site(s)
+        # Site(s) - Afficher tous les sites
         if site_names:
-            sites_text = f"Site(s): {', '.join(site_names[:3])}"  # Limiter à 3 sites pour éviter débordement
-            if len(site_names) > 3:
-                sites_text += f" (+{len(site_names) - 3} autre(s))"
+            sites_text = f"Site(s): {', '.join(site_names)}"
             pdf.setFont("Helvetica", 10)
-            pdf.drawString(2*cm, page_height - 2.6*cm, sites_text)
-            date_y = page_height - 3.2*cm
+
+            # Si le texte est trop long, utiliser une police plus petite ou couper en lignes
+            max_width = page_width - 10*cm  # Largeur disponible (en laissant de la marge pour la légende)
+            text_width = pdf.stringWidth(sites_text, "Helvetica", 10)
+
+            if text_width > max_width:
+                # Réduire la taille de la police si nécessaire
+                pdf.setFont("Helvetica", 8)
+                text_width = pdf.stringWidth(sites_text, "Helvetica", 8)
+
+                if text_width > max_width:
+                    # Si toujours trop long, couper en plusieurs lignes
+                    pdf.setFont("Helvetica", 8)
+                    words = sites_text.split(', ')
+                    lines = []
+                    current_line = words[0]
+
+                    for word in words[1:]:
+                        test_line = current_line + ', ' + word
+                        if pdf.stringWidth(test_line, "Helvetica", 8) <= max_width:
+                            current_line = test_line
+                        else:
+                            lines.append(current_line)
+                            current_line = word
+                    lines.append(current_line)
+
+                    y_pos = page_height - 2.6*cm
+                    for line in lines:
+                        pdf.drawString(2*cm, y_pos, line)
+                        y_pos -= 0.4*cm
+                    date_y = y_pos - 0.2*cm
+                else:
+                    pdf.drawString(2*cm, page_height - 2.6*cm, sites_text)
+                    date_y = page_height - 3.2*cm
+            else:
+                pdf.drawString(2*cm, page_height - 2.6*cm, sites_text)
+                date_y = page_height - 3.2*cm
         else:
             date_y = page_height - 2.6*cm
 
@@ -805,10 +838,11 @@ class ExportPDFView(APIView):
             {
                 "title": "RÉCLAMATIONS",
                 "items": [
-                    {"name": "Nouvelle", "color": (239, 68, 68)},      # #ef4444
+                    {"name": "En attente de lecture", "color": (239, 68, 68)},      # #ef4444
                     {"name": "Prise en compte", "color": (249, 115, 22)}, # #f97316
-                    {"name": "En cours", "color": (234, 179, 8)},       # #eab308
-                    {"name": "Résolue", "color": (34, 197, 94)},        # #22c55e
+                    {"name": "En attente de réalisation", "color": (234, 179, 8)},       # #eab308
+                    {"name": "Tâche terminée (côté admin.)", "color": (34, 197, 94)},        # #22c55e
+                    {"name": "Clôturée (par le client)", "color": (16, 185, 129)},    # #10b981
                 ]
             }
         ]
@@ -1110,10 +1144,10 @@ class StatisticsView(APIView):
 
 class ExportDataView(APIView):
     """
-    Vue générique pour exporter les données en CSV, Excel, GeoJSON, KML ou Shapefile.
+    Vue générique pour exporter les données en Excel, GeoJSON, KML ou Shapefile.
     Paramètres de requête:
     - model: nom du modèle (arbres, gazons, palmiers, etc.)
-    - format: csv, xlsx, geojson, kml, shp (défaut: csv)
+    - format: xlsx, geojson, kml, shp (défaut: xlsx)
     - ids: optionnel, liste d'IDs séparés par virgules pour export sélectif
     - filtres: optionnels (même syntaxe que les endpoints de liste)
     """
@@ -1139,7 +1173,6 @@ class ExportDataView(APIView):
     }
 
     def get(self, request, model_name, *args, **kwargs):
-        import csv
         from openpyxl import Workbook
         from django.http import HttpResponse
         from datetime import datetime
@@ -1151,8 +1184,8 @@ class ExportDataView(APIView):
         model_class = self.MODEL_MAPPING[model_name]
 
         # Récupérer le format d'export
-        export_format = request.query_params.get('format', 'csv').lower()
-        valid_formats = ['csv', 'xlsx', 'geojson', 'kml', 'shp', 'shapefile']
+        export_format = request.query_params.get('format', 'xlsx').lower()
+        valid_formats = ['xlsx', 'geojson', 'kml', 'shp', 'shapefile']
         if export_format not in valid_formats:
             return Response({'error': f'Format invalide. Utilisez: {", ".join(valid_formats)}'}, status=400)
 
@@ -1235,7 +1268,7 @@ class ExportDataView(APIView):
                 return Response({'error': f'Shapefile export error: {str(e)}'}, status=500)
 
         # ==============================================================================
-        # EXPORT CSV / XLSX (original logic)
+        # EXPORT XLSX
         # ==============================================================================
         # Récupérer tous les objets (pas de pagination pour l'export)
         objects = list(queryset.values())
@@ -1243,23 +1276,8 @@ class ExportDataView(APIView):
         # Obtenir les noms de colonnes
         field_names = list(objects[0].keys())
 
-        # Export CSV
-        if export_format == 'csv':
-            response = HttpResponse(content_type='text/csv; charset=utf-8')
-            filename = f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            response['Content-Disposition'] = f'attachment; filename="{filename}"'
-
-            # Ajouter le BOM UTF-8 pour Excel
-            response.write('\ufeff')
-
-            writer = csv.DictWriter(response, fieldnames=field_names)
-            writer.writeheader()
-            writer.writerows(objects)
-
-            return response
-
         # Export Excel
-        elif export_format == 'xlsx':
+        if export_format == 'xlsx':
             wb = Workbook()
             ws = wb.active
             ws.title = model_name[:31]  # Excel limite à 31 caractères
@@ -1340,23 +1358,34 @@ class InventoryExportExcelView(APIView):
     }
 
     # Mapping des champs à exporter par type (colonnes personnalisées)
+    # Note: 'superficie_calculee' est une annotation calculée dynamiquement
+    # Note: 'derniere_intervention' est calculée depuis les tâches si last_intervention_date est null
     FIELD_MAPPINGS = {
-        'Arbre': ['nom', 'famille', 'taille', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Palmier': ['nom', 'famille', 'taille', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Gazon': ['nom', 'famille', 'area_sqm', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Arbuste': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Vivace': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Cactus': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Graminee': ['nom', 'famille', 'densite', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Puit': ['nom', 'profondeur', 'diametre', 'site__nom_site', 'sous_site__nom', 'etat', 'last_intervention_date'],
-        'Pompe': ['nom', 'type', 'diametre', 'puissance', 'debit', 'site__nom_site', 'sous_site__nom', 'etat'],
-        'Vanne': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
-        'Clapet': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
-        'Canalisation': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
-        'Aspersion': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
-        'Goutte': ['type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat'],
-        'Ballon': ['marque', 'pression', 'volume', 'materiau', 'site__nom_site', 'sous_site__nom', 'etat'],
+        'Arbre': ['nom', 'famille', 'taille', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Palmier': ['nom', 'famille', 'taille', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Gazon': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Arbuste': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Vivace': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Cactus': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Graminee': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Puit': ['nom', 'profondeur', 'diametre', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Pompe': ['nom', 'type', 'diametre', 'puissance', 'debit', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Vanne': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Clapet': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Canalisation': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Aspersion': ['marque', 'type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Goutte': ['type', 'diametre', 'materiau', 'pression', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
+        'Ballon': ['marque', 'pression', 'volume', 'materiau', 'site__nom_site', 'sous_site__nom', 'etat', 'derniere_intervention'],
     }
+
+    # Types qui ont une géométrie polygone (pour calcul de surface)
+    POLYGON_TYPES = ['Gazon', 'Arbuste', 'Vivace', 'Cactus', 'Graminee']
+
+    # Types qui ont le champ last_intervention_date
+    TYPES_WITH_INTERVENTION_DATE = [
+        'Arbre', 'Palmier', 'Gazon', 'Arbuste', 'Vivace', 'Cactus', 'Graminee',
+        'Puit', 'Pompe'
+    ]
 
     # Labels français pour les colonnes
     FIELD_LABELS = {
@@ -1366,6 +1395,7 @@ class InventoryExportExcelView(APIView):
         'taille': 'Taille',
         'densite': 'Densité',
         'area_sqm': 'Surface (m²)',
+        'superficie_calculee': 'Surface (m²)',
         'profondeur': 'Profondeur (m)',
         'diametre': 'Diamètre (cm)',
         'type': 'Type',
@@ -1378,6 +1408,7 @@ class InventoryExportExcelView(APIView):
         'sous_site__nom': 'Sous-site',
         'etat': 'État',
         'last_intervention_date': 'Dernière intervention',
+        'derniere_intervention': 'Dernière intervention',
     }
 
     def get(self, request, *args, **kwargs):
@@ -1498,23 +1529,63 @@ class InventoryExportExcelView(APIView):
                 cell.alignment = header_alignment
                 cell.border = header_border
 
-            # Récupérer les données
-            data_rows = queryset.values(*fields)
-
-            # Écrire les données avec formatage conditionnel
-            for row_data in data_rows:
+            # Écrire les données - itérer directement sur les objets
+            for obj in queryset:
                 row_values = []
                 etat_value = None
 
                 for field in fields:
-                    value = row_data.get(field)
+                    value = None
+
+                    # Gérer les champs calculés spéciaux
+                    if field == 'superficie_calculee':
+                        # Calculer la surface depuis la géométrie (pour polygones)
+                        if type_name in self.POLYGON_TYPES and obj.geometry:
+                            try:
+                                # Utiliser la méthode area de GEOS (retourne m² pour géométries géographiques)
+                                # Transformer en projection métrique pour calcul précis
+                                from django.contrib.gis.geos import GEOSGeometry
+                                geom = obj.geometry
+                                # Transformer en Web Mercator (EPSG:3857) pour calcul en mètres
+                                geom_projected = geom.transform(3857, clone=True)
+                                value = geom_projected.area  # Surface en m²
+                            except Exception:
+                                value = None
+
+                    elif field == 'derniere_intervention':
+                        # Priorité au champ existant, sinon chercher dans les tâches
+                        if type_name in self.TYPES_WITH_INTERVENTION_DATE and hasattr(obj, 'last_intervention_date'):
+                            value = obj.last_intervention_date
+                        if not value:
+                            # Chercher la dernière tâche terminée liée à cet objet
+                            from api_planification.models import Tache
+                            derniere_tache = Tache.objects.filter(
+                                objets__id=obj.objet_ptr_id,
+                                statut='TERMINEE',
+                                deleted_at__isnull=True
+                            ).order_by('-date_fin_reelle').values('date_fin_reelle').first()
+                            if derniere_tache:
+                                value = derniere_tache['date_fin_reelle']
+
+                    elif field == 'site__nom_site':
+                        # Champ lié: site.nom_site
+                        value = obj.site.nom_site if obj.site else None
+
+                    elif field == 'sous_site__nom':
+                        # Champ lié: sous_site.nom
+                        value = obj.sous_site.nom if obj.sous_site else None
+
+                    else:
+                        # Champ standard - accès direct à l'attribut
+                        value = getattr(obj, field, None)
 
                     # Formater les dates
-                    if field == 'last_intervention_date' and value:
-                        value = value.strftime('%d/%m/%Y')
+                    if field in ['last_intervention_date', 'derniere_intervention'] and value:
+                        if hasattr(value, 'strftime'):
+                            value = value.strftime('%d/%m/%Y')
 
                     # Formater les nombres
-                    elif field in ['area_sqm', 'profondeur', 'diametre', 'puissance', 'debit', 'pression', 'volume']:
+                    elif field in ['area_sqm', 'superficie_calculee', 'profondeur', 'diametre', 'puissance', 'debit', 'pression', 'volume', 'densite']:
                         if value is not None:
                             value = round(float(value), 2)
 
@@ -1522,7 +1593,8 @@ class InventoryExportExcelView(APIView):
                     if field == 'etat':
                         etat_value = value
 
-                    row_values.append(value if value is not None else '-')
+                    # Laisser vide si pas de valeur (au lieu de '-')
+                    row_values.append(value if value is not None else '')
 
                 ws.append(row_values)
 
@@ -1851,8 +1923,8 @@ class InventoryExportPDFView(APIView):
             fields = self.FIELD_MAPPINGS.get(type_name, ['nom', 'site__nom_site', 'etat'])
             headers = [self.FIELD_LABELS.get(field, field) for field in fields]
 
-            # Données
-            data_rows = list(queryset.values(*fields)[:50])  # Limiter à 50 pour ne pas surcharger
+            # Données - Afficher TOUS les éléments
+            data_rows = list(queryset.values(*fields))
 
             # Construire le tableau
             table_data = [headers]
@@ -1874,14 +1946,18 @@ class InventoryExportPDFView(APIView):
 
                 table_data.append(row)
 
-            # Si plus de 50 éléments, ajouter note
-            if queryset.count() > 50:
-                table_data.append(['...' for _ in fields])
-                table_data.append([f'({queryset.count() - 50} éléments supplémentaires non affichés)'] + ['' for _ in range(len(fields) - 1)])
+            # Calculer les statistiques pour les intégrer dans le tableau
+            etat_counts = queryset.values('etat').annotate(count=Count('id'))
+            etat_summary = {item['etat']: item['count'] for item in etat_counts}
+            stats_text = "Répartition: " + " | ".join([f"{k.capitalize()}: {v}" for k, v in etat_summary.items()])
+
+            # Ajouter une ligne de statistiques à la fin du tableau
+            table_data.append([stats_text] + ['' for _ in range(len(fields) - 1)])
+            stats_row_index = len(table_data) - 1
 
             # Créer le tableau
             col_widths = [3*cm] * len(fields)  # Largeur égale pour toutes les colonnes
-            table = Table(table_data, colWidths=col_widths)
+            table = Table(table_data, colWidths=col_widths, repeatRows=1)  # repeatRows=1 pour répéter l'en-tête sur chaque page
 
             # Style du tableau
             table_style = TableStyle([
@@ -1903,8 +1979,15 @@ class InventoryExportPDFView(APIView):
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
                 ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#2E7D32')),
 
-                # Alternance de couleurs
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+                # Alternance de couleurs (exclure la dernière ligne de stats)
+                ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, colors.HexColor('#F5F5F5')]),
+
+                # Style de la ligne de statistiques (dernière ligne)
+                ('SPAN', (0, stats_row_index), (-1, stats_row_index)),
+                ('BACKGROUND', (0, stats_row_index), (-1, stats_row_index), colors.HexColor('#E8F5E9')),
+                ('ALIGN', (0, stats_row_index), (-1, stats_row_index), 'CENTER'),
+                ('FONTNAME', (0, stats_row_index), (-1, stats_row_index), 'Helvetica-Oblique'),
+                ('TEXTCOLOR', (0, stats_row_index), (-1, stats_row_index), colors.HexColor('#2E7D32')),
             ])
 
             # Appliquer les couleurs par état si la colonne existe
@@ -1917,15 +2000,6 @@ class InventoryExportPDFView(APIView):
 
             table.setStyle(table_style)
             story.append(table)
-
-            # Statistiques pour ce type
-            etat_counts = queryset.values('etat').annotate(count=Count('id'))
-            etat_summary = {item['etat']: item['count'] for item in etat_counts}
-
-            stats_text = " | ".join([f"{k.capitalize()}: {v}" for k, v in etat_summary.items()])
-            stats_para = Paragraph(f"<i>Répartition: {stats_text}</i>", styles['Normal'])
-            story.append(Spacer(1, 0.3*cm))
-            story.append(stats_para)
 
             # Saut de page entre les types (sauf pour le dernier)
             if idx < len(types_list) - 1:

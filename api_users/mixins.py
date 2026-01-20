@@ -207,18 +207,26 @@ class RoleBasedQuerySetMixin:
                 absences_via_equipe_legacy
             ).distinct()
 
-        # Tâches : Tâches assignées à ses équipes OU tâches sur ses sites sans équipe
+        # Tâches : Tâches assignées à ses équipes OU tâches sur ses sites
         if model_name == 'Tache':
-            # Tâches avec objets sur les sites du superviseur
-            # Cela inclut automatiquement les tâches avec ou sans équipe
+            # Inclure:
+            # 1. Tâches avec objets sur les sites du superviseur
+            # 2. Tâches liées à des réclamations sur les sites du superviseur
+            # 3. Tâches assignées à des équipes sur les sites du superviseur
             return queryset.filter(
-                objets__site__superviseur=superviseur
+                Q(objets__site__superviseur=superviseur) |
+                Q(reclamation__site__superviseur=superviseur) |
+                Q(id_equipe__site_principal__superviseur=superviseur) |
+                Q(equipes__site_principal__superviseur=superviseur)
             ).distinct()
 
         # Distributions de charge : Distributions des tâches sur les sites du superviseur
         if model_name == 'DistributionCharge':
             return queryset.filter(
-                tache__objets__site__superviseur=superviseur
+                Q(tache__objets__site__superviseur=superviseur) |
+                Q(tache__reclamation__site__superviseur=superviseur) |
+                Q(tache__id_equipe__site_principal__superviseur=superviseur) |
+                Q(tache__equipes__site_principal__superviseur=superviseur)
             ).distinct()
 
         # Réclamations : Réclamations sur les sites affectés au superviseur
@@ -263,13 +271,25 @@ class RoleBasedQuerySetMixin:
         if model_name == 'SousSite':
             return queryset.filter(site__structure_client=client.structure)
 
-        # Tâches : Tâches du client (lecture seule, via id_structure_client)
+        # Tâches : Tâches du client (lecture seule)
         if model_name == 'Tache':
-            return queryset.filter(id_structure_client=client.structure)
+            # Inclure:
+            # 1. Tâches directement liées à la structure client
+            # 2. Tâches liées à des réclamations de la structure client
+            # 3. Tâches sur les sites de la structure client
+            return queryset.filter(
+                Q(id_structure_client=client.structure) |
+                Q(reclamation__structure_client=client.structure) |
+                Q(objets__site__structure_client=client.structure)
+            ).distinct()
 
         # Distributions de charge : Distributions des tâches de sa structure
         if model_name == 'DistributionCharge':
-            return queryset.filter(tache__id_structure_client=client.structure)
+            return queryset.filter(
+                Q(tache__id_structure_client=client.structure) |
+                Q(tache__reclamation__structure_client=client.structure) |
+                Q(tache__objets__site__structure_client=client.structure)
+            ).distinct()
 
         # Réclamations : Ses réclamations (via structure_client)
         if model_name == 'Reclamation':
