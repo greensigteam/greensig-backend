@@ -16,6 +16,8 @@ from django.utils import timezone
 from .utils import (
     dupliquer_tache_avec_distributions,
     dupliquer_tache_recurrence_multiple,
+    dupliquer_tache_recurrence_jours_semaine,
+    dupliquer_tache_recurrence_jours_mois,
     dupliquer_tache_dates_specifiques,
     obtenir_frequences_compatibles,
     calculer_duree_tache
@@ -498,6 +500,15 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         """
         Duplique une tâche selon une fréquence prédéfinie.
 
+        ⚠️ ATTENTION (Option A): Si vous créez une tâche avec `recurrence_config`
+        dans le POST initial, les occurrences sont DÉJÀ créées automatiquement.
+        NE PAS appeler cet endpoint après pour éviter une double création!
+
+        Cet endpoint est utile pour:
+        - Dupliquer une tâche existante (créée sans récurrence)
+        - Ajouter des occurrences supplémentaires
+        - Tests manuels
+
         **Fréquences disponibles:**
         - `DAILY`: Quotidien (chaque jour)
         - `WEEKLY`: Hebdomadaire (chaque semaine, +7 jours)
@@ -531,10 +542,42 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         print(f"[API] Données validées: {serializer.validated_data}")
 
         try:
-            nouvelles_taches = dupliquer_tache_recurrence_multiple(
-                tache_id=tache.id,
-                **serializer.validated_data
-            )
+            # ✅ Détecter le mode de récurrence
+            jours_semaine = serializer.validated_data.get('jours_semaine')
+            jours_mois = serializer.validated_data.get('jours_mois')
+            frequence = serializer.validated_data.get('frequence')
+
+            if jours_semaine and frequence == 'WEEKLY':
+                # Mode sélection de jours de la semaine (WEEKLY)
+                print(f"[API] Mode sélection jours semaine: {jours_semaine}")
+                nouvelles_taches = dupliquer_tache_recurrence_jours_semaine(
+                    tache_id=tache.id,
+                    jours_semaine=jours_semaine,
+                    nombre_occurrences=serializer.validated_data.get('nombre_occurrences'),
+                    date_fin_recurrence=serializer.validated_data.get('date_fin_recurrence'),
+                    conserver_equipes=serializer.validated_data.get('conserver_equipes', True),
+                    conserver_objets=serializer.validated_data.get('conserver_objets', True),
+                    nouveau_statut=serializer.validated_data.get('nouveau_statut', 'PLANIFIEE')
+                )
+            elif jours_mois and frequence == 'MONTHLY':
+                # Mode sélection de jours du mois (MONTHLY)
+                print(f"[API] Mode sélection jours mois: {jours_mois}")
+                nouvelles_taches = dupliquer_tache_recurrence_jours_mois(
+                    tache_id=tache.id,
+                    jours_mois=jours_mois,
+                    nombre_occurrences=serializer.validated_data.get('nombre_occurrences'),
+                    date_fin_recurrence=serializer.validated_data.get('date_fin_recurrence'),
+                    conserver_equipes=serializer.validated_data.get('conserver_equipes', True),
+                    conserver_objets=serializer.validated_data.get('conserver_objets', True),
+                    nouveau_statut=serializer.validated_data.get('nouveau_statut', 'PLANIFIEE')
+                )
+            else:
+                # Mode standard (décalage fixe)
+                print(f"[API] Mode standard: fréquence {frequence}")
+                nouvelles_taches = dupliquer_tache_recurrence_multiple(
+                    tache_id=tache.id,
+                    **serializer.validated_data
+                )
             print(f"[API] {len(nouvelles_taches)} tâche(s) créée(s)")
 
             response_serializer = TacheRecurrenceResponseSerializer({
@@ -872,7 +915,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         Logique automatique:
         - Si c'est la première distribution marquée comme réalisée
         - Et que la tâche est en statut PLANIFIEE
-        - Alors la tâche passe automatiquement en statut EN_COURS
+        - Alors:
+          * La tâche passe automatiquement en statut EN_COURS
+          * La date_debut_reelle de la tâche est définie avec la date actuelle (aujourd'hui)
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -892,16 +937,18 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.save()
 
         # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE,
-        # passer la tâche en EN_COURS
+        # passer la tâche en EN_COURS et définir la date de début réelle
         if est_premiere_distribution and tache.statut == 'PLANIFIEE':
             tache.statut = 'EN_COURS'
+            tache.date_debut_reelle = timezone.now().date()  # Date actuelle (aujourd'hui)
             tache.save()
 
         serializer = self.get_serializer(distribution)
         return Response({
             'message': 'Distribution marquée comme réalisée',
             'distribution': serializer.data,
-            'tache_statut_modifie': est_premiere_distribution and tache.statut == 'EN_COURS'
+            'tache_statut_modifie': est_premiere_distribution and tache.statut == 'EN_COURS',
+            'date_debut_reelle_definie': est_premiere_distribution and tache.date_debut_reelle is not None
         }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='marquer-non-realisee')
@@ -913,7 +960,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         Logique automatique:
         - Si c'était la dernière distribution réalisée
         - Et que la tâche est en statut EN_COURS
-        - Alors la tâche repasse automatiquement en statut PLANIFIEE
+        - Alors:
+          * La tâche repasse automatiquement en statut PLANIFIEE
+          * La date_debut_reelle de la tâche est supprimée (remise à None)
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -931,16 +980,18 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.save()
 
         # Si c'était la dernière distribution réalisée et que la tâche est EN_COURS,
-        # remettre la tâche en PLANIFIEE
+        # remettre la tâche en PLANIFIEE et supprimer la date de début réelle
         if est_derniere_distribution and tache.statut == 'EN_COURS':
             tache.statut = 'PLANIFIEE'
+            tache.date_debut_reelle = None
             tache.save()
 
         serializer = self.get_serializer(distribution)
         return Response({
             'message': 'Distribution marquée comme non réalisée',
             'distribution': serializer.data,
-            'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE'
+            'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE',
+            'date_debut_reelle_supprimee': est_derniere_distribution and tache.date_debut_reelle is None
         }, status=status.HTTP_200_OK)
 
 
@@ -1030,6 +1081,15 @@ class TacheRecurrenceViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         """
         Duplique une tâche selon une fréquence prédéfinie.
 
+        ⚠️ ATTENTION (Option A): Si vous créez une tâche avec `recurrence_config`
+        dans le POST initial, les occurrences sont DÉJÀ créées automatiquement.
+        NE PAS appeler cet endpoint après pour éviter une double création!
+
+        Cet endpoint est utile pour:
+        - Dupliquer une tâche existante (créée sans récurrence)
+        - Ajouter des occurrences supplémentaires
+        - Tests manuels
+
         **Fréquences disponibles:**
         - `DAILY`: Quotidien (chaque jour)
         - `WEEKLY`: Hebdomadaire (chaque semaine, +7 jours)
@@ -1063,10 +1123,42 @@ class TacheRecurrenceViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         print(f"[API] Données validées: {serializer.validated_data}")
 
         try:
-            nouvelles_taches = dupliquer_tache_recurrence_multiple(
-                tache_id=tache.id,
-                **serializer.validated_data
-            )
+            # ✅ Détecter le mode de récurrence
+            jours_semaine = serializer.validated_data.get('jours_semaine')
+            jours_mois = serializer.validated_data.get('jours_mois')
+            frequence = serializer.validated_data.get('frequence')
+
+            if jours_semaine and frequence == 'WEEKLY':
+                # Mode sélection de jours de la semaine (WEEKLY)
+                print(f"[API] Mode sélection jours semaine: {jours_semaine}")
+                nouvelles_taches = dupliquer_tache_recurrence_jours_semaine(
+                    tache_id=tache.id,
+                    jours_semaine=jours_semaine,
+                    nombre_occurrences=serializer.validated_data.get('nombre_occurrences'),
+                    date_fin_recurrence=serializer.validated_data.get('date_fin_recurrence'),
+                    conserver_equipes=serializer.validated_data.get('conserver_equipes', True),
+                    conserver_objets=serializer.validated_data.get('conserver_objets', True),
+                    nouveau_statut=serializer.validated_data.get('nouveau_statut', 'PLANIFIEE')
+                )
+            elif jours_mois and frequence == 'MONTHLY':
+                # Mode sélection de jours du mois (MONTHLY)
+                print(f"[API] Mode sélection jours mois: {jours_mois}")
+                nouvelles_taches = dupliquer_tache_recurrence_jours_mois(
+                    tache_id=tache.id,
+                    jours_mois=jours_mois,
+                    nombre_occurrences=serializer.validated_data.get('nombre_occurrences'),
+                    date_fin_recurrence=serializer.validated_data.get('date_fin_recurrence'),
+                    conserver_equipes=serializer.validated_data.get('conserver_equipes', True),
+                    conserver_objets=serializer.validated_data.get('conserver_objets', True),
+                    nouveau_statut=serializer.validated_data.get('nouveau_statut', 'PLANIFIEE')
+                )
+            else:
+                # Mode standard (décalage fixe)
+                print(f"[API] Mode standard: fréquence {frequence}")
+                nouvelles_taches = dupliquer_tache_recurrence_multiple(
+                    tache_id=tache.id,
+                    **serializer.validated_data
+                )
             print(f"[API] {len(nouvelles_taches)} tâche(s) créée(s)")
 
             response_serializer = TacheRecurrenceResponseSerializer({

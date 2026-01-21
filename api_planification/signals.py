@@ -15,6 +15,39 @@ logger = logging.getLogger(__name__)
 # Debug: api_planification.signals LOADED
 
 
+def update_last_intervention_date(tache):
+    """
+    Met à jour le champ last_intervention_date sur tous les objets liés à une tâche terminée.
+    Utilise la date de fin réelle de la tâche ou la date courante.
+    """
+    from django.utils import timezone
+    from api.models import (
+        Arbre, Palmier, Gazon, Arbuste, Vivace, Cactus, Graminee,
+        Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon
+    )
+
+    # Date à utiliser: date_fin_reelle ou date du jour
+    intervention_date = tache.date_fin_reelle.date() if tache.date_fin_reelle else timezone.now().date()
+
+    # Récupérer tous les objets liés à cette tâche
+    objets = tache.objets.all()
+
+    if not objets.exists():
+        logger.debug(f"[LAST_INTERVENTION] Tache #{tache.id}: aucun objet lié")
+        return
+
+    updated_count = 0
+    for objet in objets:
+        # Obtenir l'instance réelle (enfant polymorphique)
+        real_obj = objet.get_type_reel()
+        if real_obj and hasattr(real_obj, 'last_intervention_date'):
+            real_obj.last_intervention_date = intervention_date
+            real_obj.save(update_fields=['last_intervention_date'])
+            updated_count += 1
+
+    logger.info(f"[LAST_INTERVENTION] Tache #{tache.id} TERMINEE: {updated_count} objets mis à jour avec date {intervention_date}")
+
+
 @receiver(m2m_changed, sender=Tache.objets.through)
 def auto_assign_client_from_objects(sender, instance, action, **kwargs):
     """
@@ -157,9 +190,12 @@ def tache_post_save(sender, instance, created, **kwargs):
 
                 if instance.statut == 'TERMINEE':
                     NotificationService.notify_tache_terminee(
-                        instance, 
+                        instance,
                         createur=getattr(instance, '_current_user', None)
                     )
+
+                    # Mettre à jour last_intervention_date sur tous les objets liés
+                    update_last_intervention_date(instance)
 
     except Exception as e:
         logger.error(f"[NOTIF] Erreur notification tache #{instance.id}: {e}")

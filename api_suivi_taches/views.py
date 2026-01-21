@@ -14,7 +14,9 @@ from .models import (
     ProduitMatiereActive,
     DoseProduit,
     ConsommationProduit,
-    Photo
+    Photo,
+    Fertilisant,
+    RavageurMaladie
 )
 from .serializers import (
     ProduitListSerializer,
@@ -26,7 +28,13 @@ from .serializers import (
     ConsommationProduitCreateSerializer,
     PhotoSerializer,
     PhotoCreateSerializer,
-    PhotoListSerializer
+    PhotoListSerializer,
+    FertilisantListSerializer,
+    FertilisantDetailSerializer,
+    FertilisantCreateSerializer,
+    RavageurMaladieListSerializer,
+    RavageurMaladieDetailSerializer,
+    RavageurMaladieCreateSerializer
 )
 
 
@@ -332,3 +340,223 @@ class PhotoViewSet(viewsets.ModelViewSet):
         )
         serializer = PhotoListSerializer(photos, many=True, context={'request': request})
         return Response(serializer.data)
+
+
+# ==============================================================================
+# VIEWSET - FERTILISANT
+# ==============================================================================
+
+class FertilisantViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour gérer les fertilisants et amendements.
+
+    Endpoints:
+    - GET /fertilisants/ : Liste des fertilisants
+    - GET /fertilisants/{id}/ : Détail d'un fertilisant
+    - POST /fertilisants/ : Créer un fertilisant
+    - PUT/PATCH /fertilisants/{id}/ : Modifier un fertilisant
+    - DELETE /fertilisants/{id}/ : Supprimer un fertilisant
+    - GET /fertilisants/actifs/ : Liste des fertilisants actifs
+    - GET /fertilisants/par_type/?type=ORGANIQUE : Filtrer par type
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['actif', 'type_fertilisant', 'format_fertilisant']
+    search_fields = ['nom', 'description']
+    ordering_fields = ['nom', 'type_fertilisant', 'date_creation']
+    ordering = ['nom']
+
+    def get_queryset(self):
+        """Retourne tous les fertilisants."""
+        return Fertilisant.objects.all()
+
+    def get_serializer_class(self):
+        """Sélectionne le serializer selon l'action."""
+        if self.action == 'list':
+            return FertilisantListSerializer
+        elif self.action in ['create', 'update', 'partial_update']:
+            return FertilisantCreateSerializer
+        return FertilisantDetailSerializer
+
+    @action(detail=False, methods=['get'])
+    def actifs(self, request):
+        """
+        Retourne uniquement les fertilisants actifs.
+
+        GET /fertilisants/actifs/
+        """
+        fertilisants = self.get_queryset().filter(actif=True)
+        serializer = FertilisantListSerializer(fertilisants, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def par_type(self, request):
+        """
+        Retourne les fertilisants filtrés par type.
+
+        GET /fertilisants/par_type/?type=ORGANIQUE
+        """
+        type_fertilisant = request.query_params.get('type')
+        if not type_fertilisant:
+            return Response(
+                {'error': 'Le paramètre type est requis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        fertilisants = self.get_queryset().filter(
+            actif=True,
+            type_fertilisant=type_fertilisant.upper()
+        )
+        serializer = FertilisantListSerializer(fertilisants, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def soft_delete(self, request, pk=None):
+        """
+        Désactive un fertilisant (soft delete).
+
+        POST /fertilisants/{id}/soft_delete/
+        """
+        fertilisant = self.get_object()
+        fertilisant.actif = False
+        fertilisant.save()
+        serializer = self.get_serializer(fertilisant)
+        return Response({
+            'message': 'Fertilisant désactivé avec succès',
+            'fertilisant': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def reactivate(self, request, pk=None):
+        """
+        Réactive un fertilisant désactivé.
+
+        POST /fertilisants/{id}/reactivate/
+        """
+        fertilisant = self.get_object()
+        fertilisant.actif = True
+        fertilisant.save()
+        serializer = self.get_serializer(fertilisant)
+        return Response({
+            'message': 'Fertilisant réactivé avec succès',
+            'fertilisant': serializer.data
+        })
+
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy pour soft delete."""
+        instance = self.get_object()
+        instance.actif = False
+        instance.save()
+        return Response({
+            'message': 'Fertilisant désactivé (soft delete).'
+        }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# VIEWSET - RAVAGEUR / MALADIE
+# ==============================================================================
+
+class RavageurMaladieViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour gérer les ravageurs et maladies.
+
+    Endpoints:
+    - GET /ravageurs-maladies/ : Liste des ravageurs/maladies
+    - GET /ravageurs-maladies/{id}/ : Détail d'un ravageur/maladie
+    - POST /ravageurs-maladies/ : Créer un ravageur/maladie
+    - PUT/PATCH /ravageurs-maladies/{id}/ : Modifier un ravageur/maladie
+    - DELETE /ravageurs-maladies/{id}/ : Supprimer un ravageur/maladie
+    - GET /ravageurs-maladies/actifs/ : Liste des actifs
+    - GET /ravageurs-maladies/par_categorie/?categorie=MALADIE : Filtrer par catégorie
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['actif', 'categorie']
+    search_fields = ['nom', 'symptomes', 'partie_atteinte']
+    ordering_fields = ['nom', 'categorie', 'date_creation']
+    ordering = ['categorie', 'nom']
+
+    def get_queryset(self):
+        """Retourne tous les ravageurs/maladies avec produits."""
+        return RavageurMaladie.objects.prefetch_related('produits_recommandes').all()
+
+    def get_serializer_class(self):
+        """Sélectionne le serializer selon l'action."""
+        if self.action == 'list':
+            return RavageurMaladieListSerializer
+        elif self.action in ['create', 'update', 'partial_update']:
+            return RavageurMaladieCreateSerializer
+        return RavageurMaladieDetailSerializer
+
+    @action(detail=False, methods=['get'])
+    def actifs(self, request):
+        """
+        Retourne uniquement les ravageurs/maladies actifs.
+
+        GET /ravageurs-maladies/actifs/
+        """
+        items = self.get_queryset().filter(actif=True)
+        serializer = RavageurMaladieListSerializer(items, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def par_categorie(self, request):
+        """
+        Retourne les ravageurs/maladies filtrés par catégorie.
+
+        GET /ravageurs-maladies/par_categorie/?categorie=RAVAGEUR
+        """
+        categorie = request.query_params.get('categorie')
+        if not categorie:
+            return Response(
+                {'error': 'Le paramètre categorie est requis (RAVAGEUR ou MALADIE)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        items = self.get_queryset().filter(
+            actif=True,
+            categorie=categorie.upper()
+        )
+        serializer = RavageurMaladieListSerializer(items, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def soft_delete(self, request, pk=None):
+        """
+        Désactive un ravageur/maladie (soft delete).
+
+        POST /ravageurs-maladies/{id}/soft_delete/
+        """
+        item = self.get_object()
+        item.actif = False
+        item.save()
+        serializer = self.get_serializer(item)
+        return Response({
+            'message': 'Ravageur/Maladie désactivé avec succès',
+            'ravageur_maladie': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def reactivate(self, request, pk=None):
+        """
+        Réactive un ravageur/maladie désactivé.
+
+        POST /ravageurs-maladies/{id}/reactivate/
+        """
+        item = self.get_object()
+        item.actif = True
+        item.save()
+        serializer = self.get_serializer(item)
+        return Response({
+            'message': 'Ravageur/Maladie réactivé avec succès',
+            'ravageur_maladie': serializer.data
+        })
+
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy pour soft delete."""
+        instance = self.get_object()
+        instance.actif = False
+        instance.save()
+        return Response({
+            'message': 'Ravageur/Maladie désactivé (soft delete).'
+        }, status=status.HTTP_200_OK)

@@ -143,7 +143,8 @@ def dupliquer_tache_avec_distributions(
     date_fin_recurrence: Optional[date] = None,
     conserver_equipes: bool = True,
     conserver_objets: bool = True,
-    nouveau_statut: Optional[str] = 'PLANIFIEE'
+    nouveau_statut: Optional[str] = 'PLANIFIEE',
+    skip_validation: bool = False
 ) -> List[Tache]:
     """
     Duplique une tâche et ses distributions de charge avec un décalage temporel.
@@ -163,6 +164,8 @@ def dupliquer_tache_avec_distributions(
         conserver_equipes: Conserver les équipes assignées (défaut: True)
         conserver_objets: Conserver les objets liés (défaut: True)
         nouveau_statut: Statut des nouvelles tâches (défaut: 'PLANIFIEE')
+        skip_validation: Désactiver la validation de compatibilité (défaut: False)
+                        Utilisé quand la validation a déjà été faite en amont
 
     Returns:
         Liste des nouvelles tâches créées
@@ -230,12 +233,15 @@ def dupliquer_tache_avec_distributions(
     except Tache.DoesNotExist:
         raise Tache.DoesNotExist(f"Tâche {tache_id} introuvable")
 
-    # ✅ NOUVELLE VALIDATION : Vérifier la compatibilité de la fréquence
+    # ✅ VALIDATION : Vérifier la compatibilité de la fréquence (sauf si skip_validation=True)
     duree_tache = calculer_duree_tache(tache_source)
     print(f"[RECURRENCE] Durée tâche: {duree_tache} jours, Décalage: {decalage_jours} jours")
 
-    valider_frequence_compatible(tache_source, decalage_jours, raise_exception=True)
-    print(f"[RECURRENCE] Validation de compatibilité OK")
+    if not skip_validation:
+        valider_frequence_compatible(tache_source, decalage_jours, raise_exception=True)
+        print(f"[RECURRENCE] Validation de compatibilité OK")
+    else:
+        print(f"[RECURRENCE] Validation de compatibilité SKIP (déjà validée en amont)")
 
     # Déterminer le nombre d'occurrences à créer
     if date_fin_recurrence is None and nombre_occurrences is None:
@@ -546,6 +552,689 @@ def dupliquer_tache_dates_specifiques(
                 decalage_jours=decalage,
                 nombre_occurrences=1,
                 **kwargs
+            )
+
+            nouvelles_taches.extend(taches_creees)
+
+    return nouvelles_taches
+
+
+# ==============================================================================
+# FONCTIONS POUR LA SÉLECTION DE JOURS DU MOIS (MONTHLY)
+# ==============================================================================
+
+def calculer_intervalle_minimum_jours_mois(jours_mois: List[int]) -> int:
+    """
+    Calcule l'intervalle minimum (en jours) entre deux jours consécutifs du mois sélectionnés.
+
+    Args:
+        jours_mois: Liste triée des jours du mois (1-31)
+
+    Returns:
+        int: Nombre de jours minimum entre deux occurrences
+
+    Exemples:
+        >>> calculer_intervalle_minimum_jours_mois([1, 15])
+        14  # 1er et 15 du mois : intervalle minimum = 14 jours
+
+        >>> calculer_intervalle_minimum_jours_mois([5, 10, 20])
+        5  # 5-10-20 : intervalle minimum = 5 jours
+
+        >>> calculer_intervalle_minimum_jours_mois([28, 1])
+        3  # 28 → 1er du mois suivant (approximation 28 jours) = 3 jours
+
+        >>> calculer_intervalle_minimum_jours_mois([15])
+        28  # Un seul jour = intervalle minimum de 28 jours (mois le plus court)
+    """
+    if not jours_mois or len(jours_mois) == 0:
+        return 30  # Par défaut, mensuel
+
+    if len(jours_mois) == 1:
+        return 28  # Un seul jour = répétition mensuelle (28 jours minimum)
+
+    jours_tries = sorted(jours_mois)
+    intervalles = []
+
+    # Calculer les intervalles entre jours consécutifs du même mois
+    for i in range(len(jours_tries) - 1):
+        intervalle = jours_tries[i + 1] - jours_tries[i]
+        intervalles.append(intervalle)
+
+    # Calculer l'intervalle de retour (dernier jour du mois → premier jour du mois suivant)
+    # Approximation : mois le plus court = 28 jours (février non bissextile)
+    intervalle_retour = 28 - jours_tries[-1] + jours_tries[0]
+    intervalles.append(intervalle_retour)
+
+    return min(intervalles)
+
+
+def generer_dates_jours_mois(
+    date_debut: date,
+    jours_mois: List[int],
+    nombre_occurrences: Optional[int] = None,
+    date_fin_recurrence: Optional[date] = None
+) -> List[date]:
+    """
+    Génère une liste de dates selon les jours du mois sélectionnés.
+
+    Args:
+        date_debut: Date de début (première occurrence)
+        jours_mois: Liste des jours du mois (1-31)
+        nombre_occurrences: Nombre max d'occurrences (optionnel)
+        date_fin_recurrence: Date limite (optionnel)
+
+    Returns:
+        List[date]: Liste des dates d'occurrences
+
+    Exemples:
+        >>> date_debut = date(2026, 1, 15)  # 15 janvier
+        >>> jours_mois = [1, 15]  # 1er et 15 de chaque mois
+        >>> generer_dates_jours_mois(date_debut, jours_mois, nombre_occurrences=5)
+        [
+            date(2026, 2, 1),   # 1er février
+            date(2026, 2, 15),  # 15 février
+            date(2026, 3, 1),   # 1er mars
+            date(2026, 3, 15),  # 15 mars
+            date(2026, 4, 1)    # 1er avril
+        ]
+
+    Note:
+        - Si un jour n'existe pas dans un mois (ex: 31 février), il est ignoré
+        - Les dates sont générées chronologiquement
+    """
+    if not jours_mois:
+        raise ValueError("jours_mois ne peut pas être vide")
+
+    jours_tries = sorted(jours_mois)
+    dates = []
+
+    # Déterminer la date limite
+    if date_fin_recurrence:
+        date_limite = date_fin_recurrence
+    else:
+        # Par défaut: jusqu'au 31/12 de l'année en cours
+        date_limite = date(date_debut.year, 12, 31)
+
+    # Déterminer le nombre max d'occurrences
+    max_occurrences = nombre_occurrences if nombre_occurrences else 100
+
+    # Commencer à partir du lendemain de la date de début
+    # (la tâche source existe déjà)
+    date_courante = date_debut + timedelta(days=1)
+
+    while len(dates) < max_occurrences:
+        # Vérifier si on dépasse la date limite
+        if date_courante > date_limite:
+            break
+
+        # Jour du mois (1-31)
+        jour_mois = date_courante.day
+
+        # Si ce jour est dans la sélection, ajouter à la liste
+        if jour_mois in jours_tries:
+            dates.append(date_courante)
+
+        # Passer au jour suivant
+        date_courante += timedelta(days=1)
+
+    return dates
+
+
+def dupliquer_tache_recurrence_jours_mois(
+    tache_id: int,
+    jours_mois: List[int],
+    nombre_occurrences: Optional[int] = None,
+    date_fin_recurrence: Optional[date] = None,
+    conserver_equipes: bool = True,
+    conserver_objets: bool = True,
+    nouveau_statut: str = 'PLANIFIEE'
+) -> List[Tache]:
+    """
+    Duplique une tâche selon les jours du mois sélectionnés.
+
+    Args:
+        tache_id: ID de la tâche source
+        jours_mois: Liste des jours du mois (1-31)
+        nombre_occurrences: Nombre max d'occurrences (optionnel)
+        date_fin_recurrence: Date limite (optionnel)
+        conserver_equipes: Conserver les équipes assignées
+        conserver_objets: Conserver les objets liés
+        nouveau_statut: Statut des nouvelles tâches
+
+    Returns:
+        List[Tache]: Liste des nouvelles tâches créées
+
+    Raises:
+        ValidationError: Si intervalle < durée tâche (chevauchement)
+
+    Exemples:
+        >>> # Tâche source : 15/01/2026 (1 jour)
+        >>> # Créer des occurrences 1er et 15 de chaque mois
+        >>> dupliquer_tache_recurrence_jours_mois(
+        ...     tache_id=123,
+        ...     jours_mois=[1, 15],
+        ...     nombre_occurrences=10
+        ... )
+        # Résultat : 10 tâches aux dates : 1er fév, 15 fév, 1er mars, ...
+    """
+    # Récupérer la tâche source
+    try:
+        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+    except Tache.DoesNotExist:
+        raise ValidationError(f"Tâche #{tache_id} introuvable")
+
+    # Calculer la durée de la tâche
+    duree_tache = calculer_duree_tache(tache_source)
+
+    # Calculer l'intervalle minimum entre les jours sélectionnés
+    intervalle_min = calculer_intervalle_minimum_jours_mois(jours_mois)
+
+    # ⚠️ VALIDATION CRITIQUE: intervalle >= durée tâche
+    if intervalle_min < duree_tache:
+        jours_selectionnes_str = ', '.join([str(j) for j in sorted(jours_mois)])
+
+        raise ValidationError(
+            f"Impossible de créer une récurrence avec les jours du mois sélectionnés.\n\n"
+            f"La tâche dure {duree_tache} jour(s) "
+            f"(du {tache_source.date_debut_planifiee.strftime('%d/%m/%Y')} "
+            f"au {tache_source.date_fin_planifiee.strftime('%d/%m/%Y')}).\n\n"
+            f"Jours du mois sélectionnés : {jours_selectionnes_str}\n"
+            f"Intervalle minimum : {intervalle_min} jour(s)\n\n"
+            f"❌ L'intervalle minimum ({intervalle_min} jour(s)) est inférieur à la durée "
+            f"de la tâche ({duree_tache} jour(s)), ce qui provoquerait un chevauchement.\n\n"
+            f"💡 Suggestions :\n"
+            f"  • Sélectionnez des jours plus espacés (minimum {duree_tache} jours d'intervalle)\n"
+            f"  • Réduisez la durée de la tâche\n"
+            f"  • Utilisez un décalage personnalisé au lieu de jours spécifiques"
+        )
+
+    # Générer les dates selon les jours du mois sélectionnés
+    dates_occurrences = generer_dates_jours_mois(
+        date_debut=tache_source.date_debut_planifiee,
+        jours_mois=jours_mois,
+        nombre_occurrences=nombre_occurrences,
+        date_fin_recurrence=date_fin_recurrence
+    )
+
+    if len(dates_occurrences) == 0:
+        raise ValidationError(
+            "Aucune occurrence ne peut être créée avec les paramètres fournis. "
+            "Vérifiez la date de fin de récurrence."
+        )
+
+    # Créer les tâches avec transaction atomique
+    nouvelles_taches = []
+
+    with transaction.atomic():
+        for date_occurrence in dates_occurrences:
+            # Calculer le décalage (en jours) par rapport à la tâche source
+            decalage = (date_occurrence - tache_source.date_debut_planifiee).days
+
+            # Dupliquer la tâche avec ce décalage (réutilise la fonction existante)
+            # ✅ skip_validation=True car l'intervalle minimum a déjà été validé en amont
+            taches_creees = dupliquer_tache_avec_distributions(
+                tache_id=tache_id,
+                decalage_jours=decalage,
+                nombre_occurrences=1,
+                date_fin_recurrence=None,
+                conserver_equipes=conserver_equipes,
+                conserver_objets=conserver_objets,
+                nouveau_statut=nouveau_statut,
+                skip_validation=True  # ✅ Skip validation car déjà faite
+            )
+
+            nouvelles_taches.extend(taches_creees)
+
+    return nouvelles_taches
+
+
+# ==============================================================================
+# FONCTIONS POUR LA SÉLECTION DE JOURS DE LA SEMAINE (DAILY/WEEKLY)
+# ==============================================================================
+
+def calculer_intervalle_minimum_jours_semaine(jours_semaine: List[int]) -> int:
+    """
+    Calcule l'intervalle minimum (en jours) entre deux jours consécutifs sélectionnés.
+
+    Args:
+        jours_semaine: Liste triée des jours (0=Lundi, 6=Dimanche)
+
+    Returns:
+        int: Nombre de jours minimum entre deux occurrences
+
+    Exemples:
+        >>> calculer_intervalle_minimum_jours_semaine([0, 2, 4])
+        2  # Lun-Mer-Ven : intervalle minimum = 2 jours
+
+        >>> calculer_intervalle_minimum_jours_semaine([0, 1])
+        1  # Lun-Mar : intervalle minimum = 1 jour
+
+        >>> calculer_intervalle_minimum_jours_semaine([0, 6])
+        1  # Lun-Dim : intervalle minimum = 1 jour (Dim → Lun)
+
+        >>> calculer_intervalle_minimum_jours_semaine([1])
+        7  # Mar seulement : intervalle minimum = 7 jours
+    """
+    if not jours_semaine or len(jours_semaine) == 0:
+        return 7  # Par défaut, hebdomadaire
+
+    if len(jours_semaine) == 1:
+        return 7  # Un seul jour = répétition hebdomadaire
+
+    jours_tries = sorted(jours_semaine)
+    intervalles = []
+
+    # Calculer les intervalles entre jours consécutifs
+    for i in range(len(jours_tries) - 1):
+        intervalle = jours_tries[i + 1] - jours_tries[i]
+        intervalles.append(intervalle)
+
+    # Calculer l'intervalle de retour (dernier jour → premier jour de la semaine suivante)
+    intervalle_retour = 7 - jours_tries[-1] + jours_tries[0]
+    intervalles.append(intervalle_retour)
+
+    return min(intervalles)
+
+
+def generer_dates_jours_semaine(
+    date_debut: date,
+    jours_semaine: List[int],
+    nombre_occurrences: Optional[int] = None,
+    date_fin_recurrence: Optional[date] = None
+) -> List[date]:
+    """
+    Génère une liste de dates selon les jours de la semaine sélectionnés.
+
+    Args:
+        date_debut: Date de début (première occurrence)
+        jours_semaine: Liste des jours (0=Lundi, 6=Dimanche)
+        nombre_occurrences: Nombre max d'occurrences (optionnel)
+        date_fin_recurrence: Date limite (optionnel)
+
+    Returns:
+        List[date]: Liste des dates d'occurrences
+
+    Exemples:
+        >>> date_debut = date(2026, 1, 13)  # Mardi
+        >>> jours_semaine = [0, 2, 4]  # Lun, Mer, Ven
+        >>> generer_dates_jours_semaine(date_debut, jours_semaine, nombre_occurrences=5)
+        [
+            date(2026, 1, 15),  # Mer
+            date(2026, 1, 17),  # Ven
+            date(2026, 1, 20),  # Lun
+            date(2026, 1, 22),  # Mer
+            date(2026, 1, 24)   # Ven
+        ]
+    """
+    if not jours_semaine:
+        raise ValueError("jours_semaine ne peut pas être vide")
+
+    jours_tries = sorted(jours_semaine)
+    dates = []
+
+    # Déterminer la date limite
+    if date_fin_recurrence:
+        date_limite = date_fin_recurrence
+    else:
+        # Par défaut: jusqu'au 31/12 de l'année en cours
+        date_limite = date(date_debut.year, 12, 31)
+
+    # Déterminer le nombre max d'occurrences
+    max_occurrences = nombre_occurrences if nombre_occurrences else 100
+
+    # Commencer à partir du lendemain de la date de début
+    # (la tâche source existe déjà)
+    date_courante = date_debut + timedelta(days=1)
+
+    while len(dates) < max_occurrences:
+        # Vérifier si on dépasse la date limite
+        if date_courante > date_limite:
+            break
+
+        # Jour de la semaine (0=Lundi, 6=Dimanche)
+        jour_semaine = date_courante.weekday()
+
+        # Si ce jour est dans la sélection, ajouter à la liste
+        if jour_semaine in jours_tries:
+            dates.append(date_courante)
+
+        # Passer au jour suivant
+        date_courante += timedelta(days=1)
+
+    return dates
+
+
+def dupliquer_tache_recurrence_jours_semaine(
+    tache_id: int,
+    jours_semaine: List[int],
+    nombre_occurrences: Optional[int] = None,
+    date_fin_recurrence: Optional[date] = None,
+    conserver_equipes: bool = True,
+    conserver_objets: bool = True,
+    nouveau_statut: str = 'PLANIFIEE'
+) -> List[Tache]:
+    """
+    Duplique une tâche selon les jours de la semaine sélectionnés.
+
+    Args:
+        tache_id: ID de la tâche source
+        jours_semaine: Liste des jours (0=Lundi, 6=Dimanche)
+        nombre_occurrences: Nombre max d'occurrences (optionnel)
+        date_fin_recurrence: Date limite (optionnel)
+        conserver_equipes: Conserver les équipes assignées
+        conserver_objets: Conserver les objets liés
+        nouveau_statut: Statut des nouvelles tâches
+
+    Returns:
+        List[Tache]: Liste des nouvelles tâches créées
+
+    Raises:
+        ValidationError: Si intervalle < durée tâche (chevauchement)
+
+    Exemples:
+        >>> # Tâche source : Lun 13/01/2026 (1 jour)
+        >>> # Créer des occurrences Lun-Mer-Ven
+        >>> dupliquer_tache_recurrence_jours_semaine(
+        ...     tache_id=123,
+        ...     jours_semaine=[0, 2, 4],
+        ...     nombre_occurrences=10
+        ... )
+        # Résultat : 10 tâches aux dates : Mer 15/01, Ven 17/01, Lun 20/01, ...
+    """
+    # Récupérer la tâche source
+    try:
+        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+    except Tache.DoesNotExist:
+        raise ValidationError(f"Tâche #{tache_id} introuvable")
+
+    # Calculer la durée de la tâche
+    duree_tache = calculer_duree_tache(tache_source)
+
+    # Calculer l'intervalle minimum entre les jours sélectionnés
+    intervalle_min = calculer_intervalle_minimum_jours_semaine(jours_semaine)
+
+    # ⚠️ VALIDATION CRITIQUE: intervalle >= durée tâche
+    if intervalle_min < duree_tache:
+        jours_labels = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+        jours_selectionnes_str = ', '.join([jours_labels[j] for j in sorted(jours_semaine)])
+
+        raise ValidationError(
+            f"Impossible de créer une récurrence avec les jours sélectionnés.\n\n"
+            f"La tâche dure {duree_tache} jour(s) "
+            f"(du {tache_source.date_debut_planifiee.strftime('%d/%m/%Y')} "
+            f"au {tache_source.date_fin_planifiee.strftime('%d/%m/%Y')}).\n\n"
+            f"Jours sélectionnés : {jours_selectionnes_str}\n"
+            f"Intervalle minimum : {intervalle_min} jour(s)\n\n"
+            f"❌ L'intervalle minimum ({intervalle_min} jour(s)) est inférieur à la durée "
+            f"de la tâche ({duree_tache} jour(s)), ce qui provoquerait un chevauchement.\n\n"
+            f"💡 Suggestions :\n"
+            f"  • Sélectionnez des jours plus espacés (minimum {duree_tache} jours d'intervalle)\n"
+            f"  • Réduisez la durée de la tâche\n"
+            f"  • Utilisez un décalage personnalisé au lieu de jours spécifiques"
+        )
+
+    # Générer les dates selon les jours sélectionnés
+    dates_occurrences = generer_dates_jours_semaine(
+        date_debut=tache_source.date_debut_planifiee,
+        jours_semaine=jours_semaine,
+        nombre_occurrences=nombre_occurrences,
+        date_fin_recurrence=date_fin_recurrence
+    )
+
+    if len(dates_occurrences) == 0:
+        raise ValidationError(
+            "Aucune occurrence ne peut être créée avec les paramètres fournis. "
+            "Vérifiez la date de fin de récurrence."
+        )
+
+    # Créer les tâches avec transaction atomique
+    nouvelles_taches = []
+
+    with transaction.atomic():
+        for date_occurrence in dates_occurrences:
+            # Calculer le décalage (en jours) par rapport à la tâche source
+            decalage = (date_occurrence - tache_source.date_debut_planifiee).days
+
+            # Dupliquer la tâche avec ce décalage (réutilise la fonction existante)
+            # ✅ skip_validation=True car l'intervalle minimum a déjà été validé en amont
+            taches_creees = dupliquer_tache_avec_distributions(
+                tache_id=tache_id,
+                decalage_jours=decalage,
+                nombre_occurrences=1,
+                date_fin_recurrence=None,
+                conserver_equipes=conserver_equipes,
+                conserver_objets=conserver_objets,
+                nouveau_statut=nouveau_statut,
+                skip_validation=True  # ✅ NOUVEAU: Skip validation car déjà faite
+            )
+
+            nouvelles_taches.extend(taches_creees)
+
+    return nouvelles_taches
+
+
+# ==============================================================================
+# FONCTIONS POUR LA SÉLECTION DE JOURS DU MOIS (MONTHLY)
+# ==============================================================================
+
+def calculer_intervalle_minimum_jours_mois(jours_mois: List[int]) -> int:
+    """
+    Calcule l'intervalle minimum (en jours) entre deux jours consécutifs du mois sélectionnés.
+
+    Args:
+        jours_mois: Liste triée des jours du mois (1-31)
+
+    Returns:
+        int: Nombre de jours minimum entre deux occurrences
+
+    Exemples:
+        >>> calculer_intervalle_minimum_jours_mois([1, 15])
+        14  # 1er et 15 du mois : intervalle minimum = 14 jours
+
+        >>> calculer_intervalle_minimum_jours_mois([5, 10, 20])
+        5  # 5-10-20 : intervalle minimum = 5 jours
+
+        >>> calculer_intervalle_minimum_jours_mois([28, 1])
+        3  # 28 → 1er du mois suivant (approximation 28 jours) = 3 jours
+
+        >>> calculer_intervalle_minimum_jours_mois([15])
+        28  # Un seul jour = intervalle minimum de 28 jours (mois le plus court)
+    """
+    if not jours_mois or len(jours_mois) == 0:
+        return 30  # Par défaut, mensuel
+
+    if len(jours_mois) == 1:
+        return 28  # Un seul jour = répétition mensuelle (28 jours minimum)
+
+    jours_tries = sorted(jours_mois)
+    intervalles = []
+
+    # Calculer les intervalles entre jours consécutifs du même mois
+    for i in range(len(jours_tries) - 1):
+        intervalle = jours_tries[i + 1] - jours_tries[i]
+        intervalles.append(intervalle)
+
+    # Calculer l'intervalle de retour (dernier jour du mois → premier jour du mois suivant)
+    # Approximation : mois le plus court = 28 jours (février non bissextile)
+    intervalle_retour = 28 - jours_tries[-1] + jours_tries[0]
+    intervalles.append(intervalle_retour)
+
+    return min(intervalles)
+
+
+def generer_dates_jours_mois(
+    date_debut: date,
+    jours_mois: List[int],
+    nombre_occurrences: Optional[int] = None,
+    date_fin_recurrence: Optional[date] = None
+) -> List[date]:
+    """
+    Génère une liste de dates selon les jours du mois sélectionnés.
+
+    Args:
+        date_debut: Date de début (première occurrence)
+        jours_mois: Liste des jours du mois (1-31)
+        nombre_occurrences: Nombre max d'occurrences (optionnel)
+        date_fin_recurrence: Date limite (optionnel)
+
+    Returns:
+        List[date]: Liste des dates d'occurrences
+
+    Exemples:
+        >>> date_debut = date(2026, 1, 15)  # 15 janvier
+        >>> jours_mois = [1, 15]  # 1er et 15 de chaque mois
+        >>> generer_dates_jours_mois(date_debut, jours_mois, nombre_occurrences=5)
+        [
+            date(2026, 2, 1),   # 1er février
+            date(2026, 2, 15),  # 15 février
+            date(2026, 3, 1),   # 1er mars
+            date(2026, 3, 15),  # 15 mars
+            date(2026, 4, 1)    # 1er avril
+        ]
+
+    Note:
+        - Si un jour n'existe pas dans un mois (ex: 31 février), il est ignoré
+        - Les dates sont générées chronologiquement
+    """
+    if not jours_mois:
+        raise ValueError("jours_mois ne peut pas être vide")
+
+    jours_tries = sorted(jours_mois)
+    dates = []
+
+    # Déterminer la date limite
+    if date_fin_recurrence:
+        date_limite = date_fin_recurrence
+    else:
+        # Par défaut: jusqu'au 31/12 de l'année en cours
+        date_limite = date(date_debut.year, 12, 31)
+
+    # Déterminer le nombre max d'occurrences
+    max_occurrences = nombre_occurrences if nombre_occurrences else 100
+
+    # Commencer à partir du lendemain de la date de début
+    # (la tâche source existe déjà)
+    date_courante = date_debut + timedelta(days=1)
+
+    while len(dates) < max_occurrences:
+        # Vérifier si on dépasse la date limite
+        if date_courante > date_limite:
+            break
+
+        # Jour du mois (1-31)
+        jour_mois = date_courante.day
+
+        # Si ce jour est dans la sélection, ajouter à la liste
+        if jour_mois in jours_tries:
+            dates.append(date_courante)
+
+        # Passer au jour suivant
+        date_courante += timedelta(days=1)
+
+    return dates
+
+
+def dupliquer_tache_recurrence_jours_mois(
+    tache_id: int,
+    jours_mois: List[int],
+    nombre_occurrences: Optional[int] = None,
+    date_fin_recurrence: Optional[date] = None,
+    conserver_equipes: bool = True,
+    conserver_objets: bool = True,
+    nouveau_statut: str = 'PLANIFIEE'
+) -> List[Tache]:
+    """
+    Duplique une tâche selon les jours du mois sélectionnés.
+
+    Args:
+        tache_id: ID de la tâche source
+        jours_mois: Liste des jours du mois (1-31)
+        nombre_occurrences: Nombre max d'occurrences (optionnel)
+        date_fin_recurrence: Date limite (optionnel)
+        conserver_equipes: Conserver les équipes assignées
+        conserver_objets: Conserver les objets liés
+        nouveau_statut: Statut des nouvelles tâches
+
+    Returns:
+        List[Tache]: Liste des nouvelles tâches créées
+
+    Raises:
+        ValidationError: Si intervalle < durée tâche (chevauchement)
+
+    Exemples:
+        >>> # Tâche source : 15/01/2026 (1 jour)
+        >>> # Créer des occurrences 1er et 15 de chaque mois
+        >>> dupliquer_tache_recurrence_jours_mois(
+        ...     tache_id=123,
+        ...     jours_mois=[1, 15],
+        ...     nombre_occurrences=10
+        ... )
+        # Résultat : 10 tâches aux dates : 1er fév, 15 fév, 1er mars, ...
+    """
+    # Récupérer la tâche source
+    try:
+        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+    except Tache.DoesNotExist:
+        raise ValidationError(f"Tâche #{tache_id} introuvable")
+
+    # Calculer la durée de la tâche
+    duree_tache = calculer_duree_tache(tache_source)
+
+    # Calculer l'intervalle minimum entre les jours sélectionnés
+    intervalle_min = calculer_intervalle_minimum_jours_mois(jours_mois)
+
+    # ⚠️ VALIDATION CRITIQUE: intervalle >= durée tâche
+    if intervalle_min < duree_tache:
+        jours_selectionnes_str = ', '.join([str(j) for j in sorted(jours_mois)])
+
+        raise ValidationError(
+            f"Impossible de créer une récurrence avec les jours du mois sélectionnés.\n\n"
+            f"La tâche dure {duree_tache} jour(s) "
+            f"(du {tache_source.date_debut_planifiee.strftime('%d/%m/%Y')} "
+            f"au {tache_source.date_fin_planifiee.strftime('%d/%m/%Y')}).\n\n"
+            f"Jours du mois sélectionnés : {jours_selectionnes_str}\n"
+            f"Intervalle minimum : {intervalle_min} jour(s)\n\n"
+            f"❌ L'intervalle minimum ({intervalle_min} jour(s)) est inférieur à la durée "
+            f"de la tâche ({duree_tache} jour(s)), ce qui provoquerait un chevauchement.\n\n"
+            f"💡 Suggestions :\n"
+            f"  • Sélectionnez des jours plus espacés (minimum {duree_tache} jours d'intervalle)\n"
+            f"  • Réduisez la durée de la tâche\n"
+            f"  • Utilisez un décalage personnalisé au lieu de jours spécifiques"
+        )
+
+    # Générer les dates selon les jours du mois sélectionnés
+    dates_occurrences = generer_dates_jours_mois(
+        date_debut=tache_source.date_debut_planifiee,
+        jours_mois=jours_mois,
+        nombre_occurrences=nombre_occurrences,
+        date_fin_recurrence=date_fin_recurrence
+    )
+
+    if len(dates_occurrences) == 0:
+        raise ValidationError(
+            "Aucune occurrence ne peut être créée avec les paramètres fournis. "
+            "Vérifiez la date de fin de récurrence."
+        )
+
+    # Créer les tâches avec transaction atomique
+    nouvelles_taches = []
+
+    with transaction.atomic():
+        for date_occurrence in dates_occurrences:
+            # Calculer le décalage (en jours) par rapport à la tâche source
+            decalage = (date_occurrence - tache_source.date_debut_planifiee).days
+
+            # Dupliquer la tâche avec ce décalage (réutilise la fonction existante)
+            # ✅ skip_validation=True car l'intervalle minimum a déjà été validé en amont
+            taches_creees = dupliquer_tache_avec_distributions(
+                tache_id=tache_id,
+                decalage_jours=decalage,
+                nombre_occurrences=1,
+                date_fin_recurrence=None,
+                conserver_equipes=conserver_equipes,
+                conserver_objets=conserver_objets,
+                nouveau_statut=nouveau_statut,
+                skip_validation=True  # ✅ Skip validation car déjà faite
             )
 
             nouvelles_taches.extend(taches_creees)
