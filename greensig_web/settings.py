@@ -20,17 +20,40 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Configuration GDAL/GEOS pour Windows
 if sys.platform == 'win32':
-    OSGEO4W = r'C:\Program Files\QGIS 3.42.1'
-    if os.path.exists(OSGEO4W):
+    # Essayer plusieurs chemins QGIS possibles
+    QGIS_PATHS = [
+        r'C:\Program Files\QGIS 3.40.13',
+        r'C:\Program Files\QGIS 3.42.1',
+        r'C:\Program Files\QGIS 3.40',
+        r'C:\Program Files\QGIS 3.38',
+        r'C:\OSGeo4W',
+        r'C:\OSGeo4W64',
+    ]
+
+    OSGEO4W = None
+    for path in QGIS_PATHS:
+        if os.path.exists(path):
+            OSGEO4W = path
+            break
+
+    if OSGEO4W:
         os.environ['OSGEO4W_ROOT'] = OSGEO4W
         os.environ['GDAL_DATA'] = OSGEO4W + r'\share\gdal'
         os.environ['PROJ_LIB'] = OSGEO4W + r'\share\proj'
         # Ajouter bin ET apps\qgis\bin à PATH (apps contient des DLLs nécessaires)
         os.environ['PATH'] = OSGEO4W + r'\bin;' + OSGEO4W + r'\apps\qgis\bin;' + os.environ['PATH']
-        
-        # Chemins explicites des bibliothèques
-        GDAL_LIBRARY_PATH = OSGEO4W + r'\bin\gdal310.dll'
+
+        # Trouver automatiquement la version de gdal*.dll
+        import glob
+        gdal_dlls = glob.glob(os.path.join(OSGEO4W, 'bin', 'gdal*.dll'))
+        if gdal_dlls:
+            # Prendre le premier gdal*.dll trouvé (ex: gdal310.dll)
+            GDAL_LIBRARY_PATH = gdal_dlls[0]
+        else:
+            GDAL_LIBRARY_PATH = OSGEO4W + r'\bin\gdal310.dll'
         GEOS_LIBRARY_PATH = OSGEO4W + r'\bin\geos_c.dll'
+    else:
+        print("ATTENTION: QGIS/GDAL non trouvé. Installez QGIS depuis https://qgis.org/download/")
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.

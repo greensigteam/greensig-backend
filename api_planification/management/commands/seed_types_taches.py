@@ -10,6 +10,7 @@ class Command(BaseCommand):
 
         # Format: nom_tache, symbole, description, productivite_theorique, unite_productivite
         types_taches = [
+            # ========== TÂCHES GÉNÉRALES ==========
             {
                 'nom_tache': 'Nettoyage',
                 'symbole': 'NET',
@@ -38,13 +39,50 @@ class Command(BaseCommand):
                 'productivite_theorique': 190,
                 'unite_productivite': 'm2'
             },
+            # ========== ARROSAGES SPÉCIFIQUES ==========
             {
-                'nom_tache': 'Arrosage',
-                'symbole': 'ARR',
-                'description': 'Irrigation des végétaux',
-                'productivite_theorique': 250,
+                'nom_tache': 'Arrosage des arbres',
+                'symbole': 'ARA',
+                'description': 'Irrigation des arbres',
+                'productivite_theorique': 40,
+                'unite_productivite': 'arbres'
+            },
+            {
+                'nom_tache': 'Arrosage des arbustes',
+                'symbole': 'ARB',
+                'description': 'Irrigation des arbustes',
+                'productivite_theorique': 100,
                 'unite_productivite': 'm2'
             },
+            {
+                'nom_tache': 'Arrosage des palmiers',
+                'symbole': 'ARP',
+                'description': 'Irrigation des palmiers',
+                'productivite_theorique': 40,
+                'unite_productivite': 'palmiers'
+            },
+            {
+                'nom_tache': 'Arrosage des graminées',
+                'symbole': 'ARG',
+                'description': 'Irrigation des graminées',
+                'productivite_theorique': 40,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Arrosage des vivaces',
+                'symbole': 'ARV',
+                'description': 'Irrigation des vivaces',
+                'productivite_theorique': 200,
+                'unite_productivite': 'plantes'
+            },
+            {
+                'nom_tache': 'Arrosage des cactus',
+                'symbole': 'ARC',
+                'description': 'Irrigation des cactus',
+                'productivite_theorique': 200,
+                'unite_productivite': 'plantes'
+            },
+            # ========== TAILLE ET ÉLAGAGE ==========
             {
                 'nom_tache': 'Élagage',
                 'symbole': 'ELA',
@@ -59,6 +97,21 @@ class Command(BaseCommand):
                 'productivite_theorique': 7,
                 'unite_productivite': 'arbres'
             },
+            {
+                'nom_tache': 'Taille de formation',
+                'symbole': 'TFO',
+                'description': 'Taille pour donner une forme aux jeunes végétaux',
+                'productivite_theorique': 2,
+                'unite_productivite': 'arbres'
+            },
+            {
+                'nom_tache': 'Taille d\'entretien',
+                'symbole': 'TEN',
+                'description': 'Taille régulière pour maintenir la forme et la santé',
+                'productivite_theorique': 3,
+                'unite_productivite': 'arbres'
+            },
+            # ========== TRAVAUX DU SOL ==========
             {
                 'nom_tache': 'Sablage',
                 'symbole': 'SAB',
@@ -88,12 +141,70 @@ class Command(BaseCommand):
                 'unite_productivite': 'm2'
             },
             {
-                'nom_tache': 'Aération des sols',
-                'symbole': 'AER',
-                'description': 'Perforation du sol pour améliorer la circulation de l\'air',
-                'productivite_theorique': 90,
+                'nom_tache': 'Terreautage',
+                'symbole': 'TER',
+                'description': 'Apport de terreau pour enrichir le sol',
+                'productivite_theorique': 37,
                 'unite_productivite': 'm2'
             },
+            {
+                'nom_tache': 'Apport de terre végétale',
+                'symbole': 'ATV',
+                'description': 'Apport de terre végétale pour améliorer la qualité du sol',
+                'productivite_theorique': None,
+                'unite_productivite': 'm3'
+            },
+            # ========== AÉRATIONS SPÉCIFIQUES ==========
+            {
+                'nom_tache': 'Aération des sols pour arbres',
+                'symbole': 'AEA',
+                'description': 'Perforation du sol autour des arbres pour améliorer la circulation de l\'air',
+                'productivite_theorique': 60,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Aération des sols pour arbustes',
+                'symbole': 'AEB',
+                'description': 'Perforation du sol autour des arbustes pour améliorer la circulation de l\'air',
+                'productivite_theorique': 100,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Aération des sols pour cactus',
+                'symbole': 'AEC',
+                'description': 'Perforation du sol autour des cactus pour améliorer la circulation de l\'air',
+                'productivite_theorique': 40,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Aération des sols pour vivaces',
+                'symbole': 'AEV',
+                'description': 'Perforation du sol autour des vivaces pour améliorer la circulation de l\'air',
+                'productivite_theorique': 80,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Aération des sols pour graminées',
+                'symbole': 'AEG',
+                'description': 'Perforation du sol autour des graminées pour améliorer la circulation de l\'air',
+                'productivite_theorique': 200,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Aération des sols pour palmiers',
+                'symbole': 'AEP',
+                'description': 'Perforation du sol autour des palmiers pour améliorer la circulation de l\'air',
+                'productivite_theorique': 80,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Aération des sols pour gazon',
+                'symbole': 'AEZ',
+                'description': 'Perforation du sol du gazon pour améliorer la circulation de l\'air',
+                'productivite_theorique': None,
+                'unite_productivite': 'm2'
+            },
+            # ========== REPLANTATION ==========
             {
                 'nom_tache': 'Replantation',
                 'symbole': 'REP',
@@ -101,25 +212,19 @@ class Command(BaseCommand):
                 'productivite_theorique': 3,
                 'unite_productivite': 'arbres'
             },
+            # ========== ENTRETIEN GAZON ==========
             {
-                'nom_tache': 'Taille de formation',
-                'symbole': 'TFO',
-                'description': 'Taille pour donner une forme aux jeunes végétaux',
-                'productivite_theorique': 2,
-                'unite_productivite': 'arbres'
+                'nom_tache': 'Topdressing gazon',
+                'symbole': 'TDG',
+                'description': 'Application de compost ou sable fin sur le gazon',
+                'productivite_theorique': 40,
+                'unite_productivite': 'm2'
             },
             {
-                'nom_tache': 'Taille d\'entretien',
-                'symbole': 'TEN',
-                'description': 'Taille régulière pour maintenir la forme et la santé',
-                'productivite_theorique': 3,
-                'unite_productivite': 'arbres'
-            },
-            {
-                'nom_tache': 'Terreautage',
-                'symbole': 'TER',
-                'description': 'Apport de terreau pour enrichir le sol',
-                'productivite_theorique': 37,
+                'nom_tache': 'Compactage du gazon',
+                'symbole': 'CPG',
+                'description': 'Compactage et raffermissement de la surface du gazon',
+                'productivite_theorique': 500,
                 'unite_productivite': 'm2'
             },
             {
@@ -137,6 +242,29 @@ class Command(BaseCommand):
                 'unite_productivite': 'm2'
             },
             {
+                'nom_tache': 'Sursemis',
+                'symbole': 'SUR',
+                'description': 'Semis complémentaire pour régénérer le gazon',
+                'productivite_theorique': 2100,
+                'unite_productivite': 'm2'
+            },
+            # ========== DÉSHERBAGE ==========
+            {
+                'nom_tache': 'Désherbage manuel',
+                'symbole': 'DEM',
+                'description': 'Élimination manuelle des mauvaises herbes',
+                'productivite_theorique': 15,
+                'unite_productivite': 'm2'
+            },
+            {
+                'nom_tache': 'Désherbage chimique',
+                'symbole': 'DEC',
+                'description': 'Élimination des mauvaises herbes par produits chimiques',
+                'productivite_theorique': 400,
+                'unite_productivite': 'm2'
+            },
+            # ========== NETTOYAGE ET RAMASSAGE ==========
+            {
                 'nom_tache': 'Ramassage des déchets verts',
                 'symbole': 'RAM',
                 'description': 'Collecte et évacuation des déchets végétaux',
@@ -144,41 +272,13 @@ class Command(BaseCommand):
                 'unite_productivite': 'm2'
             },
             {
-                'nom_tache': 'Désherbage',
-                'symbole': 'DES',
-                'description': 'Élimination des mauvaises herbes',
-                'productivite_theorique': 15,
-                'unite_productivite': 'm2'
-            },
-            {
-                'nom_tache': 'Nivellement des bordures',
-                'symbole': 'NBR',
+                'nom_tache': 'Traçage des bordures',
+                'symbole': 'TBR',
                 'description': 'Ajustement et alignement des bordures',
                 'productivite_theorique': 18,
                 'unite_productivite': 'ml'
             },
-            # ========== NOUVEAUX TYPES DE TÂCHES ==========
-            {
-                'nom_tache': 'Topdressing gazon',
-                'symbole': 'TDG',
-                'description': 'Application de compost ou sable fin sur le gazon',
-                'productivite_theorique': 40,
-                'unite_productivite': 'm2'
-            },
-            {
-                'nom_tache': 'Compactage du gazon',
-                'symbole': 'CPG',
-                'description': 'Compactage et raffermissement de la surface du gazon',
-                'productivite_theorique': 500,
-                'unite_productivite': 'm2'
-            },
-            {
-                'nom_tache': 'Sursemis',
-                'symbole': 'SUR',
-                'description': 'Semis complémentaire pour régénérer le gazon',
-                'productivite_theorique': 2100,
-                'unite_productivite': 'm2'
-            },
+            # ========== ARRACHAGE DES VÉGÉTAUX MORTS ==========
             {
                 'nom_tache': 'Arrachage des arbres morts',
                 'symbole': 'AAM',
@@ -191,14 +291,14 @@ class Command(BaseCommand):
                 'symbole': 'APM',
                 'description': 'Extraction des palmiers morts ou malades',
                 'productivite_theorique': 0.8,
-                'unite_productivite': 'arbres'
+                'unite_productivite': 'palmiers'
             },
             {
                 'nom_tache': 'Arrachage des arbustes morts',
                 'symbole': 'ABM',
                 'description': 'Extraction des arbustes morts ou malades',
                 'productivite_theorique': 5,
-                'unite_productivite': 'arbres'
+                'unite_productivite': 'arbustes'
             },
             {
                 'nom_tache': 'Arrachage des graminées mortes',
@@ -212,20 +312,44 @@ class Command(BaseCommand):
                 'symbole': 'ACM',
                 'description': 'Extraction des cactus morts',
                 'productivite_theorique': 2,
-                'unite_productivite': 'unite'
+                'unite_productivite': 'cactus'
             },
             {
                 'nom_tache': 'Arrachage des vivaces mortes',
                 'symbole': 'AVM',
                 'description': 'Extraction des vivaces mortes',
                 'productivite_theorique': 8,
-                'unite_productivite': 'unite'
+                'unite_productivite': 'vivaces'
             },
+            # ========== ENTRETIEN POTS INTÉRIEURS ==========
+            {
+                'nom_tache': 'Arrosage et entretien des pots intérieurs',
+                'symbole': 'API',
+                'description': 'Arrosage et entretien des plantes en pots à l\'intérieur',
+                'productivite_theorique': None,
+                'unite_productivite': 'pots'
+            },
+            # ========== HYDROLOGIE / IRRIGATION ==========
             {
                 'nom_tache': 'Réparation des fuites',
                 'symbole': 'RFU',
                 'description': 'Réparation des fuites du système d\'irrigation',
-                'productivite_theorique': None,  # Pas de productivité standard pour cette tâche
+                'productivite_theorique': None,
+                'unite_productivite': 'unite'
+            },
+            {
+                'nom_tache': 'Contrôle du système d\'irrigation',
+                'symbole': 'CSI',
+                'description': 'Vérification et contrôle du bon fonctionnement du système d\'irrigation',
+                'productivite_theorique': None,
+                'unite_productivite': 'unite'
+            },
+            # ========== ENTRETIEN OUTILLAGE ==========
+            {
+                'nom_tache': 'Nettoyage et désinfection de l\'outillage',
+                'symbole': 'NDO',
+                'description': 'Nettoyage et désinfection des outils de travail',
+                'productivite_theorique': None,
                 'unite_productivite': 'unite'
             },
         ]

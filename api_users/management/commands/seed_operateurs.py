@@ -78,11 +78,11 @@ class Command(BaseCommand):
         noms_equipes = [
             'V.CT1', 'V.M ESPACE COMMUN', 'E.M.PHENO', 'V.CT2', 'T.PARK',
             'V.M ARROSAGE', 'V.M 83 à 76', 'CUB', 'V.M 31 à 34, 93 à 96',
-            'H.HILTON', 'MGS', 'V.M 26 à 30, 65 et 66', 'V.M 67 à 75',
+            'H.HILTON', 'SUPPLEANT', 'V.M 26 à 30, 65 et 66', 'V.M 67 à 75',
             'S.G.DICE', 'R.LOCATIVES', 'V.M TONTE', 'V.M 9 à 15, 49 à 52',
             'V.M 41 à 48', 'V.M 21 à 25', 'V.M 57 à 64', 'V.M 84 à 92',
             'V.M 97 à 103', 'V.M 1 à 8, 105 et 42', 'V.M 35 à 40, 104 et 70',
-            'V.M 16 à 20 et 53 à 56', 'SUPPLEANT', 'TECH ARROSAGE'
+            'V.M 16 à 20 et 53 à 56', 'TECH ARROSAGE', 'Hilton'
         ]
 
         equipes_map = {}
@@ -103,7 +103,7 @@ class Command(BaseCommand):
         self.stdout.write("")
         self.stdout.write(self.style.HTTP_INFO("ÉTAPE 3: Import des opérateurs"))
 
-        # Données des opérateurs (seulement les 34 premiers avec compétences détaillées)
+        # Données des opérateurs avec compétences détaillées
         operateurs_data = [
             {
                 'matricule': '2', 'prenom': 'JILALI', 'nom': 'ESSADDIQI', 'equipe': 'V.CT1', 'remarque': 'chef d\'équipe',
@@ -158,7 +158,7 @@ class Command(BaseCommand):
                 }
             },
             {
-                'matricule': '9', 'prenom': 'HMED', 'nom': 'AZOUZI', 'equipe': 'E.M.PHENO', 'remarque': 'chef d\'équipe',
+                'matricule': '9', 'prenom': 'HMED', 'nom': 'AZOUZI', 'equipe': 'E.M.PHENO', 'remarque': 'Caporal',
                 'competences': {
                     'Gestion d\'équipe': 'débutant', 'Tondeuse': 'débutant', 'Débroussailleuse': 'intermédiaire',
                     'Tronçonneuse': 'débutant', 'Désherbage': 'intermédiaire', 'Binage': 'intermédiaire',
@@ -247,7 +247,7 @@ class Command(BaseCommand):
                 }
             },
             {
-                'matricule': '31', 'prenom': 'RACHID', 'nom': 'BENHADDIA', 'equipe': 'CUB', 'remarque': 'chef d\'équipe',
+                'matricule': '31', 'prenom': 'RACHID', 'nom': 'BENHADDIA', 'equipe': 'S.G.DICE', 'remarque': 'chef d\'équipe',
                 'competences': {
                     'Gestion d\'équipe': 'débutant', 'Tondeuse': 'débutant', 'Tronçonneuse': 'débutant',
                     'Désherbage': 'intermédiaire', 'Binage': 'intermédiaire', 'Confection des cuvettes': 'intermédiaire',
@@ -256,7 +256,7 @@ class Command(BaseCommand):
                 }
             },
             {
-                'matricule': '37', 'prenom': 'SAID', 'nom': 'SELLAFI', 'equipe': 'MGS', 'remarque': 'Magasinier',
+                'matricule': '37', 'prenom': 'SAID', 'nom': 'SELLAFI', 'equipe': 'SUPPLEANT', 'remarque': 'Magasinier',
                 'competences': {
                     'Gestion d\'équipe': 'débutant', 'Tondeuse': 'débutant', 'Désherbage': 'expert',
                     'Binage': 'expert', 'Confection des cuvettes': 'expert', 'Taille de nettoyage': 'intermédiaire',
@@ -298,7 +298,7 @@ class Command(BaseCommand):
                 }
             },
             {
-                'matricule': '43', 'prenom': 'LAHCEN', 'nom': 'RAHEL', 'equipe': 'S.G.DICE', 'remarque': 'chef d\'équipe',
+                'matricule': '43', 'prenom': 'LAHCEN', 'nom': 'RAHEL', 'equipe': 'CUB', 'remarque': 'chef d\'équipe',
                 'competences': {
                     'Gestion d\'équipe': 'débutant', 'Tondeuse': 'débutant', 'Tronçonneuse': 'débutant',
                     'Désherbage': 'expert', 'Binage': 'expert', 'Confection des cuvettes': 'expert',
@@ -366,7 +366,7 @@ class Command(BaseCommand):
                 }
             },
             {
-                'matricule': '95', 'prenom': 'BOUJEMAA', 'nom': 'ELATTIFI', 'equipe': 'R.LOCATIVES', 'remarque': 'chef d\'équipe',
+                'matricule': '95', 'prenom': 'BOUJEMAA', 'nom': 'ELATTIFI', 'equipe': 'R.LOCATIVES', 'remarque': 'Caporal',
                 'competences': {
                     'Tondeuse': 'intermédiaire', 'Débroussailleuse': 'intermédiaire', 'Tronçonneuse': 'intermédiaire',
                     'Désherbage': 'expert', 'Binage': 'expert', 'Confection des cuvettes': 'expert',
@@ -402,57 +402,57 @@ class Command(BaseCommand):
 
         # Opérateurs sans compétences détaillées (matricules 134-190)
         operateurs_sans_competences = [
-            ('134', 'YOUSSEF', 'ELGHAZOUANI', 'V.CT2'),
-            ('135', 'ABDELOUHAB', 'DADSI', 'V.M ESPACE COMMUN'),
-            ('136', 'EL BACHIR', 'BELMAATI', 'CUB'),
-            ('137', 'ABD EL KABIR', 'HAMDI', 'V.M TONTE'),
-            ('138', 'SAID', 'MOUIDI', 'V.CT2'),
-            ('139', 'MOHAMED', 'GARMOUL', 'V.M ESPACE COMMUN'),
-            ('140', 'MOURAD', 'LAABISSI', 'V.M ESPACE COMMUN'),
-            ('141', 'ISSAM', 'BOUCHRA', 'V.CT2'),
-            ('142', 'ZIAD', 'BOUHAFA', 'V.M ESPACE COMMUN'),
-            ('143', 'AHMED', 'GHARIB', 'V.M ESPACE COMMUN'),
-            ('144', 'MOUSSA', 'EL YADINI', 'S.G.DICE'),
-            ('146', 'NOUREDDINE', 'AMZAR', 'V.M 9 à 15, 49 à 52'),
-            ('148', 'JAWAD', 'EL ABDOUNY', 'V.M ESPACE COMMUN'),
-            ('149', 'IMAD', 'BOUIHI', 'V.M 41 à 48'),
-            ('150', 'MOUSSA', 'ENNAJI', 'V.M 21 à 25'),
-            ('151', 'ABDELJALIL', 'MANDOUR', 'V.M 57 à 64'),
-            ('152', 'HICHAM', 'BELQSSIR', 'V.M 84 à 92'),
-            ('153', 'BDELJALIL', 'AIT EL HAMRI', 'V.M ESPACE COMMUN'),
-            ('154', 'MILOUD', 'BAKHAYUI', 'V.M 97 à 103'),
-            ('155', 'MOHAMED', 'ECHTAIBI', 'CUB'),
-            ('156', 'MOHAMED', 'KOULAL', 'V.M 1 à 8, 105 et 42'),
-            ('157', 'MOHAMED', 'ELLOUAH', 'V.CT1'),
-            ('158', 'ADIL', 'BOUICHIR', 'R.LOCATIVES'),
-            ('160', 'ABDELMALEK', 'ETTAHIRI', 'V.M ESPACE COMMUN'),
-            ('161', 'MUSTAPHA', 'EL AARFAOUI', 'CUB'),
-            ('162', 'ABDELHADI', 'BENALALA', 'V.M 35 à 40, 104 et 70'),
-            ('163', 'ABDELFETTAH', 'DIDI', 'V.CT2'),
-            ('164', 'ABDELLATIF', 'MAKKAOUI', 'V.M 16 à 20 et 53 à 56'),
-            ('167', 'ABDERRAHIM', 'CABDI', 'CUB'),
-            ('168', 'EL MUSTAPHA', 'ECHCHARKAOUY', 'V.M ESPACE COMMUN'),
-            ('170', 'ABDELHAK', 'CHAIBATE', 'SUPPLEANT'),
-            ('174', 'BENATTAR', 'SEKRATI', 'T.PARK'),
-            ('175', 'SAID', 'CHAFOUQ', 'T.PARK'),
-            ('179', 'MOHAMED', 'BOUGHDIR', 'V.CT2'),
-            ('182', 'AHMED', 'GHASSAN', 'V.M TONTE'),
-            ('183', 'HASSAN', 'ZRAYDI', 'V.CT1'),
-            ('184', 'SAID', 'HANIF', 'TECH ARROSAGE'),
-            ('186', 'YASSINE', 'HAIL', 'V.CT2'),
-            ('187', 'ABDELHAMID', 'SGHURI', 'R.LOCATIVES'),
-            ('188', 'ABDELKRIM', 'SOUFIANI', 'SUPPLEANT'),
-            ('189', 'ESSOUGRATY', 'LEHMADY', 'T.PARK'),
-            ('190', 'EL BACHIR', 'TAIR EL HAMAM', 'SUPPLEANT'),
+            ('134', 'YOUSSEF', 'ELGHAZOUANI', 'V.CT2', 'Jardinier'),
+            ('135', 'ABDELOUHAB', 'DADSI', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('136', 'EL BACHIR', 'BELMAATI', 'CUB', 'Jardinier'),
+            ('137', 'ABD EL KABIR', 'HAMDI', 'V.M TONTE', 'Jardinier'),
+            ('138', 'SAID', 'MOUIDI', 'V.CT2', 'Jardinier'),
+            ('139', 'MOHAMED', 'GARMOUL', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('140', 'MOURAD', 'LAABISSI', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('141', 'ISSAM', 'BOUCHRA', 'V.CT2', 'Jardinier'),
+            ('142', 'ZIAD', 'BOUHAFA', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('143', 'AHMED', 'GHARIB', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('144', 'MOUSSA', 'EL YADINI', 'S.G.DICE', 'Jardinier'),
+            ('146', 'NOUREDDINE', 'AMZAR', 'V.M 9 à 15, 49 à 52', 'Jardinier'),
+            ('148', 'JAWAD', 'EL ABDOUNY', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('149', 'IMAD', 'BOUIHI', 'V.M 41 à 48', 'Jardinier'),
+            ('150', 'MOUSSA', 'ENNAJI', 'V.M 21 à 25', 'Jardinier'),
+            ('151', 'ABDELJALIL', 'MANDOUR', 'V.M 57 à 64', 'Jardinier'),
+            ('152', 'HICHAM', 'BELQSSIR', 'V.M 84 à 92', 'Jardinier'),
+            ('153', 'BDELJALIL', 'AIT EL HAMRI', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('154', 'MILOUD', 'BAKHAYUI', 'V.M 97 à 103', 'Jardinier'),
+            ('155', 'MOHAMED', 'ECHTAIBI', 'CUB', 'Jardinier'),
+            ('156', 'MOHAMED', 'KOULAL', 'V.M 1 à 8, 105 et 42', 'Jardinier'),
+            ('157', 'MOHAMED', 'ELLOUAH', 'V.CT1', 'Jardinier'),
+            ('158', 'ADIL', 'BOUICHIR', 'R.LOCATIVES', 'Jardinier'),
+            ('160', 'ABDELMALEK', 'ETTAHIRI', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('161', 'MUSTAPHA', 'EL AARFAOUI', 'CUB', 'Jardinier'),
+            ('162', 'ABDELHADI', 'BENALALA', 'V.M 35 à 40, 104 et 70', 'Jardinier'),
+            ('163', 'ABDELFETTAH', 'DIDI', 'V.CT2', 'Jardinier'),
+            ('164', 'ABDELLATIF', 'MAKKAOUI', 'V.M 16 à 20 et 53 à 56', 'Jardinier'),
+            ('167', 'ABDERRAHIM', 'CABDI', 'CUB', 'Jardinier'),
+            ('168', 'EL MUSTAPHA', 'ECHCHARKAOUY', 'V.M ESPACE COMMUN', 'Jardinier'),
+            ('170', 'ABDELHAK', 'CHAIBATE', 'V.CT2', 'Jardinier'),
+            ('174', 'BENATTAR', 'SEKRATI', 'T.PARK', 'Jardinier'),
+            ('175', 'SAID', 'CHAFOUQ', 'T.PARK', 'Jardinier'),
+            ('179', 'MOHAMED', 'BOUGHDIR', 'V.CT2', 'Jardinier'),
+            ('182', 'AHMED', 'GHASSAN', 'V.M TONTE', 'Jardinier'),
+            ('183', 'HASSAN', 'ZRAYDI', 'V.CT1', 'Jardinier'),
+            ('184', 'SAID', 'HANIF', 'TECH ARROSAGE', 'TECH ARROSAGE'),
+            ('186', 'YASSINE', 'HAIL', 'V.CT2', 'Jardinier'),
+            ('187', 'ABDELHAMID', 'SGHURI', 'R.LOCATIVES', 'Jardinier'),
+            ('188', 'ABDELKRIM', 'SOUFIANI', 'Hilton', 'Jardinier'),
+            ('189', 'ESSOUGRATY', 'LEHMADY', 'T.PARK', 'Jardinier'),
+            ('190', 'EL BACHIR', 'TAIR EL HAMAM', 'SUPPLEANT', 'Jardinier'),
         ]
 
-        for mat, prenom, nom, equipe_nom in operateurs_sans_competences:
+        for mat, prenom, nom, equipe_nom, remarque in operateurs_sans_competences:
             operateurs_data.append({
                 'matricule': mat,
                 'prenom': prenom,
                 'nom': nom,
                 'equipe': equipe_nom,
-                'remarque': 'Jardinier',
+                'remarque': remarque,
                 'competences': {}
             })
 
@@ -498,6 +498,31 @@ class Command(BaseCommand):
                                 date_acquisition=date.today(),
                             )
                             comp_affectees += 1
+
+        # ====================================================================
+        # ÉTAPE 4: Affecter les chefs d'équipe
+        # ====================================================================
+        self.stdout.write("")
+        self.stdout.write(self.style.HTTP_INFO("ÉTAPE 4: Affectation des chefs d'équipe"))
+
+        chefs_equipe = [
+            ('2', 'V.CT1'),      # JILALI ESSADDIQI
+            ('20', 'V.M ESPACE COMMUN'),  # ABD EL AZIZ SKENNDRI
+            ('26', 'T.PARK'),    # MOHAMED EL OUARRAQ
+            ('31', 'S.G.DICE'),  # RACHID BENHADDIA
+            ('38', 'V.CT2'),     # ABDERRAHIM EL BAJI
+            ('43', 'CUB'),       # LAHCEN RAHEL
+        ]
+
+        for matricule, equipe_nom in chefs_equipe:
+            try:
+                operateur = Operateur.objects.get(numero_immatriculation=matricule)
+                equipe = Equipe.objects.get(nom_equipe=equipe_nom)
+                equipe.chef_equipe = operateur
+                equipe.save()
+                self.stdout.write(self.style.SUCCESS(f'  Chef affecté: {operateur.prenom} {operateur.nom} → {equipe_nom}'))
+            except (Operateur.DoesNotExist, Equipe.DoesNotExist) as e:
+                self.stdout.write(self.style.WARNING(f'  Erreur: {e}'))
 
         # ====================================================================
         # RÉSUMÉ
