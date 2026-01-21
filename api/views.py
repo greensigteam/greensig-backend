@@ -1720,11 +1720,11 @@ class InventoryExportPDFView(APIView):
     FIELD_MAPPINGS = {
         'Arbre': ['nom', 'famille', 'taille', 'site__nom_site', 'etat'],
         'Palmier': ['nom', 'famille', 'taille', 'site__nom_site', 'etat'],
-        'Gazon': ['nom', 'famille', 'area_sqm', 'site__nom_site', 'etat'],
-        'Arbuste': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
-        'Vivace': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
-        'Cactus': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
-        'Graminee': ['nom', 'famille', 'densite', 'site__nom_site', 'etat'],
+        'Gazon': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'etat'],
+        'Arbuste': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'etat'],
+        'Vivace': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'etat'],
+        'Cactus': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'etat'],
+        'Graminee': ['nom', 'famille', 'superficie_calculee', 'site__nom_site', 'etat'],
         'Puit': ['nom', 'profondeur', 'diametre', 'site__nom_site', 'etat'],
         'Pompe': ['nom', 'type', 'diametre', 'site__nom_site', 'etat'],
         'Vanne': ['marque', 'type', 'diametre', 'site__nom_site', 'etat'],
@@ -1735,6 +1735,9 @@ class InventoryExportPDFView(APIView):
         'Ballon': ['marque', 'volume', 'site__nom_site', 'etat'],
     }
 
+    # Types polygones nécessitant le calcul de superficie
+    POLYGON_TYPES = ['Gazon', 'Arbuste', 'Vivace', 'Cactus', 'Graminee']
+
     FIELD_LABELS = {
         'nom': 'Nom',
         'marque': 'Marque',
@@ -1742,6 +1745,7 @@ class InventoryExportPDFView(APIView):
         'taille': 'Taille',
         'densite': 'Densité',
         'area_sqm': 'Surface (m²)',
+        'superficie_calculee': 'Surface (m²)',
         'profondeur': 'Prof. (m)',
         'diametre': 'Diam. (cm)',
         'type': 'Type',
@@ -1923,6 +1927,21 @@ class InventoryExportPDFView(APIView):
             fields = self.FIELD_MAPPINGS.get(type_name, ['nom', 'site__nom_site', 'etat'])
             headers = [self.FIELD_LABELS.get(field, field) for field in fields]
 
+            # Pour les types polygones, annoter avec le calcul de superficie
+            if type_name in self.POLYGON_TYPES and 'superficie_calculee' in fields:
+                from django.db.models.functions import Coalesce
+                from django.db.models import Value, FloatField
+                from django.contrib.gis.db.models.functions import Area, Transform
+
+                # Calculer la surface en m² via projection UTM
+                queryset = queryset.annotate(
+                    superficie_calculee=Coalesce(
+                        Area(Transform('geometry', 32629)),  # UTM zone 29N pour le Maroc
+                        Value(0.0),
+                        output_field=FloatField()
+                    )
+                )
+
             # Données - Afficher TOUS les éléments
             data_rows = list(queryset.values(*fields))
 
@@ -1937,7 +1956,7 @@ class InventoryExportPDFView(APIView):
                     # Formater les valeurs
                     if value is None:
                         value = '-'
-                    elif field in ['area_sqm', 'profondeur', 'diametre', 'volume']:
+                    elif field in ['area_sqm', 'superficie_calculee', 'profondeur', 'diametre', 'volume']:
                         value = f"{round(float(value), 1)}" if value else '-'
                     else:
                         value = str(value)

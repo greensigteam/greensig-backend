@@ -180,7 +180,15 @@ class Reclamation(models.Model):
 
     statut = models.CharField(max_length=50, choices=STATUT_CHOICES, default='NOUVELLE', verbose_name="Statut")
     actif = models.BooleanField(default=True, verbose_name="Actif")
-    
+
+    # Visibilité pour le client
+    # Si False, seuls les ADMIN/SUPERVISEUR peuvent voir cette réclamation (réclamation interne)
+    visible_client = models.BooleanField(
+        default=True,
+        verbose_name="Visible par le client",
+        help_text="Si décoché, la réclamation ne sera pas visible par le client (usage interne)"
+    )
+
     class Meta:
         verbose_name = "Réclamation"
         verbose_name_plural = "Réclamations"

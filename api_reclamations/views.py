@@ -114,9 +114,15 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             except AttributeError:
                 return queryset.filter(createur=user)
 
-        # Client : accès à ses réclamations uniquement (créées par lui ou liées à sa structure)
+        # Client : accès à ses réclamations uniquement (créées par lui ou liées à sa structure si visible_client=True)
         if hasattr(user, 'client_profile'):
-            return queryset.filter(Q(structure_client=user.client_profile.structure) | Q(createur=user))
+            # Le client voit :
+            # 1. Les réclamations qu'il a créées lui-même (toujours visibles)
+            # 2. Les réclamations de sa structure SEULEMENT si visible_client=True
+            return queryset.filter(
+                Q(createur=user) |
+                Q(structure_client=user.client_profile.structure, visible_client=True)
+            )
 
         # Tout autre utilisateur : réclamations qu'il a créées
         return queryset.filter(createur=user)
@@ -259,10 +265,16 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         Nouveau workflow (validation obligatoire par le créateur):
         1. Admin/Superviseur propose la clôture → statut EN_ATTENTE_VALIDATION_CLOTURE
         2. Le créateur valide via /valider_cloture/ → statut CLOTUREE
+
+        Garde-fous:
+        - La réclamation doit être en statut EN_COURS ou RESOLUE
+        - Il doit y avoir au moins une tâche corrective
+        - Toutes les tâches doivent être terminées (statut TERMINEE)
+        - Toutes les tâches doivent être validées (etat_validation VALIDEE)
         """
         reclamation = self.get_object()
 
-        # Vérification: seuls ADMIN/SUPERVISEUR peuvent proposer la clôture
+        # Vérification 1: seuls ADMIN/SUPERVISEUR peuvent proposer la clôture
         user = request.user
         is_admin = user.is_staff or user.is_superuser
         is_superviseur = hasattr(user, 'superviseur_profile')
@@ -272,6 +284,43 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                 {"error": "Seuls les administrateurs et superviseurs peuvent proposer la clôture."},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Vérification 2: Le statut doit être approprié
+        statuts_valides = ['EN_COURS', 'RESOLUE']
+        if reclamation.statut not in statuts_valides:
+            return Response(
+                {"error": f"La réclamation doit être en cours ou résolue pour proposer la clôture. Statut actuel: {reclamation.get_statut_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérification 3: Il doit y avoir au moins une tâche corrective
+        taches = reclamation.taches_correctives.filter(actif=True)
+        nombre_taches = taches.count()
+
+        if nombre_taches == 0:
+            return Response(
+                {"error": "Impossible de clôturer une réclamation sans tâche corrective. Veuillez d'abord créer et réaliser au moins une intervention."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérification 4: Toutes les tâches doivent être terminées
+        taches_non_terminees = taches.exclude(statut='TERMINEE')
+        if taches_non_terminees.exists():
+            noms_taches = [f"#{t.id}" for t in taches_non_terminees[:5]]
+            return Response({
+                "error": f"Toutes les tâches doivent être terminées avant de proposer la clôture.",
+                "taches_non_terminees": list(taches_non_terminees.values('id', 'statut', 'id_type_tache__nom_tache')[:5]),
+                "nombre_non_terminees": taches_non_terminees.count()
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Vérification 5: Toutes les tâches doivent être validées
+        taches_non_validees = taches.exclude(etat_validation='VALIDEE')
+        if taches_non_validees.exists():
+            return Response({
+                "error": f"Toutes les tâches doivent être validées avant de proposer la clôture.",
+                "taches_non_validees": list(taches_non_validees.values('id', 'etat_validation', 'id_type_tache__nom_tache')[:5]),
+                "nombre_non_validees": taches_non_validees.count()
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             old_statut = reclamation.statut
@@ -945,10 +994,10 @@ class ReclamationExportExcelView(APIView):
         'NOUVELLE': 'En attente de lecture',
         'PRISE_EN_COMPTE': 'Prise en compte',
         'EN_COURS': 'En attente de réalisation',
-        'RESOLUE': 'Tâche terminée',
-        'EN_ATTENTE_VALIDATION_CLOTURE': 'En attente de validation',
+        'RESOLUE': 'Tâche terminée côté administrateur',
+        'EN_ATTENTE_VALIDATION_CLOTURE': 'En attente de validation de clôture',
         'INTERVENTION_REFUSEE': 'Intervention refusée',
-        'CLOTUREE': 'Clôturée',
+        'CLOTUREE': 'Validée côté client',
         'REJETEE': 'Rejetée',
     }
 
@@ -963,8 +1012,10 @@ class ReclamationExportExcelView(APIView):
         elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
             structure = user.client_profile.structure
             if structure:
+                # Le client voit ses réclamations + celles de sa structure si visible_client=True
                 queryset = Reclamation.objects.filter(
-                    Q(structure_client=structure) | Q(createur=user)
+                    Q(createur=user) |
+                    Q(structure_client=structure, visible_client=True)
                 )
             else:
                 queryset = Reclamation.objects.filter(createur=user)

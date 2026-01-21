@@ -72,6 +72,8 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'cloture_refusee_par_nom',
             'date_refus_cloture',
             'commentaire_refus_cloture',
+            # Visibilité client
+            'visible_client',
         ]
 
     def get_createur_nom(self, obj):
@@ -281,7 +283,8 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
             'date_cloture_reelle',
             'photos',
             'client',
-            'createur'
+            'createur',
+            'visible_client',  # Permet à l'admin/superviseur de masquer la réclamation au client
         ]
         read_only_fields = ['id', 'numero_reclamation', 'date_prise_en_compte', 'date_debut_traitement', 'date_resolution', 'date_cloture_reelle']
 

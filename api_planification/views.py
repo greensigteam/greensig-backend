@@ -463,12 +463,34 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             commentaire=commentaire
         )
 
-        # Retourner la tâche mise à jour
+        # Préparer la réponse
         serializer = self.get_serializer(tache)
-        return Response({
+        response_data = {
             'message': f'Tâche {etat.lower()} avec succès',
             'tache': serializer.data
-        })
+        }
+
+        # Vérifier si la clôture de la réclamation peut être proposée
+        # (uniquement si la tâche vient d'être validée et est liée à une réclamation)
+        if etat == 'VALIDEE' and tache.reclamation:
+            reclamation = tache.reclamation
+
+            # Vérifier que la réclamation est dans un statut approprié
+            if reclamation.statut in ['EN_COURS', 'RESOLUE']:
+                # Récupérer toutes les tâches actives de cette réclamation
+                taches_reclamation = reclamation.taches_correctives.filter(actif=True)
+
+                # Vérifier si toutes les tâches sont terminées ET validées
+                toutes_terminees = not taches_reclamation.exclude(statut='TERMINEE').exists()
+                toutes_validees = not taches_reclamation.exclude(etat_validation='VALIDEE').exists()
+
+                if toutes_terminees and toutes_validees:
+                    response_data['proposition_cloture_possible'] = True
+                    response_data['reclamation_id'] = reclamation.id
+                    response_data['reclamation_numero'] = reclamation.numero_reclamation
+                    response_data['nombre_taches_validees'] = taches_reclamation.count()
+
+        return Response(response_data)
 
     def perform_create(self, serializer):
         tache = serializer.save(_current_user=self.request.user)
