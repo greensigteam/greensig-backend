@@ -915,7 +915,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         Logique automatique:
         - Si c'est la première distribution marquée comme réalisée
         - Et que la tâche est en statut PLANIFIEE
-        - Alors la tâche passe automatiquement en statut EN_COURS
+        - Alors:
+          * La tâche passe automatiquement en statut EN_COURS
+          * La date_debut_reelle de la tâche est définie avec la date actuelle (aujourd'hui)
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -935,16 +937,18 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.save()
 
         # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE,
-        # passer la tâche en EN_COURS
+        # passer la tâche en EN_COURS et définir la date de début réelle
         if est_premiere_distribution and tache.statut == 'PLANIFIEE':
             tache.statut = 'EN_COURS'
+            tache.date_debut_reelle = timezone.now().date()  # Date actuelle (aujourd'hui)
             tache.save()
 
         serializer = self.get_serializer(distribution)
         return Response({
             'message': 'Distribution marquée comme réalisée',
             'distribution': serializer.data,
-            'tache_statut_modifie': est_premiere_distribution and tache.statut == 'EN_COURS'
+            'tache_statut_modifie': est_premiere_distribution and tache.statut == 'EN_COURS',
+            'date_debut_reelle_definie': est_premiere_distribution and tache.date_debut_reelle is not None
         }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='marquer-non-realisee')
@@ -956,7 +960,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         Logique automatique:
         - Si c'était la dernière distribution réalisée
         - Et que la tâche est en statut EN_COURS
-        - Alors la tâche repasse automatiquement en statut PLANIFIEE
+        - Alors:
+          * La tâche repasse automatiquement en statut PLANIFIEE
+          * La date_debut_reelle de la tâche est supprimée (remise à None)
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -974,16 +980,18 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.save()
 
         # Si c'était la dernière distribution réalisée et que la tâche est EN_COURS,
-        # remettre la tâche en PLANIFIEE
+        # remettre la tâche en PLANIFIEE et supprimer la date de début réelle
         if est_derniere_distribution and tache.statut == 'EN_COURS':
             tache.statut = 'PLANIFIEE'
+            tache.date_debut_reelle = None
             tache.save()
 
         serializer = self.get_serializer(distribution)
         return Response({
             'message': 'Distribution marquée comme non réalisée',
             'distribution': serializer.data,
-            'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE'
+            'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE',
+            'date_debut_reelle_supprimee': est_derniere_distribution and tache.date_debut_reelle is None
         }, status=status.HTTP_200_OK)
 
 
