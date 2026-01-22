@@ -220,9 +220,12 @@ class ReportingView(APIView):
         """Statistiques des équipes."""
         try:
             from api_users.models import Equipe, Operateur, Absence, StatutAbsence
-            from api_planification.models import Tache
+            from api_planification.models import Tache, DistributionCharge
 
             today = timezone.now().date()
+            # Période de la semaine en cours (lundi à dimanche)
+            week_start = today - timedelta(days=today.weekday())
+            week_end = week_start + timedelta(days=6)
 
             equipes = Equipe.objects.filter(actif=True)
             total_equipes = equipes.count()
@@ -239,9 +242,16 @@ class ReportingView(APIView):
 
                 nb_taches = taches_equipe.count()
 
-                # Calculer la charge (simplifiée: % basé sur nb tâches)
-                # Supposons qu'une équipe peut gérer 10 tâches simultanément = 100%
-                charge_percent = min(100, nb_taches * 10)
+                # ✅ AMÉLIORATION: Calculer la charge basée sur les heures des distributions
+                # Heures planifiées pour la semaine en cours
+                heures_planifiees_semaine = DistributionCharge.objects.filter(
+                    tache__in=taches_equipe,
+                    date__gte=week_start,
+                    date__lte=week_end,
+                    status='NON_REALISEE'  # Seulement les distributions non encore réalisées
+                ).aggregate(
+                    total=Sum('heures_planifiees')
+                )['total'] or 0
 
                 # Compter les opérateurs disponibles
                 operateurs = Operateur.objects.filter(
@@ -259,10 +269,18 @@ class ReportingView(APIView):
 
                 ops_disponibles = total_ops - ops_absents
 
+                # ✅ Capacité de l'équipe = opérateurs disponibles × 40h/semaine
+                capacite_heures = ops_disponibles * 40 if ops_disponibles > 0 else 40  # Minimum 40h pour éviter division par 0
+
+                # ✅ Charge % = (heures planifiées / capacité) × 100
+                charge_percent = min(100, (heures_planifiees_semaine / capacite_heures * 100)) if capacite_heures > 0 else 0
+
                 charges.append({
                     'id': equipe.id,
                     'nom': equipe.nomEquipe,
-                    'charge_percent': charge_percent,
+                    'charge_percent': round(charge_percent, 1),
+                    'heures_planifiees': round(heures_planifiees_semaine, 1),  # ✅ NOUVEAU
+                    'capacite_heures': capacite_heures,  # ✅ NOUVEAU
                     'nb_taches': nb_taches,
                     'operateurs_total': total_ops,
                     'operateurs_disponibles': ops_disponibles,

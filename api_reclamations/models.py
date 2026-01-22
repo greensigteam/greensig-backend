@@ -70,7 +70,7 @@ class Reclamation(models.Model):
         ('RESOLUE', 'Tâche terminée côté administrateur'),
         ('EN_ATTENTE_VALIDATION_CLOTURE', 'En attente de validation de clôture'),
         ('INTERVENTION_REFUSEE', 'Intervention refusée par le client'),
-        ('CLOTUREE', 'Validée côté client'),
+        ('CLOTUREE', 'Clôturée'),
         ('REJETEE', 'Rejetée'),
     ]
 

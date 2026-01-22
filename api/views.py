@@ -4004,3 +4004,137 @@ class GeometryBufferView(APIView):
 
         except Exception as e:
             return Response({'error': str(e)}, status=400)
+
+
+# ==============================================================================
+# ENDPOINT POUR RÉCUPÉRER LES OBJETS DANS UNE GÉOMÉTRIE
+# ==============================================================================
+
+class ObjectsInGeometryView(APIView):
+    """
+    POST /api/objects-in-geometry/
+    Récupère tous les objets GIS qui intersectent avec une géométrie donnée.
+
+    Utilisé notamment pour récupérer les objets dans la zone d'une réclamation.
+
+    Request body:
+    {
+        "geometry": { GeoJSON geometry (Point, Polygon, etc.) },
+        "site_id": 123,  // Optional: filtrer par site
+        "object_types": ["Arbre", "Gazon"]  // Optional: filtrer par types (tous par défaut)
+    }
+
+    Response:
+    {
+        "objects": [
+            {"id": 1, "type": "Arbre", "nom": "Olivier 1", "site_id": 1, "site_nom": "Jardin A"},
+            ...
+        ],
+        "count": 15,
+        "by_type": {"Arbre": 10, "Gazon": 5}
+    }
+    """
+
+    def post(self, request):
+        geometry_data = request.data.get('geometry')
+        site_id = request.data.get('site_id')
+        object_types = request.data.get('object_types')  # Liste de types à inclure
+
+        if not geometry_data:
+            return Response({'error': 'geometry is required'}, status=400)
+
+        try:
+            # Convert GeoJSON to GEOS geometry
+            # La géométrie peut arriver sous différentes formes
+            if isinstance(geometry_data, str):
+                # Déjà une chaîne JSON/WKT
+                geom = GEOSGeometry(geometry_data)
+            elif isinstance(geometry_data, dict):
+                # Objet GeoJSON dict
+                geom = GEOSGeometry(json.dumps(geometry_data))
+            else:
+                return Response({
+                    'error': f'Format de géométrie invalide: attendu dict ou str, reçu {type(geometry_data).__name__}',
+                    'received_type': type(geometry_data).__name__
+                }, status=400)
+
+            # Mapping type -> model
+            type_mapping = {
+                'Arbre': Arbre,
+                'Gazon': Gazon,
+                'Palmier': Palmier,
+                'Arbuste': Arbuste,
+                'Vivace': Vivace,
+                'Cactus': Cactus,
+                'Graminee': Graminee,
+                'Puit': Puit,
+                'Pompe': Pompe,
+                'Vanne': Vanne,
+                'Clapet': Clapet,
+                'Canalisation': Canalisation,
+                'Aspersion': Aspersion,
+                'Goutte': Goutte,
+                'Ballon': Ballon,
+            }
+
+            # Déterminer quels types charger
+            if object_types:
+                types_to_load = [t for t in object_types if t in type_mapping]
+            else:
+                types_to_load = list(type_mapping.keys())
+
+            results = []
+            by_type = {}
+
+            for type_name in types_to_load:
+                Model = type_mapping[type_name]
+
+                # Query avec filtre géométrique
+                queryset = Model.objects.filter(
+                    geometry__intersects=geom
+                ).select_related('site', 'sous_site')
+
+                # Filtrer par site si spécifié
+                if site_id:
+                    queryset = queryset.filter(site_id=site_id)
+
+                # Récupérer les objets
+                objects = queryset.values(
+                    'id', 'site_id', 'sous_site_id'
+                ).annotate(
+                    site_nom=models.F('site__nom_site'),
+                    sous_site_nom=models.F('sous_site__nom')
+                )
+
+                # Ajouter le nom si le modèle a un champ 'nom'
+                if hasattr(Model, 'nom'):
+                    objects = queryset.values(
+                        'id', 'nom', 'site_id', 'sous_site_id'
+                    ).annotate(
+                        site_nom=models.F('site__nom_site'),
+                        sous_site_nom=models.F('sous_site__nom')
+                    )
+
+                count = 0
+                for obj in objects:
+                    obj['type'] = type_name
+                    # Utiliser objet_ptr_id comme ID unifié (hérite de Objet)
+                    obj['objet_id'] = obj['id']
+                    results.append(obj)
+                    count += 1
+
+                if count > 0:
+                    by_type[type_name] = count
+
+            return Response({
+                'objects': results,
+                'count': len(results),
+                'by_type': by_type
+            })
+
+        except Exception as e:
+            import traceback
+            return Response({
+                'error': str(e),
+                'traceback': traceback.format_exc()
+            }, status=400)

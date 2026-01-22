@@ -293,8 +293,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Vérification 3: Il doit y avoir au moins une tâche corrective
-        taches = reclamation.taches_correctives.filter(actif=True)
+        # Vérification 3: Il doit y avoir au moins une tâche corrective (non soft-deleted)
+        taches = reclamation.taches_correctives.filter(deleted_at__isnull=True)
         nombre_taches = taches.count()
 
         if nombre_taches == 0:
@@ -954,6 +954,11 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
                     'commentaire': request.data.get('commentaire', '')
                 }
             )
+
+            # Envoyer une notification pour informer de l'évaluation
+            from api.services.notifications import NotificationService
+            NotificationService.notify_satisfaction_evaluee(satisfaction, acteur=request.user)
+
             serializer = self.get_serializer(satisfaction)
             return Response(
                 serializer.data,

@@ -47,7 +47,8 @@ class Tache(models.Model):
     
     STATUT_CHOICES = [
         ('PLANIFIEE', 'Planifiée'),
-        ('NON_DEBUTEE', 'Non débutée'),
+        ('EN_RETARD', 'En retard'),  # Heure de début passée sans démarrage
+        ('EXPIREE', 'Expirée'),      # Heure de fin passée sans démarrage
         ('EN_COURS', 'En cours'),
         ('TERMINEE', 'Terminée'),
         ('ANNULEE', 'Annulée'),
@@ -141,10 +142,34 @@ class Tache(models.Model):
     
     deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Supprimé le") # Soft delete
 
+    # Date de création automatique
+    date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création", null=True, blank=True)
+
     # Many-to-Many relation with Inventory Objects
     objets = models.ManyToManyField(Objet, related_name='taches', blank=True, verbose_name="Objets inventaire")
 
     reference = models.CharField(max_length=100, unique=True, blank=True, null=True, db_index=True, verbose_name="Référence technique")
+
+    # Gestion du temps de travail (Option 2: Approche Hybride)
+    temps_travail_manuel = models.FloatField(
+        null=True,
+        blank=True,
+        verbose_name="Temps de travail manuel (heures)",
+        help_text="Temps de travail saisi manuellement (écrase le calcul automatique)"
+    )
+    temps_travail_manuel_par = models.ForeignKey(
+        'api_users.Utilisateur',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taches_temps_manuel',
+        verbose_name="Temps manuel saisi par"
+    )
+    temps_travail_manuel_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de saisie manuelle"
+    )
 
     class Meta:
         verbose_name = "Tâche"
@@ -168,6 +193,97 @@ class Tache(models.Model):
                 })
 
     @property
+    def computed_statut(self):
+        """
+        ✅ Calcule dynamiquement le statut réel basé sur les dates/heures actuelles.
+
+        Cette propriété ignore le statut stocké et calcule ce que devrait être
+        le statut en fonction de l'heure actuelle et des distributions.
+
+        Règles de recalcul (conventions standard de gestion de projet):
+
+        STATUTS FINAUX (protégés - ne jamais recalculer pour l'affichage):
+        - TERMINEE: travail effectué, audit trail
+        - VALIDEE: validation finale du client/superviseur
+        - REJETEE: décision prise, nécessite nouvelle tâche
+        - ANNULEE: annulation explicite (réactivation via action utilisateur uniquement)
+
+        STATUTS CONDITIONNELS:
+        - EN_COURS:
+            * Si distributions REALISEE existent → protégé (travail en cours)
+            * Si aucune distribution REALISEE → recalcul autorisé (pas de travail effectif)
+
+        STATUTS RECALCULABLES:
+        - PLANIFIEE, EN_RETARD, EXPIREE: toujours recalculés selon les dates
+
+        NOTE: La réactivation d'une tâche ANNULEE se fait via le formulaire de
+        replanification qui change explicitement le statut, PAS via computed_statut.
+
+        Returns:
+            str: Le statut calculé dynamiquement
+        """
+        # ══════════════════════════════════════════════════════════════════════
+        # STATUTS FINAUX - Ne jamais recalculer (actions explicites requises)
+        # ══════════════════════════════════════════════════════════════════════
+        if self.statut in ('TERMINEE', 'VALIDEE', 'REJETEE', 'ANNULEE'):
+            return self.statut
+
+        # ══════════════════════════════════════════════════════════════════════
+        # EN_COURS - Protéger seulement si du travail a été effectivement fait
+        # ══════════════════════════════════════════════════════════════════════
+        if self.statut == 'EN_COURS':
+            # Vérifier si des distributions ont été marquées comme réalisées
+            has_realisee = self.distributions_charge.filter(status='REALISEE').exists()
+            if has_realisee:
+                # Du travail effectif a été fait → garder EN_COURS
+                return self.statut
+            # Aucun travail effectif → permettre le recalcul (replanification possible)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # EN_RETARD, EXPIREE, PLANIFIEE - Recalcul basé sur les dates
+        # ══════════════════════════════════════════════════════════════════════
+
+        now = timezone.now()
+        today = now.date()
+        current_time = now.time()
+
+        # Récupérer les distributions triées
+        distributions = list(self.distributions_charge.order_by('date', 'heure_debut'))
+
+        if distributions:
+            first_dist = distributions[0]
+            last_dist = distributions[-1]
+
+            # Vérifier si EXPIREE (dernière distribution passée)
+            if last_dist.date < today:
+                return 'EXPIREE'
+            if last_dist.date == today and last_dist.heure_fin and current_time > last_dist.heure_fin:
+                return 'EXPIREE'
+
+            # Vérifier si EN_RETARD (première distribution passée mais pas expirée)
+            if first_dist.date < today:
+                return 'EN_RETARD'
+            if first_dist.date == today and first_dist.heure_debut and current_time > first_dist.heure_debut:
+                return 'EN_RETARD'
+
+            # Sinon PLANIFIEE
+            return 'PLANIFIEE'
+
+        # Pas de distributions - utiliser les dates planifiées
+        if self.date_fin_planifiee:
+            # Convertir en date si c'est un datetime
+            fin_date = self.date_fin_planifiee.date() if hasattr(self.date_fin_planifiee, 'date') else self.date_fin_planifiee
+            if fin_date < today:
+                return 'EXPIREE'
+
+        if self.date_debut_planifiee:
+            debut_date = self.date_debut_planifiee.date() if hasattr(self.date_debut_planifiee, 'date') else self.date_debut_planifiee
+            if debut_date < today:
+                return 'EN_RETARD'
+
+        return 'PLANIFIEE'
+
+    @property
     def charge_totale_distributions(self):
         """
         ✅ Calcule la charge totale depuis les distributions journalières.
@@ -188,6 +304,223 @@ class Tache(models.Model):
             int: Nombre de jours avec des heures planifiées
         """
         return self.distributions_charge.filter(heures_planifiees__gt=0).count()
+
+    @property
+    def temps_travail_total(self):
+        """
+        ✅ Calcule le temps de travail total pour cette tâche (OPTION 2: Approche Hybride).
+
+        Priorité de calcul:
+        1. temps_travail_manuel - Si saisi manuellement par un utilisateur (priorité absolue)
+        2. heures_reelles (DistributionCharge) - Heures réellement travaillées (le plus fiable)
+        3. heures_travaillees (ParticipationTache) - Somme des heures par opérateur
+        4. charge_estimee_heures - Estimation initiale
+        5. heures_planifiees (DistributionCharge) - Fallback minimum
+        6. 0.0 - Aucune donnée disponible
+
+        Returns:
+            dict: {
+                'heures': float,           # Nombre d'heures calculées
+                'source': str,             # Source des données
+                'fiable': bool,            # Indique si la donnée est fiable (réelle vs estimée)
+                'manuel': bool,            # True si saisi manuellement
+                'manuel_par': str|None,    # Nom de l'utilisateur qui a saisi
+                'manuel_date': str|None    # Date de saisie manuelle (ISO format)
+            }
+
+        Sources possibles:
+        - 'MANUEL': Saisi manuellement par un utilisateur (fiable=True)
+        - 'REEL': Heures réelles des distributions (fiable=True)
+        - 'PARTICIPATION': Heures déclarées par les opérateurs (fiable=True)
+        - 'ESTIME': Charge estimée (fiable=False)
+        - 'PLANIFIE': Heures planifiées (fiable=False)
+        - 'AUCUNE': Aucune donnée disponible (fiable=False)
+        """
+        # 1. PRIORITÉ ABSOLUE: Temps manuel saisi par un utilisateur
+        if self.temps_travail_manuel is not None and self.temps_travail_manuel >= 0:
+            return {
+                'heures': float(self.temps_travail_manuel),
+                'source': 'MANUEL',
+                'fiable': True,
+                'manuel': True,
+                'manuel_par': self.temps_travail_manuel_par.get_full_name() if self.temps_travail_manuel_par else None,
+                'manuel_date': self.temps_travail_manuel_date.isoformat() if self.temps_travail_manuel_date else None
+            }
+
+        # 2. Essayer heures_reelles des distributions (données terrain réelles)
+        heures_reelles = self.distributions_charge.aggregate(
+            total=models.Sum('heures_reelles')
+        )['total']
+
+        if heures_reelles and heures_reelles > 0:
+            return {
+                'heures': float(heures_reelles),
+                'source': 'REEL',
+                'fiable': True,
+                'manuel': False,
+                'manuel_par': None,
+                'manuel_date': None
+            }
+
+        # 3. Essayer heures_travaillees des participations (déclarations opérateurs)
+        heures_participation = self.participations.aggregate(
+            total=models.Sum('heures_travaillees')
+        )['total']
+
+        if heures_participation and heures_participation > 0:
+            return {
+                'heures': float(heures_participation),
+                'source': 'PARTICIPATION',
+                'fiable': True,
+                'manuel': False,
+                'manuel_par': None,
+                'manuel_date': None
+            }
+
+        # 4. Utiliser charge_estimee_heures (estimation initiale)
+        if self.charge_estimee_heures and self.charge_estimee_heures > 0:
+            return {
+                'heures': float(self.charge_estimee_heures),
+                'source': 'ESTIME',
+                'fiable': False,
+                'manuel': False,
+                'manuel_par': None,
+                'manuel_date': None
+            }
+
+        # 5. Fallback: heures_planifiees (minimum prévu)
+        heures_planifiees = self.charge_totale_distributions
+        if heures_planifiees > 0:
+            return {
+                'heures': float(heures_planifiees),
+                'source': 'PLANIFIE',
+                'fiable': False,
+                'manuel': False,
+                'manuel_par': None,
+                'manuel_date': None
+            }
+
+        # 6. Aucune donnée disponible
+        return {
+            'heures': 0.0,
+            'source': 'AUCUNE',
+            'fiable': False,
+            'manuel': False,
+            'manuel_par': None,
+            'manuel_date': None
+        }
+
+    @property
+    def is_late(self):
+        """
+        Vérifie si la tâche est en retard (la première distribution a commencé sans démarrage).
+
+        Une tâche est en retard si:
+        - Son statut est PLANIFIEE
+        - La PREMIÈRE distribution (date + heure_debut) est passée
+        - OU si pas de distributions, la date de début planifiée est passée
+
+        Returns:
+            bool: True si la tâche est en retard
+        """
+        if self.statut != 'PLANIFIEE':
+            return False
+
+        now = timezone.now()
+        today = now.date()
+        current_time = now.time()
+
+        # Récupérer toutes les distributions triées chronologiquement (date ASC, heure_debut ASC)
+        distributions = list(self.distributions_charge.order_by('date', 'heure_debut'))
+
+        if distributions:
+            # La première distribution chronologiquement
+            first_dist = distributions[0]
+
+            # Si la date de la première distribution est passée (avant aujourd'hui)
+            if first_dist.date < today:
+                return True
+
+            # Si la première distribution est aujourd'hui, vérifier si son heure de début est passée
+            if first_dist.date == today and first_dist.heure_debut is not None:
+                if current_time > first_dist.heure_debut:
+                    return True
+
+            # La première distribution est dans le futur ou aujourd'hui mais pas encore commencée
+            return False
+
+        # Pas de distributions → utiliser date_debut_planifiee
+        return self.date_debut_planifiee < today
+
+    def mark_as_late(self):
+        """
+        Marque la tâche comme en retard.
+        Appelé automatiquement quand l'heure de début est dépassée sans démarrage.
+
+        Returns:
+            bool: True si le statut a été changé
+        """
+        if self.is_late and self.statut == 'PLANIFIEE':
+            self.statut = 'EN_RETARD'
+            self.save(update_fields=['statut'])
+            return True
+        return False
+
+    @property
+    def is_expired(self):
+        """
+        Vérifie si la tâche est expirée (la dernière distribution est passée).
+
+        Une tâche est expirée si:
+        - Son statut est PLANIFIEE ou EN_RETARD
+        - La DERNIÈRE distribution (date + heure_fin) est passée
+        - OU si pas de distributions, la date de fin planifiée est passée
+
+        Returns:
+            bool: True si la tâche est expirée
+        """
+        if self.statut not in ('PLANIFIEE', 'EN_RETARD'):
+            return False
+
+        now = timezone.now()
+        today = now.date()
+        current_time = now.time()
+
+        # Récupérer toutes les distributions triées chronologiquement (date ASC, heure_fin ASC)
+        distributions = list(self.distributions_charge.order_by('date', 'heure_fin'))
+
+        if distributions:
+            # La dernière distribution chronologiquement
+            last_dist = distributions[-1]
+
+            # Si la date de la dernière distribution est passée (avant aujourd'hui)
+            if last_dist.date < today:
+                return True
+
+            # Si la dernière distribution est aujourd'hui, vérifier si son heure de fin est passée
+            if last_dist.date == today and last_dist.heure_fin is not None:
+                if current_time > last_dist.heure_fin:
+                    return True
+
+            # La dernière distribution est dans le futur ou aujourd'hui mais pas encore terminée
+            return False
+
+        # Pas de distributions → utiliser date_fin_planifiee
+        return self.date_fin_planifiee < today
+
+    def mark_as_expired(self):
+        """
+        Marque la tâche comme expirée.
+        Appelé automatiquement quand l'heure de fin est dépassée sans démarrage.
+
+        Returns:
+            bool: True si le statut a été changé
+        """
+        if self.is_expired and self.statut in ('PLANIFIEE', 'EN_RETARD'):
+            self.statut = 'EXPIREE'
+            self.save(update_fields=['statut'])
+            return True
+        return False
 
     def save(self, *args, **kwargs):
         # Save first to get an ID if it's new

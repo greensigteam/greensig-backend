@@ -51,6 +51,9 @@ class NotificationTypes:
     SITE_CREE = 'site_cree'
     SITE_MODIFIE = 'site_modifie'
 
+    # Satisfaction
+    SATISFACTION_EVALUEE = 'satisfaction_evaluee'
+
 
 class NotificationService:
     """
@@ -258,7 +261,7 @@ class NotificationService:
     def notify_tache_terminee(cls, tache: 'Tache', createur: Optional['Utilisateur'] = None):
         """
         Notifier la fin d'une tache.
-        Destinataires: Clients de la structure, superviseur du site
+        Destinataires: Clients de la structure, superviseur du site, admins
         """
         destinataires = []
 
@@ -273,6 +276,9 @@ class NotificationService:
         site = cls._get_tache_site(tache)
         if site and site.superviseur and site.superviseur.utilisateur:
             destinataires.append(site.superviseur.utilisateur.id)
+
+        # Admins
+        destinataires.extend(cls._get_admin_ids())
 
         if not destinataires:
             return
@@ -487,6 +493,53 @@ class NotificationService:
                 'nouveau_statut': nouveau_statut,
                 'site': reclamation.site.nom_site if reclamation.site else '',
             },
+            acteur=acteur
+        )
+
+    # =========================================================================
+    # NOTIFICATIONS SATISFACTION
+    # =========================================================================
+
+    @classmethod
+    def notify_satisfaction_evaluee(cls, satisfaction: 'SatisfactionClient', acteur: Optional['Utilisateur'] = None):
+        """
+        Notifier qu'un client a evalué une reclamation.
+        Destinataires: Admins, superviseur du site
+        """
+        destinataires = []
+        reclamation = satisfaction.reclamation
+
+        # Admins
+        destinataires.extend(cls._get_admin_ids())
+
+        # Superviseur du site
+        if reclamation.site and reclamation.site.superviseur:
+            sup = reclamation.site.superviseur
+            if sup.utilisateur and sup.utilisateur.actif:
+                destinataires.append(sup.utilisateur.id)
+
+        if not destinataires:
+            return
+
+        # Emoji pour la note
+        note_emoji = '⭐' * satisfaction.note
+        note_text = f"{satisfaction.note}/5"
+
+        cls.send(
+            type_notification=NotificationTypes.SATISFACTION_EVALUEE,
+            titre=f"Evaluation client: {reclamation.numero_reclamation}",
+            message=f"Note: {note_text} {note_emoji}",
+            recipients=list(set(destinataires)),
+            data={
+                'reclamation_id': reclamation.id,
+                'numero': reclamation.numero_reclamation,
+                'satisfaction_id': satisfaction.id,
+                'note': satisfaction.note,
+                'commentaire': (satisfaction.commentaire or '')[:150],
+                'site': reclamation.site.nom_site if reclamation.site else '',
+                'evaluateur': f"{acteur.prenom} {acteur.nom}" if acteur else '',
+            },
+            priorite='normal',
             acteur=acteur
         )
 

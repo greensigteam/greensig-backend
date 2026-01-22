@@ -261,10 +261,65 @@ class TacheSerializer(serializers.ModelSerializer):
 
     reclamation_numero = serializers.CharField(source='reclamation.numero_reclamation', read_only=True, allow_null=True)
 
+    # ✅ Site déduit (depuis objets OU réclamation)
+    site_id = serializers.SerializerMethodField()
+    site_nom = serializers.SerializerMethodField()
+
+    def get_site_id(self, obj):
+        """Retourne le site_id déduit des objets ou de la réclamation."""
+        # 1. D'abord essayer depuis les objets
+        if obj.objets.exists():
+            first_obj = obj.objets.first()
+            if first_obj and first_obj.site_id:
+                return first_obj.site_id
+        # 2. Sinon depuis la réclamation
+        if obj.reclamation and obj.reclamation.site_id:
+            return obj.reclamation.site_id
+        return None
+
+    def get_site_nom(self, obj):
+        """Retourne le nom du site déduit des objets ou de la réclamation."""
+        # 1. D'abord essayer depuis les objets
+        if obj.objets.exists():
+            first_obj = obj.objets.select_related('site').first()
+            if first_obj and first_obj.site:
+                return first_obj.site.nom_site
+        # 2. Sinon depuis la réclamation
+        if obj.reclamation and obj.reclamation.site:
+            return obj.reclamation.site.nom_site
+        return None
+
     # ✅ NOUVEAU: Distributions de charge pour tâches multi-jours
     distributions_charge = DistributionChargeSerializer(many=True, read_only=True)
     charge_totale_distributions = serializers.FloatField(read_only=True)
     nombre_jours_travail = serializers.IntegerField(read_only=True)
+
+    # ✅ NOUVEAU: Temps de travail total (Option 2: Approche Hybride)
+    temps_travail_total = serializers.SerializerMethodField()
+
+    def get_temps_travail_total(self, obj):
+        """
+        Retourne le temps de travail total calculé avec toutes les métadonnées.
+
+        Returns:
+            dict: {
+                'heures': float,
+                'source': str,
+                'fiable': bool,
+                'manuel': bool,
+                'manuel_par': str|None,
+                'manuel_date': str|None
+            }
+        """
+        return obj.temps_travail_total
+
+    # ✅ DYNAMIQUE: Statut calculé en temps réel (remplace le statut stocké)
+    statut = serializers.SerializerMethodField()
+    statut_stocke = serializers.CharField(source='statut', read_only=True)
+
+    def get_statut(self, obj):
+        """Retourne le statut calculé dynamiquement au lieu du statut stocké."""
+        return obj.computed_statut
 
     class Meta:
         model = Tache
@@ -310,6 +365,95 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         if start and end:
             if end < start:
                 raise serializers.ValidationError({"date_fin_planifiee": "La date de fin ne peut pas être antérieure à la date de début."})
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # VALIDATIONS MÉTIER - TRANSITIONS DE STATUT
+        # ══════════════════════════════════════════════════════════════════════════
+        nouveau_statut = data.get('statut')
+
+        if nouveau_statut and self.instance:
+            ancien_statut = self.instance.statut
+
+            # Matrice des transitions valides
+            # Format: {statut_actuel: [statuts_autorisés]}
+            TRANSITIONS_VALIDES = {
+                'PLANIFIEE': ['EN_COURS', 'ANNULEE'],
+                'EN_RETARD': ['EN_COURS', 'ANNULEE'],
+                'EN_COURS': ['TERMINEE', 'ANNULEE'],
+                'EXPIREE': ['PLANIFIEE', 'ANNULEE'],  # PLANIFIEE via replanification
+                'ANNULEE': ['PLANIFIEE'],  # Réactivation via replanification
+                'TERMINEE': ['VALIDEE', 'REJETEE'],  # Validation uniquement
+                'REJETEE': ['PLANIFIEE'],  # Replanification après rejet
+                'VALIDEE': [],  # Aucune transition (statut final)
+            }
+
+            transitions_autorisees = TRANSITIONS_VALIDES.get(ancien_statut, [])
+
+            if nouveau_statut != ancien_statut and nouveau_statut not in transitions_autorisees:
+                raise serializers.ValidationError({
+                    "statut": f"Transition de statut invalide: {ancien_statut} → {nouveau_statut}. "
+                              f"Transitions autorisées depuis '{ancien_statut}': {', '.join(transitions_autorisees) if transitions_autorisees else 'aucune'}."
+                })
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # VALIDATION DÉMARRAGE (EN_COURS)
+        # ══════════════════════════════════════════════════════════════════════════
+        if nouveau_statut == 'EN_COURS':
+            from django.utils import timezone
+            today = timezone.now().date()
+
+            # 1. Impossible de démarrer avant la date de début planifiée
+            date_debut = start
+            if not date_debut and self.instance:
+                date_debut = self.instance.date_debut_planifiee
+
+            if date_debut and date_debut > today:
+                raise serializers.ValidationError({
+                    "statut": f"Impossible de démarrer la tâche avant sa date de début planifiée ({date_debut.strftime('%d/%m/%Y')}). "
+                              f"Veuillez attendre le {date_debut.strftime('%d/%m/%Y')} ou modifier la date de début."
+                })
+
+            # 2. Impossible de démarrer sans équipe assignée
+            equipes = data.get('equipes')
+            if equipes is None and self.instance:
+                # Vérifier les équipes existantes (M2M ou legacy)
+                has_equipe = self.instance.equipes.exists() or self.instance.equipe is not None
+            else:
+                has_equipe = equipes and len(equipes) > 0
+
+            if not has_equipe:
+                raise serializers.ValidationError({
+                    "statut": "Impossible de démarrer la tâche sans équipe assignée. "
+                              "Veuillez assigner au moins une équipe avant de démarrer."
+                })
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # VALIDATION TERMINER (TERMINEE)
+        # ══════════════════════════════════════════════════════════════════════════
+        if nouveau_statut == 'TERMINEE' and self.instance:
+            # Impossible de terminer sans équipe assignée
+            equipes = data.get('equipes')
+            if equipes is None:
+                has_equipe = self.instance.equipes.exists() or self.instance.equipe is not None
+            else:
+                has_equipe = equipes and len(equipes) > 0
+
+            if not has_equipe:
+                raise serializers.ValidationError({
+                    "statut": "Impossible de terminer la tâche sans équipe assignée. "
+                              "Veuillez assigner au moins une équipe."
+                })
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # VALIDATION ANNULER (ANNULEE)
+        # ══════════════════════════════════════════════════════════════════════════
+        if nouveau_statut == 'ANNULEE' and self.instance:
+            # Impossible d'annuler une tâche terminée ou validée
+            if self.instance.statut in ('TERMINEE', 'VALIDEE', 'REJETEE'):
+                raise serializers.ValidationError({
+                    "statut": f"Impossible d'annuler une tâche {self.instance.statut.lower()}. "
+                              "Les tâches terminées ou validées ne peuvent pas être annulées."
+                })
 
         # Si une charge est fournie manuellement, activer le flag charge_manuelle
         if 'charge_estimee_heures' in data and data['charge_estimee_heures'] is not None:
@@ -375,19 +519,43 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         # ✅ NOUVEAU: Extract recurrence config (ignoré, géré côté frontend)
         recurrence_config = validated_data.pop('recurrence_config', None)
 
-        # AUTO-ASSIGN CLIENT & STRUCTURE: Si non fournis, les déduire des objets
+        # AUTO-ASSIGN CLIENT & STRUCTURE: Si non fournis, les déduire des objets OU de la réclamation
+        site_found = None
+
+        # 1. D'abord essayer de déduire depuis les objets
         if objets:
+            print(f"🔍 [TacheCreate] {len(objets)} objet(s) fourni(s)")
             for obj in objets:
                 if hasattr(obj, 'site') and obj.site:
-                    # Assigner id_structure_client si non fourni
-                    if ('id_structure_client' not in validated_data or validated_data.get('id_structure_client') is None):
-                        if obj.site.structure_client:
-                            validated_data['id_structure_client'] = obj.site.structure_client
-                    # Legacy: Assigner id_client si non fourni
-                    if ('id_client' not in validated_data or validated_data.get('id_client') is None):
-                        if hasattr(obj.site, 'client') and obj.site.client:
-                            validated_data['id_client'] = obj.site.client
+                    site_found = obj.site
+                    print(f"✅ [TacheCreate] Site trouvé depuis objet: {site_found.nom_site}")
                     break
+
+        # 2. Sinon, essayer de déduire depuis la réclamation liée
+        if not site_found and validated_data.get('reclamation'):
+            reclamation = validated_data.get('reclamation')
+            print(f"🔍 [TacheCreate] Réclamation liée: {reclamation.numero_reclamation if reclamation else 'None'}")
+            if hasattr(reclamation, 'site') and reclamation.site:
+                site_found = reclamation.site
+                print(f"✅ [TacheCreate] Site trouvé depuis réclamation: {site_found.nom_site}")
+            else:
+                print(f"⚠️ [TacheCreate] Réclamation sans site: site={getattr(reclamation, 'site', 'N/A')}")
+
+        # 3. Assigner id_structure_client et id_client depuis le site trouvé
+        if site_found:
+            print(f"🏢 [TacheCreate] Site trouvé: {site_found.nom_site} (id={site_found.id})")
+            # Assigner id_structure_client si non fourni
+            if ('id_structure_client' not in validated_data or validated_data.get('id_structure_client') is None):
+                if site_found.structure_client:
+                    validated_data['id_structure_client'] = site_found.structure_client
+                    print(f"✅ [TacheCreate] Structure client assignée: {site_found.structure_client}")
+            # Legacy: Assigner id_client si non fourni
+            if ('id_client' not in validated_data or validated_data.get('id_client') is None):
+                if hasattr(site_found, 'client') and site_found.client:
+                    validated_data['id_client'] = site_found.client
+                    print(f"✅ [TacheCreate] Client assigné: {site_found.client}")
+        else:
+            print(f"⚠️ [TacheCreate] Aucun site trouvé! objets={len(objets) if objets else 0}, reclamation={validated_data.get('reclamation')}")
 
         instance = super().create(validated_data)
         if current_user:
@@ -550,6 +718,12 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         start_total = time.time()
         print(f"[PERF] UPDATE START - Tache #{instance.id}")
 
+        # ✅ DEBUG: Capturer le statut explicite AVANT tout pop
+        statut_explicite_initial = validated_data.get('statut')
+        print(f"[DEBUG] Statut explicite reçu: {statut_explicite_initial}")
+        print(f"[DEBUG] Statut actuel instance: {instance.statut}")
+        print(f"[DEBUG] validated_data keys: {list(validated_data.keys())}")
+
         # Extract metadata
         current_user = validated_data.pop('_current_user', None)
         if current_user:
@@ -566,10 +740,12 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         recurrence_config = validated_data.pop('recurrence_config', None)
 
         print(f"[PERF] Extracted M2M - equipes: {len(equipes) if equipes else 0}, objets: {len(objets) if objets else 0}")
+        print(f"[DEBUG] validated_data après pops: {validated_data}")
 
         start_super = time.time()
         instance = super().update(instance, validated_data)
         print(f"[PERF] super().update() took {time.time() - start_super:.2f}s")
+        print(f"[DEBUG] Statut après super().update(): {instance.statut}")
 
         # Set M2M relationships
         if equipes is not None:
@@ -686,6 +862,29 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                         # reference sera auto-générée
                     )
                     print(f"✅ Nouvelle distribution #{new_dist.id} créée pour la date {new_dist.date}")
+
+        # ✅ SYNC STATUT: Synchroniser le statut stocké avec le statut calculé dynamiquement
+        # Ceci permet de replanifier automatiquement les tâches expirées
+        # ⚠️ IMPORTANT: Ne PAS synchroniser si le statut a été explicitement défini dans la requête
+        # (ex: annulation manuelle, démarrage manuel, etc.)
+        # NOTE: On utilise statut_explicite_initial capturé au début de la méthode
+        print(f"[DEBUG] Vérification sync - statut_explicite_initial: {statut_explicite_initial}")
+        print(f"[DEBUG] Statut instance avant sync: {instance.statut}")
+
+        if statut_explicite_initial is None:
+            # Pas de statut explicite → synchronisation automatique autorisée
+            instance.refresh_from_db()  # Recharger pour avoir les distributions à jour
+            computed = instance.computed_statut
+            print(f"[DEBUG] computed_statut: {computed}")
+            if instance.statut != computed:
+                old_statut = instance.statut
+                instance.statut = computed
+                instance.save(update_fields=['statut'])
+                print(f"[SYNC STATUT] Tâche #{instance.id}: {old_statut} → {computed}")
+        else:
+            print(f"[SYNC STATUT] Statut explicite '{statut_explicite_initial}' → pas de synchronisation automatique")
+
+        print(f"[DEBUG] Statut final instance: {instance.statut}")
 
         print(f"[PERF] UPDATE TOTAL took {time.time() - start_total:.2f}s")
         return instance

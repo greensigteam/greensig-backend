@@ -164,8 +164,24 @@ class KPIView(APIView):
             taches_retard_critique = []
             taches_en_avance = 0
             taches_retard_1_7j = 0
+            taches_distributions_incompletes = []  # ✅ NOUVEAU: Tâches avec distributions non réalisées
 
-            for tache in queryset:
+            for tache in queryset.prefetch_related('distributions_charge'):
+                # ✅ NOUVEAU: Vérifier que TOUTES les distributions sont REALISEE
+                total_distributions = tache.distributions_charge.count()
+                distributions_realisees = tache.distributions_charge.filter(status='REALISEE').count()
+
+                # Si la tâche a des distributions mais pas toutes réalisées, elle n'est pas vraiment terminée
+                if total_distributions > 0 and distributions_realisees < total_distributions:
+                    taches_distributions_incompletes.append({
+                        'id': tache.id,
+                        'titre': getattr(tache, 'titre', f'Tâche #{tache.id}'),
+                        'total_distributions': total_distributions,
+                        'distributions_realisees': distributions_realisees,
+                        'pourcentage_realisation': round(distributions_realisees / total_distributions * 100, 1),
+                    })
+                    continue  # Ne pas compter cette tâche comme conforme
+
                 if tache.date_debut_reelle and tache.date_debut_planifiee and \
                    tache.date_fin_reelle and tache.date_fin_planifiee:
 
@@ -198,9 +214,17 @@ class KPIView(APIView):
                             'date_fin_reelle': tache.date_fin_reelle.strftime('%Y-%m-%d'),
                         })
 
-            # Calcul du taux
-            taux = (taches_conformes / total_planifiees * 100) if total_planifiees > 0 else 0
-            objectif_atteint = taux >= 95 and len(taches_retard_critique) == 0
+            # Calcul du taux (exclut les tâches avec distributions incomplètes)
+            taches_evaluees = total_planifiees - len(taches_distributions_incompletes)
+            taux = (taches_conformes / taches_evaluees * 100) if taches_evaluees > 0 else 0
+            objectif_atteint = taux >= 95 and len(taches_retard_critique) == 0 and len(taches_distributions_incompletes) == 0
+
+            # ✅ Messages d'alerte combinés
+            alertes = []
+            if taches_retard_critique:
+                alertes.append(f"{len(taches_retard_critique)} tâche(s) avec retard > 7 jours")
+            if taches_distributions_incompletes:
+                alertes.append(f"{len(taches_distributions_incompletes)} tâche(s) marquées terminées mais distributions incomplètes")
 
             return {
                 'valeur': round(taux, 1),
@@ -209,14 +233,17 @@ class KPIView(APIView):
                 'objectif_atteint': objectif_atteint,
                 'details': {
                     'total_planifiees': total_planifiees,
+                    'taches_evaluees': taches_evaluees,  # ✅ Tâches réellement évaluées
                     'taches_conformes': taches_conformes,
                     'taches_en_avance': taches_en_avance,
                     'taches_retard_1_7j': taches_retard_1_7j,
                     'taches_retard_critique': len(taches_retard_critique),
+                    'taches_distributions_incompletes': len(taches_distributions_incompletes),  # ✅ NOUVEAU
                     'details_retards_critiques': taches_retard_critique[:10],  # Top 10
+                    'details_distributions_incompletes': taches_distributions_incompletes[:10],  # ✅ NOUVEAU: Top 10
                 },
-                'alerte': len(taches_retard_critique) > 0,
-                'message_alerte': f"{len(taches_retard_critique)} tâche(s) avec retard > 7 jours" if taches_retard_critique else None,
+                'alerte': len(alertes) > 0,
+                'message_alerte': ' | '.join(alertes) if alertes else None,
             }
         except Exception as e:
             import traceback
@@ -417,26 +444,10 @@ class KPIView(APIView):
             details_par_site = {}  # ✅ NOUVEAU: Groupement par site uniquement
             details_par_site_type = {}  # Groupement par site ET type
 
-            for tache in queryset.select_related('id_type_tache').prefetch_related('objets', 'reclamation', 'distributions_charge'):
-                # ✅ CORRECTION: Utiliser les heures réelles des distributions de charge
-                heures_reelles = tache.distributions_charge.filter(
-                    status='REALISEE'
-                ).aggregate(
-                    total=Sum('heures_reelles')
-                )['total']
-
-                # Fallback 1: Si pas d'heures réelles, prendre les heures planifiées
-                if heures_reelles is None or heures_reelles == 0:
-                    heures_reelles = tache.distributions_charge.aggregate(
-                        total=Sum('heures_planifiees')
-                    )['total']
-
-                # Fallback 2: Si pas de distributions du tout, calcul approximatif (legacy)
-                if heures_reelles is None or heures_reelles == 0:
-                    delta = tache.date_fin_reelle - tache.date_debut_reelle
-                    heures_reelles = (delta.days + 1) * 8  # 1 jour = 8 heures
-
-                heures = heures_reelles
+            for tache in queryset.select_related('id_type_tache').prefetch_related('objets', 'reclamation', 'distributions_charge', 'participations'):
+                # ✅ NOUVEAU: Utiliser temps_travail_total (Option 2: Approche Hybride)
+                temps_travail = tache.temps_travail_total
+                heures = temps_travail['heures']
                 durees.append(heures)
 
                 # Type de tâche
@@ -611,31 +622,14 @@ class KPIView(APIView):
             sites_heures = {}
             total_heures = 0
 
-            for tache in queryset.prefetch_related('objets', 'reclamation', 'distributions_charge'):
-                # ✅ CORRECTION: Utiliser les heures réelles des distributions de charge
-                heures_reelles = tache.distributions_charge.filter(
-                    status='REALISEE'
-                ).aggregate(
-                    total=Sum('heures_reelles')
-                )['total']
+            for tache in queryset.prefetch_related('objets', 'reclamation', 'distributions_charge', 'participations'):
+                # ✅ NOUVEAU: Utiliser temps_travail_total (Option 2: Approche Hybride)
+                temps_travail = tache.temps_travail_total
+                heures = temps_travail['heures']
 
-                # Fallback 1: Si pas d'heures réelles, prendre les heures planifiées
-                if heures_reelles is None or heures_reelles == 0:
-                    heures_reelles = tache.distributions_charge.aggregate(
-                        total=Sum('heures_planifiees')
-                    )['total']
-
-                # Fallback 2: Si pas de distributions du tout, calcul approximatif (legacy)
-                if heures_reelles is None or heures_reelles == 0:
-                    if tache.date_debut_reelle and tache.date_fin_reelle:
-                        delta = tache.date_fin_reelle - tache.date_debut_reelle
-                        heures_reelles = (delta.days + 1) * 8  # 1 jour = 8 heures
-
-                # Si toujours pas de valeur, passer cette tâche
-                if heures_reelles is None or heures_reelles == 0:
+                # Si aucune donnée, passer cette tâche
+                if heures == 0:
                     continue
-
-                heures = heures_reelles
 
                 # Identifier le site
                 site = None

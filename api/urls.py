@@ -48,6 +48,8 @@ from .views import (
     GeometryValidateView,
     GeometryCalculateView,
     GeometryBufferView,
+    # Objets dans une géométrie
+    ObjectsInGeometryView,
 )
 from .site_statistics_view import SiteStatisticsView
 from .reporting_view import ReportingView
@@ -111,6 +113,11 @@ urlpatterns = [
     path('geometry/validate/', GeometryValidateView.as_view(), name='geometry-validate'),
     path('geometry/calculate/', GeometryCalculateView.as_view(), name='geometry-calculate'),
     path('geometry/buffer/', GeometryBufferView.as_view(), name='geometry-buffer'),
+
+    # ==============================================================================
+    # OBJETS DANS UNE GÉOMÉTRIE (pour réclamations, etc.)
+    # ==============================================================================
+    path('objects-in-geometry/', ObjectsInGeometryView.as_view(), name='objects-in-geometry'),
 
     # ==============================================================================
     # INVENTAIRE UNIFIÉ (15 types combinés)

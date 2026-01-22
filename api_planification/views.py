@@ -323,7 +323,53 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+    @action(detail=False, methods=['post'], url_path='refresh-task-statuses')
+    def refresh_task_statuses(self, request):
+        """
+        Rafraîchit les statuts des tâches en retard et expirées.
+        POST /api/planification/taches/refresh-task-statuses/
 
+        Vérifie toutes les tâches PLANIFIEE/EN_RETARD et met à jour leurs statuts:
+        - PLANIFIEE → EN_RETARD si heure de début passée
+        - PLANIFIEE/EN_RETARD → EXPIREE si heure de fin passée
+
+        Returns:
+            - late_count: Nombre de tâches marquées en retard
+            - late_ids: Liste des IDs des tâches en retard
+            - expired_count: Nombre de tâches marquées expirées
+            - expired_ids: Liste des IDs des tâches expirées
+        """
+        # 1. D'abord marquer les tâches expirées (PLANIFIEE ou EN_RETARD → EXPIREE)
+        taches_potentiellement_expirees = Tache.objects.filter(
+            statut__in=['PLANIFIEE', 'EN_RETARD'],
+            deleted_at__isnull=True
+        )
+
+        expired_ids = []
+        for tache in taches_potentiellement_expirees:
+            if tache.mark_as_expired():
+                expired_ids.append(tache.id)
+
+        # 2. Ensuite marquer les tâches en retard (PLANIFIEE → EN_RETARD)
+        taches_planifiees = Tache.objects.filter(
+            statut='PLANIFIEE',
+            deleted_at__isnull=True
+        )
+
+        late_ids = []
+        for tache in taches_planifiees:
+            if tache.mark_as_late():
+                late_ids.append(tache.id)
+
+        total_updated = len(late_ids) + len(expired_ids)
+        return Response({
+            'message': f'{total_updated} tâche(s) mise(s) à jour ({len(late_ids)} en retard, {len(expired_ids)} expirée(s))',
+            'late_count': len(late_ids),
+            'late_ids': late_ids,
+            'expired_count': len(expired_ids),
+            'expired_ids': expired_ids,
+            'total_updated': total_updated
+        })
 
     @action(detail=True, methods=['post'])
     def update_distributions(self, request, pk=None):
@@ -477,8 +523,8 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
 
             # Vérifier que la réclamation est dans un statut approprié
             if reclamation.statut in ['EN_COURS', 'RESOLUE']:
-                # Récupérer toutes les tâches actives de cette réclamation
-                taches_reclamation = reclamation.taches_correctives.filter(actif=True)
+                # Récupérer toutes les tâches actives de cette réclamation (non soft-deleted)
+                taches_reclamation = reclamation.taches_correctives.filter(deleted_at__isnull=True)
 
                 # Vérifier si toutes les tâches sont terminées ET validées
                 toutes_terminees = not taches_reclamation.exclude(statut='TERMINEE').exists()
@@ -491,6 +537,100 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
                     response_data['nombre_taches_validees'] = taches_reclamation.count()
 
         return Response(response_data)
+
+    @action(detail=True, methods=['post'], url_path='set-temps-travail-manuel')
+    def set_temps_travail_manuel(self, request, pk=None):
+        """
+        Définit manuellement le temps de travail pour une tâche (OPTION 2: Approche Hybride).
+
+        POST /api/planification/taches/{id}/set-temps-travail-manuel/
+        Body: {
+            "heures": 8.5  # Nombre d'heures (float)
+        }
+
+        Permission: IsAdmin ou IsSuperviseur
+
+        Cette action permet de corriger manuellement le temps de travail calculé
+        automatiquement. Le temps manuel a la priorité absolue sur tous les calculs
+        automatiques.
+
+        Pour réinitialiser le calcul automatique, envoyer null ou supprimer avec
+        l'endpoint DELETE.
+        """
+        tache = self.get_object()
+
+        # Vérifier que la tâche est terminée
+        if tache.statut != 'TERMINEE':
+            return Response(
+                {'error': 'Seule une tâche terminée peut avoir un temps de travail manuel'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupérer les heures
+        heures = request.data.get('heures')
+
+        if heures is None:
+            return Response(
+                {'error': "Le champ 'heures' est requis"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Valider que heures est un nombre positif
+        try:
+            heures = float(heures)
+            if heures < 0:
+                return Response(
+                    {'error': 'Le nombre d\'heures doit être positif ou zéro'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Le nombre d\'heures doit être un nombre valide'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Mettre à jour la tâche
+        tache.temps_travail_manuel = heures
+        tache.temps_travail_manuel_par = request.user
+        tache.temps_travail_manuel_date = timezone.now()
+        tache.save(update_fields=['temps_travail_manuel', 'temps_travail_manuel_par', 'temps_travail_manuel_date'])
+
+        # Récupérer le temps de travail calculé pour la réponse
+        temps_travail = tache.temps_travail_total
+
+        return Response({
+            'message': 'Temps de travail manuel enregistré avec succès',
+            'temps_travail_total': temps_travail
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['delete'], url_path='reset-temps-travail-manuel')
+    def reset_temps_travail_manuel(self, request, pk=None):
+        """
+        Réinitialise le temps de travail manuel et revient au calcul automatique.
+
+        DELETE /api/planification/taches/{id}/reset-temps-travail-manuel/
+
+        Permission: IsAdmin ou IsSuperviseur
+
+        Supprime la correction manuelle et permet au système de recalculer
+        automatiquement le temps de travail à partir des données disponibles
+        (heures_reelles, participations, charge_estimee, etc.)
+        """
+        tache = self.get_object()
+
+        # Réinitialiser les champs manuels
+        tache.temps_travail_manuel = None
+        tache.temps_travail_manuel_par = None
+        tache.temps_travail_manuel_date = None
+        tache.save(update_fields=['temps_travail_manuel', 'temps_travail_manuel_par', 'temps_travail_manuel_date'])
+
+        # Récupérer le temps de travail recalculé
+        temps_travail = tache.temps_travail_total
+
+        return Response({
+            'message': 'Temps de travail manuel réinitialisé (calcul automatique réactivé)',
+            'temps_travail_total': temps_travail
+        }, status=status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         tache = serializer.save(_current_user=self.request.user)
@@ -936,10 +1076,12 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         Logique automatique:
         - Si c'est la première distribution marquée comme réalisée
-        - Et que la tâche est en statut PLANIFIEE
+        - Et que la tâche est en statut PLANIFIEE ou EN_RETARD
         - Alors:
           * La tâche passe automatiquement en statut EN_COURS
           * La date_debut_reelle de la tâche est définie avec la date actuelle (aujourd'hui)
+          * Note: Pour les tâches EN_RETARD, cela permet de tracer le retard via la différence
+                  entre date_debut_planifiee et date_debut_reelle
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -958,9 +1100,10 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         distribution.save()
 
-        # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE,
+        # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE ou EN_RETARD,
         # passer la tâche en EN_COURS et définir la date de début réelle
-        if est_premiere_distribution and tache.statut == 'PLANIFIEE':
+        # Note: Permet de démarrer une tâche en retard pour la traçabilité
+        if est_premiere_distribution and tache.statut in ('PLANIFIEE', 'EN_RETARD'):
             tache.statut = 'EN_COURS'
             tache.date_debut_reelle = timezone.now().date()  # Date actuelle (aujourd'hui)
             tache.save()
@@ -969,8 +1112,8 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         return Response({
             'message': 'Distribution marquée comme réalisée',
             'distribution': serializer.data,
-            'tache_statut_modifie': est_premiere_distribution and tache.statut == 'EN_COURS',
-            'date_debut_reelle_definie': est_premiere_distribution and tache.date_debut_reelle is not None
+            'tache_statut_modifie': tache.statut == 'EN_COURS',  # Après modification
+            'date_debut_reelle_definie': tache.date_debut_reelle is not None
         }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='marquer-non-realisee')
@@ -983,7 +1126,8 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         - Si c'était la dernière distribution réalisée
         - Et que la tâche est en statut EN_COURS
         - Alors:
-          * La tâche repasse automatiquement en statut PLANIFIEE
+          * Si l'heure de début est passée → tâche passe en EN_RETARD
+          * Sinon → tâche passe en PLANIFIEE
           * La date_debut_reelle de la tâche est supprimée (remise à None)
         """
         distribution = self.get_object()
@@ -1002,18 +1146,46 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.save()
 
         # Si c'était la dernière distribution réalisée et que la tâche est EN_COURS,
-        # remettre la tâche en PLANIFIEE et supprimer la date de début réelle
+        # remettre la tâche en statut approprié (EN_RETARD si en retard, sinon PLANIFIEE)
+        # et supprimer la date de début réelle
+        nouveau_statut = None
         if est_derniere_distribution and tache.statut == 'EN_COURS':
-            tache.statut = 'PLANIFIEE'
             tache.date_debut_reelle = None
+
+            # Vérifier si la tâche devrait être EN_RETARD (heure de début passée)
+            # Note: On ne peut pas utiliser tache.is_late car il vérifie statut == PLANIFIEE
+            now = timezone.now()
+            today = now.date()
+            current_time = now.time()
+
+            should_be_late = False
+            distributions = list(tache.distributions_charge.order_by('date', 'heure_debut'))
+            if distributions:
+                first_dist = distributions[0]
+                if first_dist.date < today:
+                    should_be_late = True
+                elif first_dist.date == today and first_dist.heure_debut is not None:
+                    if current_time > first_dist.heure_debut:
+                        should_be_late = True
+            else:
+                # Pas de distributions → utiliser date_debut_planifiee
+                should_be_late = tache.date_debut_planifiee < today
+
+            if should_be_late:
+                tache.statut = 'EN_RETARD'
+                nouveau_statut = 'EN_RETARD'
+            else:
+                tache.statut = 'PLANIFIEE'
+                nouveau_statut = 'PLANIFIEE'
             tache.save()
 
         serializer = self.get_serializer(distribution)
         return Response({
             'message': 'Distribution marquée comme non réalisée',
             'distribution': serializer.data,
-            'tache_statut_modifie': est_derniere_distribution and tache.statut == 'PLANIFIEE',
-            'date_debut_reelle_supprimee': est_derniere_distribution and tache.date_debut_reelle is None
+            'tache_statut_modifie': nouveau_statut is not None,
+            'nouveau_statut': nouveau_statut,
+            'date_debut_reelle_supprimee': tache.date_debut_reelle is None
         }, status=status.HTTP_200_OK)
 
 

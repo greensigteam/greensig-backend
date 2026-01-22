@@ -185,7 +185,7 @@ class MonthlyReportView(APIView):
 
             taches = Tache.objects.filter(
                 deleted_at__isnull=True,
-                statut__in=['PLANIFIEE', 'NON_DEBUTEE'],
+                statut__in=['PLANIFIEE', 'EN_RETARD', 'EXPIREE'],
                 date_debut_planifiee__gte=next_period_start,
                 date_debut_planifiee__lte=next_period_end,
                 objets__site_id=site_id
@@ -207,44 +207,80 @@ class MonthlyReportView(APIView):
     def _get_equipes(self, site_id, date_debut, date_fin):
         """Équipes du site avec tous leurs membres et heures travaillées si disponibles."""
         try:
-            from api_planification.models import ParticipationTache
+            from api_planification.models import ParticipationTache, Tache
             from api_users.models import Operateur, Equipe, StatutOperateur
             from django.db.models import Sum
 
-            # 1. Récupérer les équipes - d'abord celles du site, sinon toutes les équipes actives
-            equipes = Equipe.objects.filter(
-                site_id=site_id,
-                actif=True
-            ).select_related('chef_equipe').prefetch_related('operateurs')
+            # 1. Récupérer les tâches terminées et validées sur la période FIRST
+            #    pour identifier les équipes qui ont RÉELLEMENT travaillé
+            taches_periode = Tache.objects.filter(
+                deleted_at__isnull=True,
+                statut='TERMINEE',
+                etat_validation='VALIDEE',
+                date_fin_reelle__gte=date_debut,
+                date_fin_reelle__lte=date_fin,
+                objets__site_id=site_id
+            ).distinct().prefetch_related(
+                'participations__id_operateur',
+                'distributions_charge',
+                'equipes'
+            )
 
-            # Si aucune équipe n'est affectée au site, récupérer toutes les équipes actives
-            if not equipes.exists():
-                print(f"[DEBUG] Aucune équipe affectée au site {site_id}, récupération de toutes les équipes actives")
+            # Récupérer les IDs de toutes les équipes qui ont travaillé sur ces tâches
+            equipes_ids_actives = set()
+            for tache in taches_periode:
+                for equipe in tache.equipes.all():
+                    equipes_ids_actives.add(equipe.id)
+
+            print(f"[DEBUG] Équipes qui ont travaillé sur le site (IDs): {equipes_ids_actives}")
+
+            # Récupérer TOUTES les équipes qui ont travaillé (même si non assignées au site)
+            if equipes_ids_actives:
                 equipes = Equipe.objects.filter(
+                    id__in=equipes_ids_actives
+                ).select_related('chef_equipe').prefetch_related('operateurs')
+            else:
+                # Fallback: équipes assignées au site
+                equipes = Equipe.objects.filter(
+                    site_id=site_id,
                     actif=True
                 ).select_related('chef_equipe').prefetch_related('operateurs')
 
             print(f"[DEBUG] Nombre d'équipes trouvées: {equipes.count()}")
+            print(f"[DEBUG] Équipes récupérées: {[eq.nom_equipe or f'Équipe {eq.id}' for eq in equipes]}")
 
-            # 2. Récupérer les heures travaillées par opérateur sur la période (si disponibles)
-            heures_par_operateur = {}
-            participations = ParticipationTache.objects.filter(
-                id_tache__date_fin_reelle__gte=date_debut,
-                id_tache__date_fin_reelle__lte=date_fin,
-                id_tache__statut='TERMINEE',
-                id_tache__etat_validation='VALIDEE',
-                id_tache__objets__site_id=site_id
-            ).values('id_operateur_id').annotate(
-                total_heures=Sum('heures_travaillees')
-            )
+            # 2. Calculer les heures RÉELLES par équipe (sans multiplication)
+            # Les heures d'une équipe = somme des heures des tâches qu'elle a effectuées
+            heures_par_equipe = {}
+            for tache in taches_periode:
+                temps_travail = tache.temps_travail_total
+                heures_tache = temps_travail['heures']
 
-            for p in participations:
-                if p['id_operateur_id']:
-                    heures_par_operateur[p['id_operateur_id']] = float(p['total_heures'] or 0)
+                # Chaque équipe qui a travaillé sur la tâche compte les heures UNE SEULE FOIS
+                equipes_tache = tache.equipes.all()
+                if equipes_tache:
+                    # Répartir les heures entre les équipes assignées
+                    heures_par_equipe_tache = heures_tache / len(equipes_tache)
+                    equipes_noms = [eq.nom_equipe or f'Équipe {eq.id}' for eq in equipes_tache]
+                    print(f"[DEBUG] Tâche #{tache.id} ({heures_tache}h) → {len(equipes_tache)} équipe(s): {equipes_noms}")
+                    for eq in equipes_tache:
+                        heures_par_equipe[eq.id] = heures_par_equipe.get(eq.id, 0) + heures_par_equipe_tache
+                else:
+                    print(f"[DEBUG] Tâche #{tache.id} ({heures_tache}h) → AUCUNE ÉQUIPE")
 
-            print(f"[DEBUG] Heures par opérateur: {heures_par_operateur}")
+            print(f"[DEBUG] Heures RÉELLES par équipe: {heures_par_equipe}")
+            print(f"[DEBUG] Somme des heures par équipe: {sum(heures_par_equipe.values())}h")
 
-            # 3. Construire le résultat avec toutes les équipes et tous leurs membres
+            # Calculer le total de TOUTES les tâches (pour comparaison)
+            total_heures_taches = sum(tache.temps_travail_total['heures'] for tache in taches_periode)
+            print(f"[DEBUG] Total heures de toutes les tâches: {total_heures_taches}h")
+
+            # Compter les tâches avec et sans équipes
+            taches_avec_equipes = sum(1 for tache in taches_periode if tache.equipes.exists())
+            taches_sans_equipes = len(taches_periode) - taches_avec_equipes
+            print(f"[DEBUG] Tâches avec équipes: {taches_avec_equipes}, sans équipes: {taches_sans_equipes}")
+
+            # 4. Construire le résultat avec toutes les équipes et tous leurs membres
             result = []
             for equipe in equipes:
                 # Nom du chef d'équipe
@@ -252,62 +288,117 @@ class MonthlyReportView(APIView):
                 if equipe.chef_equipe:
                     chef_nom = f"{equipe.chef_equipe.prenom} {equipe.chef_equipe.nom}".strip()
 
-                # Liste des opérateurs de l'équipe (utiliser l'enum StatutOperateur)
-                operateurs_list = []
-                heures_totales = 0
+                # IMPORTANT: heures_totales = heures RÉELLES de l'équipe (pas la somme des opérateurs)
+                heures_totales_equipe = heures_par_equipe.get(equipe.id, 0)
 
-                for op in equipe.operateurs.filter(statut=StatutOperateur.ACTIF):
+                # Calculer les heures INDIVIDUELLES par opérateur en tenant compte des absences
+                # Priorité 1: Utiliser les participations si disponibles (heures réelles enregistrées)
+                # Priorité 2: Répartir équitablement entre opérateurs NON ABSENTS
+                from api_users.models import Absence
+
+                heures_par_operateur_dict = {}
+                operateurs_actifs = equipe.operateurs.filter(statut=StatutOperateur.ACTIF)
+
+                # Récupérer les absences sur la période
+                absences = Absence.objects.filter(
+                    id_operateur__in=operateurs_actifs,
+                    date_debut__lte=date_fin,
+                    date_fin__gte=date_debut,
+                    statut='VALIDEE'
+                ).select_related('id_operateur')
+
+                # Set des IDs d'opérateurs absents
+                operateurs_absents_ids = set(abs.id_operateur_id for abs in absences)
+
+                # Compter les opérateurs PRÉSENTS (non absents)
+                operateurs_presents = [op for op in operateurs_actifs if op.id not in operateurs_absents_ids]
+                nb_operateurs_presents = len(operateurs_presents)
+
+                # Calculer les heures par opérateur en excluant les absents
+                heures_par_operateur_equipe = heures_totales_equipe / nb_operateurs_presents if nb_operateurs_presents > 0 else 0
+
+                print(f"[DEBUG] Équipe {equipe.nom_equipe}: {len(operateurs_actifs)} opérateurs, {len(operateurs_absents_ids)} absents, {nb_operateurs_presents} présents")
+
+                # Liste des opérateurs de l'équipe
+                operateurs_list = []
+
+                for op in operateurs_actifs:
                     op_nom = f"{op.prenom} {op.nom}".strip() or f"Opérateur {op.id}"
-                    heures = heures_par_operateur.get(op.id, 0)
+
+                    # Si opérateur absent sur la période → 0h
+                    if op.id in operateurs_absents_ids:
+                        heures = 0.0
+                    else:
+                        # Répartition équitable entre présents
+                        heures = heures_par_operateur_equipe
+
                     operateurs_list.append({
                         'id': op.id,
                         'nom': op_nom,
-                        'heures': heures,
+                        'heures': round(heures, 1),
+                        'absent': op.id in operateurs_absents_ids,  # Flag pour l'affichage
                     })
-                    heures_totales += heures
 
-                # Trier les opérateurs par heures (ceux avec des heures en premier)
-                operateurs_list.sort(key=lambda x: -x['heures'])
+                # Trier: présents en premier (par heures desc), puis absents
+                operateurs_list.sort(key=lambda x: (-x['heures'], x['nom']))
 
                 # Ajouter l'équipe avec son nom
                 equipe_nom = equipe.nom_equipe or f"Équipe {equipe.id}"
-                print(f"[DEBUG] Équipe: {equipe_nom}, {len(operateurs_list)} opérateurs")
+                print(f"[DEBUG] Équipe: {equipe_nom}, {len(operateurs_list)} opérateurs, {heures_totales_equipe}h ({heures_par_operateur_equipe}h/op)")
 
                 result.append({
                     'id': equipe.id,
                     'nom': equipe_nom,
                     'chef': chef_nom,
                     'operateurs': operateurs_list,
-                    'heures_totales': heures_totales,
+                    'heures_totales': round(heures_totales_equipe, 1),
                 })
 
-            # 4. Ajouter les opérateurs sans équipe qui ont travaillé sur le site
-            operateurs_sans_equipe = Operateur.objects.filter(
-                equipe__isnull=True,
-                statut=StatutOperateur.ACTIF,
-                id__in=heures_par_operateur.keys()
-            )
+            # 5. Ajouter les tâches sans équipe (si elles existent)
+            # Calculer les heures RÉELLES pour les tâches sans équipe
+            heures_totales_sans_equipe = 0
+            for tache in taches_periode:
+                # Vérifier si cette tâche n'a pas d'équipe assignée
+                if not tache.equipes.exists():
+                    temps_travail = tache.temps_travail_total
+                    heures_totales_sans_equipe += temps_travail['heures']
 
-            if operateurs_sans_equipe.exists():
+            # Si des tâches sans équipe existent, les ajouter au résultat
+            if heures_totales_sans_equipe > 0:
+                # Chercher les opérateurs sans équipe qui ont travaillé (via participations)
+                operateurs_sans_equipe = []
+                heures_par_op_sans_equipe = {}
+
+                for tache in taches_periode:
+                    if not tache.equipes.exists():
+                        participations = tache.participations.all()
+                        if participations:
+                            for part in participations:
+                                if part.id_operateur:
+                                    op = part.id_operateur
+                                    if op.equipe is None:  # Opérateur sans équipe
+                                        heures_par_op_sans_equipe[op.id] = heures_par_op_sans_equipe.get(op.id, 0) + part.heures_travaillees
+                                        if op not in operateurs_sans_equipe:
+                                            operateurs_sans_equipe.append(op)
+
                 ops_list = []
-                heures_totales = 0
                 for op in operateurs_sans_equipe:
                     op_nom = f"{op.prenom} {op.nom}".strip() or f"Opérateur {op.id}"
-                    heures = heures_par_operateur.get(op.id, 0)
+                    heures = heures_par_op_sans_equipe.get(op.id, 0)
                     ops_list.append({
                         'id': op.id,
                         'nom': op_nom,
-                        'heures': heures,
+                        'heures': round(heures, 1),
                     })
-                    heures_totales += heures
 
                 ops_list.sort(key=lambda x: -x['heures'])
+
                 result.append({
                     'id': None,
                     'nom': 'Sans équipe',
                     'chef': None,
                     'operateurs': ops_list,
-                    'heures_totales': heures_totales,
+                    'heures_totales': round(heures_totales_sans_equipe, 1),
                 })
 
             print(f"[DEBUG] Résultat final: {len(result)} équipes")
@@ -460,17 +551,23 @@ class MonthlyReportView(APIView):
             ).count()
 
             # Heures travaillées (uniquement des tâches validées sur ce site)
-            participations = ParticipationTache.objects.filter(
-                id_tache__date_fin_reelle__gte=date_debut,
-                id_tache__date_fin_reelle__lte=date_fin,
-                id_tache__statut='TERMINEE',
-                id_tache__etat_validation='VALIDEE',
-                id_tache__objets__site_id=site_id
-            ).distinct()
+            # ✅ LOGIQUE CORRIGÉE: Simple somme des heures de toutes les tâches
+            # Une tâche = ses heures (pas multiplication par nombre d'opérateurs)
+            taches_terminees_periode = Tache.objects.filter(
+                deleted_at__isnull=True,
+                statut='TERMINEE',
+                etat_validation='VALIDEE',
+                date_fin_reelle__gte=date_debut,
+                date_fin_reelle__lte=date_fin,
+                objets__site_id=site_id
+            ).distinct().prefetch_related('distributions_charge', 'participations')
 
-            heures_totales = participations.aggregate(
-                total=Sum('heures_travaillees')
-            )['total'] or 0
+            # Calculer le total simplement
+            heures_totales = 0
+            for tache in taches_terminees_periode:
+                temps_travail = tache.temps_travail_total
+                # Ajouter les heures de la tâche (PAS de multiplication)
+                heures_totales += temps_travail['heures']
 
             return {
                 'taches_planifiees': taches_planifiees,
