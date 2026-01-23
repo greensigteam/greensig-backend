@@ -50,6 +50,8 @@ from .views import (
     GeometryBufferView,
     # Objets dans une géométrie
     ObjectsInGeometryView,
+    # Statut des tâches Celery
+    TaskStatusView,
 )
 from .site_statistics_view import SiteStatisticsView
 from .reporting_view import ReportingView
@@ -172,6 +174,11 @@ urlpatterns = [
     path('gouttes/<int:pk>/', GoutteDetailView.as_view(), name='goutte-detail'),
     path('ballons/', BallonListCreateView.as_view(), name='tank-list'),
     path('ballons/<int:pk>/', TankDetailView.as_view(), name='tank-detail'),
+
+    # ==============================================================================
+    # STATUT DES TÂCHES CELERY (exports asynchrones)
+    # ==============================================================================
+    path('tasks/<str:task_id>/status/', TaskStatusView.as_view(), name='task-status'),
 
     # ==============================================================================
     # NOTIFICATIONS TEMPS REEL

@@ -510,7 +510,7 @@ class Tache(models.Model):
 
     def mark_as_expired(self):
         """
-        Marque la tâche comme expirée.
+        Marque la tâche comme expirée et annule les distributions actives.
         Appelé automatiquement quand l'heure de fin est dépassée sans démarrage.
 
         Returns:
@@ -519,43 +519,66 @@ class Tache(models.Model):
         if self.is_expired and self.statut in ('PLANIFIEE', 'EN_RETARD'):
             self.statut = 'EXPIREE'
             self.save(update_fields=['statut'])
+
+            # Synchroniser les distributions : annuler les actives
+            from api_planification.business_rules import synchroniser_distributions_apres_expiration_tache
+            synchroniser_distributions_apres_expiration_tache(self)
+
             return True
         return False
 
     def save(self, *args, **kwargs):
+        # Détecter les changements de statut pour la synchronisation des distributions
+        old_statut = None
+        if self.pk:
+            try:
+                old_instance = Tache.objects.filter(pk=self.pk).values('statut').first()
+                if old_instance:
+                    old_statut = old_instance['statut']
+            except Exception:
+                pass
+
         # Save first to get an ID if it's new
         is_new = self.pk is None
         super().save(*args, **kwargs)
-        
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # SYNCHRONISATION TÂCHE → DISTRIBUTIONS (quand statut change vers ANNULEE)
+        # ══════════════════════════════════════════════════════════════════════════
+        if old_statut and old_statut != 'ANNULEE' and self.statut == 'ANNULEE':
+            # La tâche vient d'être annulée → annuler les distributions actives
+            from api_planification.business_rules import synchroniser_distributions_apres_annulation_tache
+            synchroniser_distributions_apres_annulation_tache(self)
+
         # Now generate reference if it's empty
         if not self.reference:
             # Organisation (Client)
             org_code = "UNK"
             if self.id_structure_client:
-                org_code = (self.id_structure_client.nom[:3].upper() 
+                org_code = (self.id_structure_client.nom[:3].upper()
                            if self.id_structure_client.nom else "UNK")
             elif self.id_client and self.id_client.structure:
-                org_code = (self.id_client.structure.nom[:3].upper() 
+                org_code = (self.id_client.structure.nom[:3].upper()
                            if self.id_client.structure.nom else "UNK")
-            
+
             # Site (via premier objet ou vide)
             site_code = "GEN" # GEN = General
             first_obj = self.objets.first()
             if first_obj and first_obj.site:
-                site_code = (first_obj.site.nom_site[:3].upper() 
+                site_code = (first_obj.site.nom_site[:3].upper()
                             if first_obj.site.nom_site else "UNK")
-            
+
             # Type de tâche
             type_code = "UNK"
             if self.id_type_tache:
-                type_code = (self.id_type_tache.nom_tache[:3].upper() 
+                type_code = (self.id_type_tache.nom_tache[:3].upper()
                             if self.id_type_tache.nom_tache else "UNK")
-            
+
             self.reference = f"{org_code}-{site_code}-{type_code}-{self.id}"
             # Save the reference
             super().save(update_fields=['reference'])
-            
-            # Trigger updates for distributions if we just got a first reference? 
+
+            # Trigger updates for distributions if we just got a first reference?
             # (Usually distributions are created after task save)
 
     def delete(self, using=None, keep_parents=False):
@@ -567,6 +590,7 @@ class Tache(models.Model):
 class DistributionCharge(models.Model):
     """
     ✅ Distribution journalière de la charge pour tâches multi-jours.
+    Version 2.0 avec statuts avancés et support du report chaîné.
 
     Permet de planifier précisément combien d'heures sont allouées chaque jour
     pour une tâche qui s'étend sur plusieurs jours.
@@ -577,12 +601,44 @@ class DistributionCharge(models.Model):
         - 16/01 (Mar): 3.0h planifiées
         - 17/01 (Mer): 1.0h planifiées
 
-    Avantages:
-    - Planification précise par jour
-    - Calcul correct de la disponibilité des équipes
-    - Analyses statistiques justes (1 tâche = 1 entrée, pas N occurrences)
-    - Suivi de l'avancement jour par jour
+    Statuts disponibles:
+    - NON_REALISEE: État initial, travail à faire
+    - EN_COURS: Équipe sur le terrain
+    - REALISEE: Travail terminé avec succès
+    - REPORTEE: Décalée à une autre date (avec lien vers nouvelle distribution)
+    - ANNULEE: Définitivement abandonnée
+    - EN_RETARD: Date passée sans démarrage (calculé automatiquement)
+
+    Report chaîné:
+    - Maximum 5 reports consécutifs
+    - Traçabilité bidirectionnelle via distribution_origine/distribution_remplacement
     """
+
+    # ==============================================================================
+    # CHOIX DE STATUTS ET MOTIFS
+    # ==============================================================================
+
+    STATUT_CHOICES = [
+        ('NON_REALISEE', 'Non Réalisée'),
+        ('EN_COURS', 'En Cours'),
+        ('REALISEE', 'Réalisée'),
+        ('REPORTEE', 'Reportée'),
+        ('ANNULEE', 'Annulée'),
+        ('EN_RETARD', 'En Retard'),
+    ]
+
+    MOTIF_CHOICES = [
+        ('METEO', 'Conditions météorologiques'),
+        ('ABSENCE', 'Absence équipe'),
+        ('EQUIPEMENT', 'Problème équipement'),
+        ('CLIENT', 'Demande client'),
+        ('URGENCE', 'Réaffectation urgente'),
+        ('AUTRE', 'Autre motif'),
+    ]
+
+    # ==============================================================================
+    # RELATION AVEC LA TÂCHE
+    # ==============================================================================
 
     tache = models.ForeignKey(
         Tache,
@@ -590,6 +646,10 @@ class DistributionCharge(models.Model):
         related_name='distributions_charge',
         verbose_name="Tâche"
     )
+
+    # ==============================================================================
+    # CHAMPS PRINCIPAUX
+    # ==============================================================================
 
     date = models.DateField(
         verbose_name="Date",
@@ -628,21 +688,81 @@ class DistributionCharge(models.Model):
         help_text="Heure de fin de travail prévue (ex: 17:00)"
     )
 
-    # ✅ NOUVEAU: Statut de la distribution
-    STATUT_CHOICES = [
-        ('NON_REALISEE', 'Non Réalisée'),
-        ('REALISEE', 'Réalisée'),
-    ]
+    # ==============================================================================
+    # STATUT ET MOTIF
+    # ==============================================================================
 
     status = models.CharField(
         max_length=20,
         choices=STATUT_CHOICES,
         default='NON_REALISEE',
+        db_index=True,
         verbose_name="Statut",
         help_text="État de la distribution de charge"
     )
 
-    reference = models.CharField(max_length=120, unique=True, blank=True, null=True, db_index=True, verbose_name="Référence")
+    motif_report_annulation = models.CharField(
+        max_length=50,
+        choices=MOTIF_CHOICES,
+        blank=True,
+        verbose_name="Motif de report/annulation",
+        help_text="Raison du report ou de l'annulation"
+    )
+
+    # ==============================================================================
+    # HORODATAGE DES TRANSITIONS
+    # ==============================================================================
+
+    date_demarrage = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date/heure de démarrage",
+        help_text="Horodatage quand la distribution passe EN_COURS"
+    )
+
+    date_completion = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date/heure de complétion",
+        help_text="Horodatage quand la distribution passe REALISEE"
+    )
+
+    # ==============================================================================
+    # TRAÇABILITÉ DES REPORTS (CHAÎNE)
+    # ==============================================================================
+
+    distribution_origine = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='distributions_reportees',
+        verbose_name="Distribution d'origine",
+        help_text="Distribution dont celle-ci est le report"
+    )
+
+    distribution_remplacement = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='distribution_remplacee',
+        verbose_name="Distribution de remplacement",
+        help_text="Nouvelle distribution créée suite au report"
+    )
+
+    # ==============================================================================
+    # MÉTADONNÉES
+    # ==============================================================================
+
+    reference = models.CharField(
+        max_length=120,
+        unique=True,
+        blank=True,
+        null=True,
+        db_index=True,
+        verbose_name="Référence"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -654,12 +774,30 @@ class DistributionCharge(models.Model):
         ordering = ['date']
         indexes = [
             models.Index(fields=['tache', 'date']),
+            models.Index(fields=['status']),
+            models.Index(fields=['date', 'status']),
         ]
 
     def __str__(self):
-        return f"{self.reference or self.id}"
+        return f"{self.reference or self.id} ({self.get_status_display()})"
 
     def save(self, *args, **kwargs):
+        # ==============================================================================
+        # HORODATAGE AUTOMATIQUE DES TRANSITIONS
+        # ==============================================================================
+
+        # Si passage à EN_COURS et pas encore de date_demarrage
+        if self.status == 'EN_COURS' and not self.date_demarrage:
+            self.date_demarrage = timezone.now()
+
+        # Si passage à REALISEE et pas encore de date_completion
+        if self.status == 'REALISEE' and not self.date_completion:
+            self.date_completion = timezone.now()
+
+        # ==============================================================================
+        # GÉNÉRATION DE RÉFÉRENCE
+        # ==============================================================================
+
         # 1. Si nouvel objet (pas d'ID), on sauvegarde d'abord pour obtenir un ID
         is_new = self._state.adding or not self.id
         if is_new:
@@ -672,11 +810,11 @@ class DistributionCharge(models.Model):
             # Format: {TACHE_REF}-D{ID}
             # S'assurer que la tâche a une référence
             if not self.tache.reference:
-                self.tache.save() 
-            
+                self.tache.save()
+
             # Utiliser l'ID unique pour la référence
             self.reference = f"{self.tache.reference}-D{self.id}"
-            
+
             # Sauvegarder la nouvelle référence
             # Si c'était un nouvel objet, on a déjà tout sauvegardé, on update juste la ref
             if is_new:
@@ -687,6 +825,30 @@ class DistributionCharge(models.Model):
         # (Si c'était nouveau, on a déjà return plus haut)
         if not is_new:
             super().save(*args, **kwargs)
+
+    # ==============================================================================
+    # MÉTHODES DE TRAÇABILITÉ
+    # ==============================================================================
+
+    def get_chaine_reports(self) -> list:
+        """Retourne l'historique complet des reports pour cette distribution."""
+        from .business_rules import get_chaine_reports
+        return get_chaine_reports(self)
+
+    def get_distribution_finale(self):
+        """Retourne la distribution finale de la chaîne de reports."""
+        from .business_rules import get_distribution_finale
+        return get_distribution_finale(self)
+
+    def get_distribution_origine_racine(self):
+        """Retourne la distribution d'origine (première de la chaîne)."""
+        from .business_rules import get_distribution_origine
+        return get_distribution_origine(self)
+
+    def get_nombre_reports(self) -> int:
+        """Retourne le nombre de reports dans la chaîne."""
+        from .business_rules import compter_reports_chaine
+        return compter_reports_chaine(self)
 
     def calculer_heures_depuis_horaires(self):
         """

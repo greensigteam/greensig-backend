@@ -4,6 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.db.models import Q, Count
 from django.contrib.gis.geos import GEOSGeometry
+from celery.result import AsyncResult
 import json
 
 from .models import (
@@ -65,6 +66,41 @@ class GISObjectPermissionMixin:
 
         # Par défaut, aucun accès
         return queryset.none()
+
+
+# ==============================================================================
+# VUE POUR VÉRIFIER LE STATUT DES TÂCHES CELERY
+# ==============================================================================
+
+class TaskStatusView(APIView):
+    """
+    Vue pour vérifier le statut d'une tâche Celery asynchrone.
+
+    GET /api/tasks/<task_id>/status/
+
+    Retourne:
+    - status: PENDING, STARTED, SUCCESS, FAILURE, RETRY, REVOKED
+    - result: Résultat si SUCCESS, message d'erreur si FAILURE
+    - ready: True si la tâche est terminée
+    """
+
+    def get(self, request, task_id, *args, **kwargs):
+        result = AsyncResult(task_id)
+
+        response_data = {
+            'task_id': task_id,
+            'status': result.status,
+            'ready': result.ready(),
+        }
+
+        if result.ready():
+            if result.successful():
+                response_data['result'] = result.result
+            else:
+                # Tâche échouée
+                response_data['error'] = str(result.result) if result.result else 'Unknown error'
+
+        return Response(response_data)
 
 
 # ==============================================================================
@@ -682,8 +718,44 @@ class ExportPDFView(APIView):
     """
     Vue pour exporter la carte en PDF.
     Accepte les paramètres: title, mapImageBase64, visibleLayers, center, zoom
+
+    Mode async (recommandé pour les gros exports):
+    - Ajouter ?async=true ou "async": true dans le body
+    - Retourne un task_id pour suivre la progression
+    - Utiliser GET /api/tasks/<task_id>/status/ pour vérifier le statut
     """
     def post(self, request, *args, **kwargs):
+        # Récupérer les données du POST
+        title = request.data.get('title', 'Export Carte GreenSIG')
+        map_image_base64 = request.data.get('mapImageBase64', '')
+        visible_layers = request.data.get('visibleLayers', {})
+        center = request.data.get('center', [0, 0])
+        zoom = request.data.get('zoom', 15)
+        site_names = request.data.get('siteNames', [])
+
+        # Mode asynchrone ?
+        async_mode = request.data.get('async', request.query_params.get('async', 'false'))
+        is_async = str(async_mode).lower() in ('true', '1', 'yes')
+
+        if is_async:
+            # Exécuter en arrière-plan via Celery
+            from .tasks import export_pdf_async
+            task = export_pdf_async.delay(
+                user_id=request.user.id,
+                title=title,
+                map_image_base64=map_image_base64,
+                visible_layers=visible_layers,
+                center=center,
+                zoom=zoom,
+                site_names=site_names
+            )
+            return Response({
+                'task_id': task.id,
+                'status': 'PENDING',
+                'message': 'Export PDF démarré en arrière-plan. Utilisez /api/tasks/{task_id}/status/ pour suivre la progression.'
+            }, status=status.HTTP_202_ACCEPTED)
+
+        # Mode synchrone (comportement original)
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.pdfgen import canvas
         from reportlab.lib.units import cm
@@ -692,14 +764,6 @@ class ExportPDFView(APIView):
         from datetime import datetime
         import base64
         import io
-
-        # Récupérer les données du POST
-        title = request.data.get('title', 'Export Carte GreenSIG')
-        map_image_base64 = request.data.get('mapImageBase64', '')
-        visible_layers = request.data.get('visibleLayers', {})
-        center = request.data.get('center', [0, 0])
-        zoom = request.data.get('zoom', 15)
-        site_names = request.data.get('siteNames', [])  # Liste des noms de sites visibles
 
         # Créer le PDF en mémoire
         buffer = io.BytesIO()
@@ -924,7 +988,29 @@ class StatisticsView(APIView):
     - ADMIN: statistiques globales de tout le système
     - CLIENT: statistiques de ses sites uniquement
     - SUPERVISEUR: statistiques des sites qui lui sont affectés
+
+    Les statistiques sont mises en cache pendant 5 minutes pour améliorer les performances.
+    Ajouter ?refresh=true pour forcer le recalcul.
     """
+
+    def _get_cache_key(self, user):
+        """
+        Génère une clé de cache unique basée sur l'utilisateur et son rôle.
+        """
+        if not user or not user.is_authenticated:
+            return None
+
+        roles = sorted([ur.role.nom_role for ur in user.roles_utilisateur.all()])
+        role_key = '_'.join(roles) or 'norole'
+
+        # Pour CLIENT et SUPERVISEUR, inclure l'ID du profil
+        profile_id = ''
+        if 'CLIENT' in roles and hasattr(user, 'client_profile'):
+            profile_id = f'_client{user.client_profile.id}'
+        elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
+            profile_id = f'_sup{user.superviseur_profile.id}'
+
+        return f'stats_{role_key}{profile_id}_{user.id}'
 
     def _get_filtered_querysets(self, request):
         """
@@ -989,6 +1075,19 @@ class StatisticsView(APIView):
         from django.db.models import Count, Avg, Sum, Max, Min, Q
         from django.apps import apps
         from django.utils import timezone
+        from django.core.cache import cache
+        from django.conf import settings
+
+        # Vérifier si on force le rafraîchissement du cache
+        force_refresh = request.query_params.get('refresh', 'false').lower() in ('true', '1', 'yes')
+
+        # Vérifier le cache (sauf si refresh demandé)
+        cache_key = self._get_cache_key(request.user)
+        if cache_key and not force_refresh:
+            cached_stats = cache.get(cache_key)
+            if cached_stats:
+                cached_stats['cached'] = True
+                return Response(cached_stats)
 
         # Obtenir les querysets filtrés selon le rôle
         qs = self._get_filtered_querysets(request)
@@ -1135,6 +1234,12 @@ class StatisticsView(APIView):
                     print(f"Error calculating superviseur stats: {e}")
                     # Ne pas bloquer la réponse si erreur dans les stats spécifiques
 
+        # Mettre en cache les statistiques
+        if cache_key:
+            cache_timeout = getattr(settings, 'CACHE_TIMEOUT_STATISTICS', 300)
+            cache.set(cache_key, statistics, cache_timeout)
+            statistics['cached'] = False
+
         return Response(statistics)
 
 
@@ -1150,6 +1255,11 @@ class ExportDataView(APIView):
     - format: xlsx, geojson, kml, shp (défaut: xlsx)
     - ids: optionnel, liste d'IDs séparés par virgules pour export sélectif
     - filtres: optionnels (même syntaxe que les endpoints de liste)
+
+    Mode async (recommandé pour les gros exports):
+    - Ajouter ?async=true à l'URL
+    - Retourne un task_id pour suivre la progression
+    - Utiliser GET /api/tasks/<task_id>/status/ pour vérifier le statut
     """
 
     MODEL_MAPPING = {
@@ -1173,13 +1283,49 @@ class ExportDataView(APIView):
     }
 
     def get(self, request, model_name, *args, **kwargs):
-        from openpyxl import Workbook
-        from django.http import HttpResponse
-        from datetime import datetime
-
         # Vérifier que le modèle existe
         if model_name not in self.MODEL_MAPPING:
             return Response({'error': f'Modèle invalide: {model_name}'}, status=400)
+
+        # Mode asynchrone ?
+        async_mode = request.query_params.get('async', 'false')
+        is_async = str(async_mode).lower() in ('true', '1', 'yes')
+
+        if is_async:
+            # Récupérer les paramètres pour Celery
+            export_format = request.query_params.get('format', 'xlsx').lower()
+            ids_param = request.query_params.get('ids', '')
+            ids = None
+            if ids_param:
+                try:
+                    ids = [int(id.strip()) for id in ids_param.split(',') if id.strip()]
+                except ValueError:
+                    return Response({'error': 'ids parameter must be comma-separated integers'}, status=400)
+
+            filters = {}
+            site_id = request.query_params.get('site')
+            if site_id:
+                filters['site'] = site_id
+
+            # Exécuter en arrière-plan via Celery
+            from .tasks import export_data_async
+            task = export_data_async.delay(
+                user_id=request.user.id,
+                model_name=model_name,
+                export_format=export_format,
+                filters=filters if filters else None,
+                ids=ids
+            )
+            return Response({
+                'task_id': task.id,
+                'status': 'PENDING',
+                'message': f'Export {export_format.upper()} démarré en arrière-plan. Utilisez /api/tasks/{{task_id}}/status/ pour suivre la progression.'
+            }, status=status.HTTP_202_ACCEPTED)
+
+        # Mode synchrone (comportement original)
+        from openpyxl import Workbook
+        from django.http import HttpResponse
+        from datetime import datetime
 
         model_class = self.MODEL_MAPPING[model_name]
 

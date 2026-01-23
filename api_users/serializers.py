@@ -503,15 +503,18 @@ class CompetenceOperateurUpdateSerializer(serializers.ModelSerializer):
 
 class OperateurListSerializer(serializers.ModelSerializer):
     """
-    Serializer pour la liste des opérateurs (vue simplifiée).
+    ⚡ Serializer OPTIMISÉ pour la liste des opérateurs.
 
+    Utilise les données préchargées pour éviter N+1 queries.
     ⚠️ REFACTORISATION : Operateur est maintenant standalone (pas de lien utilisateur).
     """
     full_name = serializers.CharField(source='nom_complet', read_only=True)
     equipe_nom = serializers.CharField(source='equipe.nom_equipe', read_only=True, allow_null=True)
     superviseur_nom = serializers.CharField(source='superviseur.utilisateur.get_full_name', read_only=True, allow_null=True)
-    est_chef_equipe = serializers.BooleanField(read_only=True)
-    est_disponible = serializers.BooleanField(read_only=True)
+
+    # ⚡ OPTIMISÉ: Utilise les données préchargées
+    est_chef_equipe = serializers.SerializerMethodField()
+    est_disponible = serializers.SerializerMethodField()
     peut_etre_chef = serializers.SerializerMethodField()
 
     class Meta:
@@ -524,9 +527,35 @@ class OperateurListSerializer(serializers.ModelSerializer):
             'est_chef_equipe', 'est_disponible', 'peut_etre_chef'
         ]
 
+    def get_est_chef_equipe(self, obj):
+        """⚡ Utilise equipe_dirigee préchargé via select_related."""
+        # equipe_dirigee est préchargé, donc pas de requête supplémentaire
+        return hasattr(obj, 'equipe_dirigee') and obj.equipe_dirigee is not None and obj.equipe_dirigee.actif
+
+    def get_est_disponible(self, obj):
+        """⚡ Utilise absences_validees préchargées via Prefetch."""
+        from django.utils import timezone
+        from api_users.models import StatutOperateur
+
+        if obj.statut != StatutOperateur.ACTIF:
+            return False
+
+        today = timezone.now().date()
+
+        # Utiliser les absences préchargées si disponibles
+        if hasattr(obj, 'absences_validees'):
+            return not any(
+                a.date_debut <= today <= a.date_fin
+                for a in obj.absences_validees
+            )
+
+        # Fallback si pas préchargé
+        return obj.est_disponible
+
     def get_peut_etre_chef(self, obj):
-        """Retourne True si l'opérateur a la compétence 'Gestion d'équipe'."""
-        return obj.peut_etre_chef()
+        """Tout opérateur actif peut être nommé chef d'équipe."""
+        from api_users.models import StatutOperateur
+        return obj.statut == StatutOperateur.ACTIF
 
 
 class OperateurDetailSerializer(serializers.ModelSerializer):
@@ -674,14 +703,13 @@ class EquipeListSerializer(serializers.ModelSerializer):
     # superviseur_nom = ...  # SerializerMethodField avec query
     # tous_les_sites = ...  # Property avec queries
 
-    # ✅ RÉACTIVÉ avec annotation pour éviter N+1 queries
+    # ✅ Nombre de membres via annotation (pas de N+1)
     nombre_membres = serializers.IntegerField(source='nombre_membres_count', read_only=True, default=0)
 
-    # ✅ RÉACTIVÉ : Statut opérationnel (property du modèle)
-    # Note : Fait quelques queries mais nécessaire pour l'affichage dans la liste
-    statut_operationnel = serializers.CharField(read_only=True)
+    # ✅ OPTIMISÉ : Statut opérationnel (utilise données préchargées)
+    statut_operationnel = serializers.SerializerMethodField(read_only=True)
 
-    # ✅ RÉACTIVÉ : Nom du superviseur (via SerializerMethodField)
+    # ✅ OPTIMISÉ : Nom du superviseur (utilise select_related)
     superviseur_nom = serializers.SerializerMethodField(read_only=True)
 
     def get_sites_secondaires(self, obj):
@@ -693,10 +721,61 @@ class EquipeListSerializer(serializers.ModelSerializer):
         return [site.nom_site for site in obj.sites_secondaires.all()]
 
     def get_superviseur_nom(self, obj):
-        """Retourne le nom complet du superviseur (déduit du site principal)."""
-        if obj.superviseur and hasattr(obj.superviseur, 'utilisateur'):
-            return obj.superviseur.utilisateur.get_full_name()
+        """
+        ⚡ OPTIMISÉ: Utilise les données préchargées via select_related.
+        Le ViewSet précharge: site_principal__superviseur__utilisateur
+        """
+        # Priorité: site_principal (nouveau système)
+        if obj.site_principal and obj.site_principal.superviseur:
+            sup = obj.site_principal.superviseur
+            if hasattr(sup, 'utilisateur') and sup.utilisateur:
+                return sup.utilisateur.get_full_name()
+        # Fallback: site legacy
+        if obj.site and obj.site.superviseur:
+            sup = obj.site.superviseur
+            if hasattr(sup, 'utilisateur') and sup.utilisateur:
+                return sup.utilisateur.get_full_name()
         return None
+
+    def get_statut_operationnel(self, obj):
+        """
+        ⚡ OPTIMISÉ: Calcule le statut en utilisant les données préchargées.
+        Le ViewSet précharge: operateurs_actifs avec absences_validees
+        """
+        from django.utils import timezone
+        from api_users.models import StatutEquipe
+
+        today = timezone.now().date()
+
+        # Utiliser les données préchargées si disponibles
+        if hasattr(obj, 'operateurs_actifs'):
+            membres = obj.operateurs_actifs
+        else:
+            # Fallback si pas préchargé (ex: retrieve)
+            return obj.statut_operationnel
+
+        total = len(membres)
+        if total == 0:
+            return StatutEquipe.INDISPONIBLE
+
+        # Compter les membres disponibles (sans absence validée aujourd'hui)
+        disponibles = 0
+        for membre in membres:
+            # Utiliser les absences préchargées
+            absences = getattr(membre, 'absences_validees', [])
+            absence_aujourdhui = any(
+                a.date_debut <= today <= a.date_fin
+                for a in absences
+            )
+            if not absence_aujourdhui:
+                disponibles += 1
+
+        if disponibles == total:
+            return StatutEquipe.COMPLETE
+        elif disponibles > 0:
+            return StatutEquipe.PARTIELLE
+        else:
+            return StatutEquipe.INDISPONIBLE
 
     class Meta:
         model = Equipe

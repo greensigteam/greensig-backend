@@ -20,7 +20,13 @@ gunicorn==23.0.0
 whitenoise==6.8.2
 djangorestframework-simplejwt==5.5.0
 python-dateutil==2.9.0
+
 # Real-time notifications via Django Channels
 channels>=4.0.0
 channels-redis>=4.2.0
 daphne>=4.1.0
+
+# Celery - File de tâches distribuée
+celery[redis]>=5.3.6
+django-celery-beat>=2.6.0
+django-celery-results>=2.5.1

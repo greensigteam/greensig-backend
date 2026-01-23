@@ -98,6 +98,9 @@ INSTALLED_APPS = [
     'api_suivi_taches',
     'api_reclamations',
     'corsheaders',
+    # Celery
+    'django_celery_beat',
+    'django_celery_results',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -277,3 +280,42 @@ else:
             },
         },
     }
+
+# ==============================================================================
+# CELERY CONFIGURATION
+# ==============================================================================
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = 'django-db'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_ENABLE_UTC = True
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_RESULT_EXPIRES = 60 * 60 * 24 * 7  # Results expire after 7 days
+
+# Windows compatibility: use solo pool (no multiprocessing)
+if sys.platform == 'win32':
+    CELERY_WORKER_POOL = 'solo'
+
+# ==============================================================================
+# CACHE CONFIGURATION (Redis)
+# ==============================================================================
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': REDIS_URL,
+        'KEY_PREFIX': 'greensig',
+        'TIMEOUT': 300,  # 5 minutes par défaut
+        'OPTIONS': {
+            'db': '1',  # Utiliser DB 1 pour le cache (DB 0 pour Celery)
+        }
+    }
+}
+
+# Durées de cache spécifiques (en secondes)
+CACHE_TIMEOUT_STATISTICS = 5 * 60  # 5 minutes pour les statistiques
+CACHE_TIMEOUT_MAP_DATA = 2 * 60    # 2 minutes pour les données de carte
+CACHE_TIMEOUT_USER_PERMS = 10 * 60  # 10 minutes pour les permissions utilisateur

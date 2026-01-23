@@ -149,12 +149,18 @@ class EquipeLightSerializer(serializers.ModelSerializer):
 class DistributionChargeSerializer(serializers.ModelSerializer):
     """
     ✅ Serializer pour les distributions de charge journalières.
+    Version 2.0 avec statuts avancés et support du report chaîné.
 
     Permet de définir précisément la charge planifiée par jour
     pour des tâches s'étendant sur plusieurs jours.
     """
     # ✅ FIX: heures_planifiees est auto-calculé depuis heure_debut/heure_fin dans validate()
     heures_planifiees = serializers.FloatField(required=False)
+
+    # Champs calculés pour la traçabilité des reports
+    nombre_reports = serializers.SerializerMethodField(read_only=True)
+    est_report = serializers.SerializerMethodField(read_only=True)
+    a_remplacement = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = DistributionCharge
@@ -163,10 +169,34 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
             'heures_planifiees', 'heures_reelles',
             'heure_debut', 'heure_fin',
             'commentaire', 'status',
-            'reference', # ✅ NOUVEAU: Référence persistante
+            # Nouveaux champs v2
+            'motif_report_annulation',
+            'date_demarrage', 'date_completion',
+            'distribution_origine', 'distribution_remplacement',
+            # Champs calculés
+            'nombre_reports', 'est_report', 'a_remplacement',
+            'reference',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'reference',
+            'date_demarrage', 'date_completion',  # Horodatés automatiquement
+            'distribution_origine', 'distribution_remplacement',  # Gérés par les actions
+            'nombre_reports', 'est_report', 'a_remplacement',
+            'created_at', 'updated_at'
+        ]
+
+    def get_nombre_reports(self, obj) -> int:
+        """Retourne le nombre de reports dans la chaîne."""
+        return obj.get_nombre_reports() if obj.pk else 0
+
+    def get_est_report(self, obj) -> bool:
+        """Retourne True si cette distribution est issue d'un report."""
+        return obj.distribution_origine_id is not None if obj.pk else False
+
+    def get_a_remplacement(self, obj) -> bool:
+        """Retourne True si cette distribution a été reportée (a un remplacement)."""
+        return obj.distribution_remplacement_id is not None if obj.pk else False
 
     def get_fields(self):
         """Rendre 'tache' read-only uniquement lors de l'update"""
@@ -237,6 +267,106 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
             data['heures_planifiees'] = round(heures, 2) if heures > 0 else 0
 
         return data
+
+
+class DistributionChargeEnrichedSerializer(serializers.ModelSerializer):
+    """
+    Serializer enrichi pour les distributions avec les informations de la tâche associée.
+    Utilisé pour la vue "Distributions par jour" dans le suivi des tâches.
+    """
+    # Informations de la distribution
+    nombre_reports = serializers.SerializerMethodField(read_only=True)
+    est_report = serializers.SerializerMethodField(read_only=True)
+    a_remplacement = serializers.SerializerMethodField(read_only=True)
+
+    # Informations de la tâche (enrichissement)
+    tache_id = serializers.IntegerField(source='tache.id', read_only=True)
+    tache_titre = serializers.SerializerMethodField(read_only=True)
+    tache_type = serializers.SerializerMethodField(read_only=True)
+    tache_statut = serializers.CharField(source='tache.statut', read_only=True)
+    tache_site_nom = serializers.SerializerMethodField(read_only=True)
+    tache_equipes = serializers.SerializerMethodField(read_only=True)
+    tache_priorite = serializers.CharField(source='tache.priorite', read_only=True)
+    tache_reference = serializers.CharField(source='tache.reference', read_only=True, allow_null=True)
+
+    class Meta:
+        model = DistributionCharge
+        fields = [
+            'id', 'tache', 'date',
+            'heures_planifiees', 'heures_reelles',
+            'heure_debut', 'heure_fin',
+            'commentaire', 'status',
+            'motif_report_annulation',
+            'date_demarrage', 'date_completion',
+            'distribution_origine', 'distribution_remplacement',
+            'nombre_reports', 'est_report', 'a_remplacement',
+            'reference',
+            'created_at', 'updated_at',
+            # Champs enrichis de la tâche
+            'tache_id', 'tache_titre', 'tache_type', 'tache_statut',
+            'tache_site_nom', 'tache_equipes', 'tache_priorite', 'tache_reference'
+        ]
+        read_only_fields = fields  # Tout est read-only pour ce serializer de lecture
+
+    def get_nombre_reports(self, obj) -> int:
+        """Retourne le nombre de reports dans la chaîne."""
+        return obj.get_nombre_reports() if obj.pk else 0
+
+    def get_est_report(self, obj) -> bool:
+        """Retourne True si cette distribution est issue d'un report."""
+        return obj.distribution_origine_id is not None if obj.pk else False
+
+    def get_a_remplacement(self, obj) -> bool:
+        """Retourne True si cette distribution a été reportée (a un remplacement)."""
+        return obj.distribution_remplacement_id is not None if obj.pk else False
+
+    def get_tache_titre(self, obj) -> str:
+        """Retourne le titre de la tâche (type + reference)."""
+        tache = obj.tache
+        if tache:
+            type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else "Tâche"
+            ref = tache.reference or f"#{tache.id}"
+            return f"{type_nom} - {ref}"
+        return None
+
+    def get_tache_type(self, obj) -> str:
+        """Retourne le nom du type de tâche."""
+        tache = obj.tache
+        if tache and tache.id_type_tache:
+            return tache.id_type_tache.nom_tache
+        return None
+
+    def get_tache_site_nom(self, obj) -> str:
+        """Retourne le nom du premier site de la tâche (via les objets)."""
+        tache = obj.tache
+        if tache:
+            try:
+                # Utiliser les données prefetchées si disponibles
+                objets = getattr(tache, '_prefetched_objects_cache', {}).get('objets')
+                if objets is None:
+                    objets = list(tache.objets.all()[:1])
+                else:
+                    objets = list(objets)[:1]
+
+                if objets and objets[0].site:
+                    return objets[0].site.nom_site
+            except Exception:
+                pass
+        return None
+
+    def get_tache_equipes(self, obj) -> list:
+        """Retourne la liste des noms d'équipes assignées à la tâche."""
+        tache = obj.tache
+        if tache and hasattr(tache, 'equipes'):
+            try:
+                # Utiliser prefetch_related pour éviter N+1
+                equipes = getattr(tache, '_prefetched_objects_cache', {}).get('equipes')
+                if equipes is None:
+                    equipes = tache.equipes.all()
+                return [e.nom_equipe for e in equipes]
+            except Exception:
+                return []
+        return []
 
 
 class TacheSerializer(serializers.ModelSerializer):
@@ -324,6 +454,99 @@ class TacheSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tache
         fields = '__all__'
+
+
+class TacheListSerializer(serializers.ModelSerializer):
+    """
+    ⚡ Serializer OPTIMISÉ pour la LISTE des tâches (GET /taches/).
+
+    Évite les requêtes N+1 en utilisant:
+    - Le statut stocké au lieu de computed_statut
+    - Les données préchargées via prefetch_related
+    - Les annotations du queryset pour les agrégations
+
+    Le serializer complet (TacheSerializer) reste utilisé pour:
+    - GET /taches/{id}/ (détail)
+    - Les réponses après création/modification
+    """
+    # Relations préchargées (serializers minimaux)
+    client_detail = ClientLightSerializer(source='id_client', read_only=True)
+    structure_client_detail = StructureClientLightSerializer(source='id_structure_client', read_only=True)
+    type_tache_detail = TypeTacheSerializer(source='id_type_tache', read_only=True)
+    equipe_detail = EquipeMinimalSerializer(source='id_equipe', read_only=True)
+    equipes_detail = EquipeMinimalSerializer(source='equipes', many=True, read_only=True)
+    objets_detail = ObjetMinimalSerializer(source='objets', many=True, read_only=True)
+
+    reclamation_numero = serializers.CharField(source='reclamation.numero_reclamation', read_only=True, allow_null=True)
+
+    # ⚡ Site déduit depuis les données PRÉCHARGÉES (pas de requête supplémentaire)
+    site_id = serializers.SerializerMethodField()
+    site_nom = serializers.SerializerMethodField()
+
+    def get_site_id(self, obj):
+        """Utilise les objets préchargés pour éviter les requêtes N+1."""
+        # Utiliser le cache prefetch si disponible
+        objets_cache = getattr(obj, '_prefetched_objects_cache', {})
+        if 'objets' in objets_cache:
+            objets = objets_cache['objets']
+            if objets:
+                first_obj = objets[0]
+                if first_obj.site_id:
+                    return first_obj.site_id
+        # Fallback sur la réclamation (déjà select_related)
+        if obj.reclamation and obj.reclamation.site_id:
+            return obj.reclamation.site_id
+        return None
+
+    def get_site_nom(self, obj):
+        """Utilise les objets préchargés pour éviter les requêtes N+1."""
+        objets_cache = getattr(obj, '_prefetched_objects_cache', {})
+        if 'objets' in objets_cache:
+            objets = objets_cache['objets']
+            if objets:
+                first_obj = objets[0]
+                # site est préchargé via prefetch_related('objets__site')
+                if first_obj.site:
+                    return first_obj.site.nom_site
+        # Fallback sur la réclamation
+        if obj.reclamation and obj.reclamation.site:
+            return obj.reclamation.site.nom_site
+        return None
+
+    # ⚡ Distributions préchargées
+    distributions_charge = DistributionChargeSerializer(many=True, read_only=True)
+
+    # ⚡ Agrégations via ANNOTATIONS (calculées dans le queryset, pas par tâche)
+    # Les annotations sont nommées _annot_* pour éviter conflit avec les propriétés du modèle
+    charge_totale_distributions = serializers.SerializerMethodField()
+    nombre_jours_travail = serializers.SerializerMethodField()
+
+    def get_charge_totale_distributions(self, obj):
+        """Utilise l'annotation si disponible, sinon 0."""
+        return getattr(obj, '_annot_charge_totale', None) or 0.0
+
+    def get_nombre_jours_travail(self, obj):
+        """Utilise l'annotation si disponible, sinon 0."""
+        return getattr(obj, '_annot_nombre_jours', None) or 0
+
+    class Meta:
+        model = Tache
+        fields = [
+            'id', 'reference', 'id_structure_client', 'id_client', 'id_type_tache',
+            'id_equipe', 'equipes', 'date_debut_planifiee', 'date_fin_planifiee',
+            'date_echeance', 'priorite', 'commentaires', 'date_affectation',
+            'date_debut_reelle', 'date_fin_reelle', 'duree_reelle_minutes',
+            'charge_estimee_heures', 'charge_manuelle', 'description_travaux',
+            'statut', 'note_qualite', 'etat_validation', 'date_validation',
+            'validee_par', 'commentaire_validation', 'notifiee', 'confirmee',
+            'reclamation', 'deleted_at', 'date_creation', 'objets',
+            # Champs calculés/relations
+            'client_detail', 'structure_client_detail', 'type_tache_detail',
+            'equipe_detail', 'equipes_detail', 'objets_detail',
+            'reclamation_numero', 'site_id', 'site_nom',
+            'distributions_charge', 'charge_totale_distributions', 'nombre_jours_travail',
+        ]
+
 
 class TacheCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer pour CREATE/UPDATE"""
@@ -431,7 +654,7 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         # VALIDATION TERMINER (TERMINEE)
         # ══════════════════════════════════════════════════════════════════════════
         if nouveau_statut == 'TERMINEE' and self.instance:
-            # Impossible de terminer sans équipe assignée
+            # 1. Impossible de terminer sans équipe assignée
             equipes = data.get('equipes')
             if equipes is None:
                 has_equipe = self.instance.equipes.exists() or self.instance.equipe is not None
@@ -442,6 +665,16 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "statut": "Impossible de terminer la tâche sans équipe assignée. "
                               "Veuillez assigner au moins une équipe."
+                })
+
+            # 2. Impossible de terminer si des distributions sont encore actives
+            from .business_rules import valider_terminaison_tache
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                valider_terminaison_tache(self.instance)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError({
+                    "statut": str(e.message)
                 })
 
         # ══════════════════════════════════════════════════════════════════════════

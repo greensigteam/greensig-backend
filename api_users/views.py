@@ -870,9 +870,18 @@ class OperateurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewset
 
     Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
+    # ⚡ OPTIMISÉ: Précharger toutes les relations pour éviter N+1
     queryset = Operateur.objects.select_related(
-        'superviseur__utilisateur', 'equipe'
-    ).prefetch_related('competences_operateur__competence').all()
+        'superviseur__utilisateur', 'equipe', 'equipe_dirigee'  # ✅ Pour est_chef_equipe
+    ).prefetch_related(
+        'competences_operateur__competence',
+        # ✅ Pour est_disponible: précharger les absences validées d'aujourd'hui
+        Prefetch(
+            'absences',
+            queryset=Absence.objects.filter(statut='VALIDEE'),
+            to_attr='absences_validees'
+        )
+    ).all()
     filterset_class = OperateurFilter
 
     # Permissions par action
@@ -1135,13 +1144,26 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
 
     Le filtrage automatique est géré par RoleBasedQuerySetMixin.
     """
-    # ⚡ OPTIMISATION: Queryset simplifié pour la liste (était 22s → maintenant <1s)
-    # Les relations supplémentaires sont chargées uniquement pour retrieve()
+    # ⚡ OPTIMISATION: Précharger TOUTES les relations pour éviter N+1
     queryset = Equipe.objects.select_related(
         'chef_equipe',
-        'site_principal'  # ✅ Multi-site architecture: site principal
+        'site_principal',  # ✅ Multi-site architecture: site principal
+        'site_principal__superviseur__utilisateur',  # ✅ Pour superviseur_nom (évite N+1)
+        'site__superviseur__utilisateur',  # ✅ Legacy fallback
     ).prefetch_related(
-        'sites_secondaires'  # ✅ Multi-site architecture: sites secondaires
+        'sites_secondaires',  # ✅ Multi-site architecture: sites secondaires
+        # ✅ Pour statut_operationnel: précharger opérateurs + absences actives
+        Prefetch(
+            'operateurs',
+            queryset=Operateur.objects.filter(statut='ACTIF').prefetch_related(
+                Prefetch(
+                    'absences',
+                    queryset=Absence.objects.filter(statut='VALIDEE'),
+                    to_attr='absences_validees'
+                )
+            ),
+            to_attr='operateurs_actifs'
+        )
     ).annotate(
         nombre_membres_count=Count('operateurs', filter=Q(operateurs__statut='ACTIF'))
     ).all()
@@ -2144,14 +2166,53 @@ class StatistiquesUtilisateursView(APIView):
         }
 
         # Statistiques équipes (filtrées)
+        # ⚡ OPTIMISÉ: Calcul des statuts opérationnels en SQL au lieu de N+1 queries
         equipes_actives = qs['Equipe'].filter(actif=True)
+        equipes_count = equipes_actives.count()
+
+        # Annoter les équipes avec le nombre de membres actifs et disponibles
+        equipes_annotees = equipes_actives.annotate(
+            nb_membres_actifs=Count(
+                'operateurs',
+                filter=Q(operateurs__statut='ACTIF')
+            ),
+            nb_membres_absents=Count(
+                'operateurs',
+                filter=Q(
+                    operateurs__statut='ACTIF',
+                    operateurs__absences__statut='VALIDEE',
+                    operateurs__absences__date_debut__lte=today,
+                    operateurs__absences__date_fin__gte=today
+                )
+            )
+        ).values('nb_membres_actifs', 'nb_membres_absents')
+
+        # Calculer les statuts en Python à partir des annotations
+        completes = 0
+        partielles = 0
+        indisponibles = 0
+
+        for eq in equipes_annotees:
+            total = eq['nb_membres_actifs'] or 0
+            absents = eq['nb_membres_absents'] or 0
+            disponibles = total - absents
+
+            if total == 0:
+                indisponibles += 1
+            elif disponibles == total:
+                completes += 1
+            elif disponibles > 0:
+                partielles += 1
+            else:
+                indisponibles += 1
+
         stats_equipes = {
             'total': qs['Equipe'].count(),
-            'actives': equipes_actives.count(),
+            'actives': equipes_count,
             'statuts_operationnels': {
-                'completes': sum(1 for e in equipes_actives if e.statut_operationnel == 'COMPLETE'),
-                'partielles': sum(1 for e in equipes_actives if e.statut_operationnel == 'PARTIELLE'),
-                'indisponibles': sum(1 for e in equipes_actives if e.statut_operationnel == 'INDISPONIBLE'),
+                'completes': completes,
+                'partielles': partielles,
+                'indisponibles': indisponibles,
             }
         }
 

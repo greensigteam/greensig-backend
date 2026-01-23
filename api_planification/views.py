@@ -1,13 +1,22 @@
+from datetime import datetime
+import hashlib
+import json
 from django.db import models
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.cache import cache
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from .models import Tache, TypeTache, ParticipationTache, RatioProductivite, DistributionCharge
+
+# Constantes pour le cache
+CACHE_KEY_TACHES = 'taches_list_{user_id}_{params_hash}'
+CACHE_TIMEOUT_TACHES = 60  # 1 minute
 from .serializers import (
-    TacheSerializer, TacheCreateUpdateSerializer,
+    TacheSerializer, TacheListSerializer, TacheCreateUpdateSerializer,
     TypeTacheSerializer, ParticipationTacheSerializer,
     RatioProductiviteSerializer, DistributionChargeSerializer,
+    DistributionChargeEnrichedSerializer,
     DupliquerTacheSerializer, DupliquerTacheRecurrenceSerializer,
     DupliquerTacheDatesSpecifiquesSerializer, TacheRecurrenceResponseSerializer
 )
@@ -25,6 +34,23 @@ from .utils import (
 from rest_framework.pagination import PageNumberPagination
 from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
 from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur
+
+# Import des règles métier pour les distributions
+from .business_rules import (
+    valider_transition,
+    valider_motif,
+    valider_limite_reports,
+    get_chaine_reports,
+    synchroniser_tache_apres_demarrage,
+    synchroniser_tache_apres_completion,
+    synchroniser_tache_apres_annulation,
+    synchroniser_tache_apres_restauration,
+    etendre_tache_si_necessaire,
+    verifier_premiere_distribution_active,
+    verifier_equipe_assignee,
+    verifier_date_disponible,
+)
+from .constants import MOTIFS_VALIDES, ERROR_MESSAGES
 
 
 # ==============================================================================
@@ -178,7 +204,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
 
         Le soft-delete est géré par SoftDeleteMixin (exclut deleted_at != null).
         """
-        from django.db.models import Q, Prefetch
+        from django.db.models import Q, Prefetch, Sum, Count
         from api_users.models import Equipe
 
         # Appeler le mixin pour filtrage par rôle + soft-delete
@@ -190,7 +216,8 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             'id_structure_client',
             'id_type_tache',
             'id_equipe',  # Simplifié: pas de chaîne profonde
-            'reclamation'
+            'reclamation',
+            'reclamation__site'  # Pour site_id/site_nom fallback
         )
 
         # ⚡ PREFETCH MINIMAL: Seulement les infos utilisées par les serializers minimaux
@@ -200,6 +227,13 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             'equipes',  # Juste les IDs et noms (pas de relations supplémentaires)
             'objets__site',  # Site ID + nom seulement (via ObjetMinimalSerializer)
             'distributions_charge'  # ✅ Evite N+1 pour les distributions
+        )
+
+        # ⚡ ANNOTATIONS: Calculer les agrégations en une seule requête (pas N+1)
+        # Note: Préfixe "_annot" pour éviter conflit avec les propriétés du modèle
+        qs = qs.annotate(
+            _annot_charge_totale=Sum('distributions_charge__heures_planifiees'),
+            _annot_nombre_jours=Count('distributions_charge', filter=Q(distributions_charge__heures_planifiees__gt=0))
         )
 
         # Filtres optionnels via query params
@@ -242,7 +276,65 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return TacheCreateUpdateSerializer
-        return TacheSerializer
+        if self.action == 'list':
+            return TacheListSerializer  # ⚡ Serializer optimisé pour la liste
+        return TacheSerializer  # Serializer complet pour le détail
+
+    def _get_cache_key(self, request):
+        """Génère une clé de cache unique basée sur l'utilisateur et les filtres."""
+        user_id = request.user.id if request.user.is_authenticated else 'anon'
+        # Hash des query params pour différencier les filtres
+        params_str = json.dumps(dict(request.query_params), sort_keys=True)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
+        return CACHE_KEY_TACHES.format(user_id=user_id, params_hash=params_hash)
+
+    def list(self, request, *args, **kwargs):
+        """
+        ⚡ Liste des tâches avec cache Redis (1 minute).
+
+        Le cache est invalidé automatiquement par les tâches Celery
+        quand des statuts changent.
+        """
+        cache_key = self._get_cache_key(request)
+
+        # Essayer de récupérer depuis le cache
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
+        # Sinon, exécuter la requête normale
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        data = serializer.data
+
+        # Mettre en cache
+        cache.set(cache_key, data, CACHE_TIMEOUT_TACHES)
+
+        return Response(data)
+
+    def _invalidate_cache(self):
+        """Invalide le cache après modification d'une tâche."""
+        try:
+            # Tenter de supprimer toutes les clés de cache des tâches
+            cache.delete_pattern('greensig:taches_list_*')
+        except (AttributeError, Exception):
+            # Si delete_pattern n'est pas supporté, ignorer
+            pass
+
+    def perform_create(self, serializer):
+        """Invalide le cache après création."""
+        super().perform_create(serializer)
+        self._invalidate_cache()
+
+    def perform_update(self, serializer):
+        """Invalide le cache après modification."""
+        super().perform_update(serializer)
+        self._invalidate_cache()
+
+    def perform_destroy(self, instance):
+        """Invalide le cache après suppression."""
+        super().perform_destroy(instance)
+        self._invalidate_cache()
 
     def update(self, request, *args, **kwargs):
         """Override update pour retourner une réponse minimale (sans _detail fields lourds)."""
@@ -329,6 +421,8 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         Rafraîchit les statuts des tâches en retard et expirées.
         POST /api/planification/taches/refresh-task-statuses/
 
+        ⚡ OPTIMISÉ: Utilise des annotations SQL au lieu de requêtes N+1.
+
         Vérifie toutes les tâches PLANIFIEE/EN_RETARD et met à jour leurs statuts:
         - PLANIFIEE → EN_RETARD si heure de début passée
         - PLANIFIEE/EN_RETARD → EXPIREE si heure de fin passée
@@ -339,27 +433,76 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
             - expired_count: Nombre de tâches marquées expirées
             - expired_ids: Liste des IDs des tâches expirées
         """
-        # 1. D'abord marquer les tâches expirées (PLANIFIEE ou EN_RETARD → EXPIREE)
-        taches_potentiellement_expirees = Tache.objects.filter(
+        from django.db.models import Min, Max
+        from datetime import datetime, time
+
+        now = timezone.now()
+        today = now.date()
+        current_time = now.time()
+
+        # ⚡ OPTIMISATION: Annoter les tâches avec les dates/heures min/max des distributions
+        # Une seule requête au lieu de N requêtes
+        taches = Tache.objects.filter(
             statut__in=['PLANIFIEE', 'EN_RETARD'],
             deleted_at__isnull=True
+        ).annotate(
+            first_dist_date=Min('distributions_charge__date'),
+            first_dist_heure=Min('distributions_charge__heure_debut'),
+            last_dist_date=Max('distributions_charge__date'),
+            last_dist_heure=Max('distributions_charge__heure_fin')
+        ).values(
+            'id', 'statut', 'date_debut_planifiee', 'date_fin_planifiee',
+            'first_dist_date', 'first_dist_heure', 'last_dist_date', 'last_dist_heure'
         )
 
         expired_ids = []
-        for tache in taches_potentiellement_expirees:
-            if tache.mark_as_expired():
-                expired_ids.append(tache.id)
-
-        # 2. Ensuite marquer les tâches en retard (PLANIFIEE → EN_RETARD)
-        taches_planifiees = Tache.objects.filter(
-            statut='PLANIFIEE',
-            deleted_at__isnull=True
-        )
-
         late_ids = []
-        for tache in taches_planifiees:
-            if tache.mark_as_late():
-                late_ids.append(tache.id)
+
+        for tache in taches:
+            tache_id = tache['id']
+            statut = tache['statut']
+
+            # Déterminer les dates de début/fin effectives
+            first_date = tache['first_dist_date'] or tache['date_debut_planifiee']
+            first_heure = tache['first_dist_heure']
+            last_date = tache['last_dist_date'] or tache['date_fin_planifiee']
+            last_heure = tache['last_dist_heure']
+
+            # Vérifier si EXPIREE (dernière date/heure passée)
+            is_expired = False
+            if last_date:
+                if last_date < today:
+                    is_expired = True
+                elif last_date == today and last_heure and current_time > last_heure:
+                    is_expired = True
+
+            if is_expired:
+                expired_ids.append(tache_id)
+                continue  # Pas besoin de vérifier EN_RETARD
+
+            # Vérifier si EN_RETARD (première date/heure passée, mais pas expirée)
+            if statut == 'PLANIFIEE':
+                is_late = False
+                if first_date:
+                    if first_date < today:
+                        is_late = True
+                    elif first_date == today and first_heure and current_time > first_heure:
+                        is_late = True
+
+                if is_late:
+                    late_ids.append(tache_id)
+
+        # ⚡ Mise à jour en batch (2 requêtes au lieu de N)
+        if expired_ids:
+            Tache.objects.filter(id__in=expired_ids).update(statut='EXPIREE')
+            # Synchroniser les distributions des tâches expirées
+            DistributionCharge.objects.filter(
+                tache_id__in=expired_ids,
+                status__in=['NON_REALISEE', 'EN_RETARD']
+            ).update(status='ANNULEE', motif_report_annulation='AUTRE')
+
+        if late_ids:
+            Tache.objects.filter(id__in=late_ids).update(statut='EN_RETARD')
 
         total_updated = len(late_ids) + len(expired_ids)
         return Response({
@@ -908,55 +1051,81 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
     - SUPERVISEUR: Voit uniquement les distributions des tâches sur ses sites
     - CLIENT: Voit uniquement les distributions des tâches de sa structure
 
-    Filtres disponibles:
-    - ?tache={id} : Distributions pour une tâche spécifique
-    - ?date={YYYY-MM-DD} : Distributions pour une date spécifique
-    - ?date_debut={YYYY-MM-DD}&date_fin={YYYY-MM-DD} : Distributions dans une période
+    Filtres disponibles (via DistributionChargeFilter):
+    - ?status=EN_RETARD : Par statut
+    - ?status__in=NON_REALISEE,EN_RETARD : Plusieurs statuts
+    - ?actif=true : Distributions actives (NON_REALISEE, EN_COURS, EN_RETARD)
+    - ?en_retard=true : Uniquement en retard
+    - ?date=2024-01-15 : Date exacte
+    - ?date__gte=2024-01-01&date__lte=2024-01-31 : Période
+    - ?aujourd_hui=true : Distributions du jour
+    - ?semaine_courante=true : Distributions de la semaine
+    - ?tache=123 : Par tâche
+    - ?equipe=5 : Par équipe
+    - ?site=10 : Par site
+    - ?structure=3 : Par structure client
+    - ?priorite__gte=4 : Par priorité de la tâche
+    - ?urgent=true : Tâches urgentes (priorité >= 4)
+    - ?type_tache__nom=élagage : Par type de tâche
+    - ?est_report=true : Distributions issues d'un report
+    - ?search=keyword : Recherche textuelle
+    - ?ordering=-date : Tri
 
     Exemples:
-    - GET /api/planification/distributions/?tache=123
-    - GET /api/planification/distributions/?date=2024-01-15
-    - GET /api/planification/distributions/?date_debut=2024-01-15&date_fin=2024-01-20
+    - GET /api/planification/distributions/?status=EN_RETARD&aujourd_hui=true
+    - GET /api/planification/distributions/?equipe=5&actif=true
+    - GET /api/planification/distributions/?site=10&date__gte=2024-01-01
     """
+    from .filters import DistributionChargeFilter
+    from django_filters.rest_framework import DjangoFilterBackend
+
     queryset = DistributionCharge.objects.select_related('tache').all()
     serializer_class = DistributionChargeSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_class = DistributionChargeFilter
+
+    def get_serializer_class(self):
+        """
+        Utilise le serializer enrichi pour les actions de lecture (list, retrieve)
+        pour inclure les informations de la tâche associée.
+        """
+        if self.action in ['list', 'retrieve']:
+            return DistributionChargeEnrichedSerializer
+        return DistributionChargeSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()
-
-        # Filtrer par tâche
-        tache_id = self.request.query_params.get('tache')
-        if tache_id:
-            qs = qs.filter(tache_id=tache_id)
-
-        # Filtrer par date exacte
-        date = self.request.query_params.get('date')
-        if date:
-            qs = qs.filter(date=date)
-
-        # Filtrer par période
-        date_debut = self.request.query_params.get('date_debut')
-        date_fin = self.request.query_params.get('date_fin')
-        if date_debut:
-            qs = qs.filter(date__gte=date_debut)
-        if date_fin:
-            qs = qs.filter(date__lte=date_fin)
-
+        # Optimisation: prefetch les relations pour éviter N+1 queries
+        qs = qs.select_related(
+            'tache',
+            'tache__id_type_tache',
+        ).prefetch_related(
+            'tache__equipes',
+            'tache__objets__site'
+        )
         return qs.order_by('date')
 
     def get_permissions(self):
         """
         Permissions adaptées par action:
         - ADMIN: Tout
-        - SUPERVISEUR: CRUD pour ses équipes
-        - CLIENT: Lecture seule
+        - SUPERVISEUR: CRUD pour ses équipes + actions de statut
+        - CLIENT: Lecture seule + historique
         """
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'marquer_realisee', 'marquer_non_realisee']:
+        # Actions d'écriture (modification de statut)
+        actions_ecriture = [
+            'create', 'update', 'partial_update', 'destroy',
+            'demarrer', 'terminer', 'reporter', 'annuler', 'restaurer',
+            # Anciennes actions maintenues pour compatibilité
+            'marquer_realisee', 'marquer_non_realisee'
+        ]
+
+        if self.action in actions_ecriture:
             # Écriture: ADMIN ou SUPERVISEUR
             permission_classes = [permissions.IsAuthenticated, IsAdmin | IsSuperviseur]
         else:
-            # Lecture: Tous authentifiés
+            # Lecture (list, retrieve, historique): Tous authentifiés
             permission_classes = [permissions.IsAuthenticated]
 
         return [permission() for permission in permission_classes]
@@ -1186,6 +1355,430 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
             'tache_statut_modifie': nouveau_statut is not None,
             'nouveau_statut': nouveau_statut,
             'date_debut_reelle_supprimee': tache.date_debut_reelle is None
+        }, status=status.HTTP_200_OK)
+
+    # ==========================================================================
+    # NOUVELLES ACTIONS - SYSTÈME DE STATUTS AVANCÉ
+    # ==========================================================================
+
+    @action(detail=True, methods=['post'], url_path='demarrer')
+    def demarrer(self, request, pk=None):
+        """
+        Démarre une distribution de charge (NON_REALISEE/EN_RETARD → EN_COURS).
+
+        POST /api/planification/distributions/{id}/demarrer/
+
+        Transitions autorisées:
+        - NON_REALISEE → EN_COURS
+        - EN_RETARD → EN_COURS
+
+        Effets sur la tâche mère:
+        - Si c'est la première distribution démarrée et que la tâche est
+          PLANIFIEE/EN_RETARD/EXPIREE, la tâche passe en EN_COURS.
+        - date_debut_reelle est définie sur la tâche.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        distribution = self.get_object()
+        tache = distribution.tache
+        ancien_statut = distribution.status
+
+        # Valider la transition
+        try:
+            valider_transition(ancien_statut, 'EN_COURS')
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Vérifier si c'est la première distribution active
+        est_premiere = verifier_premiere_distribution_active(tache)
+
+        # Mettre à jour la distribution
+        distribution.status = 'EN_COURS'
+        distribution.date_demarrage = timezone.now()
+        distribution.save()
+
+        # Synchroniser la tâche mère
+        tache_modifiee = synchroniser_tache_apres_demarrage(tache, est_premiere)
+
+        serializer = self.get_serializer(distribution)
+        return Response({
+            'message': 'Distribution démarrée avec succès',
+            'distribution': serializer.data,
+            'ancien_statut': ancien_statut,
+            'nouveau_statut': 'EN_COURS',
+            'tache_synchronisee': tache_modifiee,
+            'tache_nouveau_statut': tache.statut if tache_modifiee else None
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='terminer')
+    def terminer(self, request, pk=None):
+        """
+        Termine une distribution de charge (EN_COURS → REALISEE).
+
+        POST /api/planification/distributions/{id}/terminer/
+
+        Body (optionnel):
+        {
+            "heures_reelles": 7.5  // Heures réellement travaillées
+        }
+
+        Transitions autorisées:
+        - EN_COURS → REALISEE
+
+        Effets sur la tâche mère:
+        - Si toutes les distributions sont terminées (REALISEE/ANNULEE),
+          la tâche passe en TERMINEE.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        distribution = self.get_object()
+        tache = distribution.tache
+        ancien_statut = distribution.status
+
+        # Valider la transition
+        try:
+            valider_transition(ancien_statut, 'REALISEE')
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Mettre à jour la distribution
+        distribution.status = 'REALISEE'
+        distribution.date_completion = timezone.now()
+
+        # Optionnellement, enregistrer les heures réelles
+        heures_reelles = request.data.get('heures_reelles')
+        if heures_reelles is not None:
+            try:
+                distribution.heures_reelles = float(heures_reelles)
+            except (ValueError, TypeError):
+                raise ValidationError({'heures_reelles': 'Doit être un nombre valide'})
+
+        distribution.save()
+
+        # Synchroniser la tâche mère
+        tache_modifiee = synchroniser_tache_apres_completion(tache)
+
+        serializer = self.get_serializer(distribution)
+        return Response({
+            'message': 'Distribution terminée avec succès',
+            'distribution': serializer.data,
+            'ancien_statut': ancien_statut,
+            'nouveau_statut': 'REALISEE',
+            'tache_synchronisee': tache_modifiee,
+            'tache_nouveau_statut': tache.statut if tache_modifiee else None
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='reporter')
+    def reporter(self, request, pk=None):
+        """
+        Reporte une distribution à une nouvelle date (→ REPORTEE + nouvelle distribution).
+
+        POST /api/planification/distributions/{id}/reporter/
+
+        Body:
+        {
+            "nouvelle_date": "2026-02-15",
+            "motif": "METEO",  // METEO, ABSENCE, EQUIPEMENT, CLIENT, URGENCE, AUTRE
+            "commentaire": "Pluie intense prévue"  // Optionnel
+        }
+
+        Transitions autorisées:
+        - NON_REALISEE → REPORTEE
+        - EN_RETARD → REPORTEE
+        - EN_COURS → ANNULEE (via annuler, pas reporter)
+
+        Règles:
+        - La nouvelle date doit être dans le futur
+        - Maximum 5 reports chaînés
+        - Une nouvelle distribution est créée automatiquement
+        - Les deux distributions sont liées (distribution_origine ↔ distribution_remplacement)
+
+        Effets sur la tâche mère:
+        - La date de fin peut être étendue si la nouvelle date dépasse
+        """
+        from rest_framework.exceptions import ValidationError
+        from datetime import datetime
+
+        distribution = self.get_object()
+        tache = distribution.tache
+        ancien_statut = distribution.status
+
+        # Récupérer les données
+        nouvelle_date_str = request.data.get('nouvelle_date')
+        motif = request.data.get('motif')
+        commentaire = request.data.get('commentaire', '')
+
+        # Validations
+        if not nouvelle_date_str:
+            raise ValidationError({'nouvelle_date': 'La nouvelle date est requise'})
+
+        try:
+            nouvelle_date = datetime.strptime(nouvelle_date_str, '%Y-%m-%d').date()
+        except ValueError:
+            raise ValidationError({'nouvelle_date': 'Format de date invalide (YYYY-MM-DD)'})
+
+        # Valider que la date est dans le futur
+        if nouvelle_date <= timezone.now().date():
+            raise ValidationError({'nouvelle_date': ERROR_MESSAGES['date_future_required']})
+
+        # Valider le motif
+        try:
+            valider_motif(motif, obligatoire=True)
+        except DjangoValidationError as e:
+            raise ValidationError({'motif': str(e)})
+
+        # Valider la transition
+        try:
+            valider_transition(ancien_statut, 'REPORTEE')
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Valider la limite de reports
+        try:
+            nombre_reports = valider_limite_reports(distribution)
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Vérifier que la date n'est pas déjà utilisée
+        if not verifier_date_disponible(tache, nouvelle_date):
+            raise ValidationError({
+                'nouvelle_date': ERROR_MESSAGES['date_conflict'].format(
+                    date=nouvelle_date.strftime('%d/%m/%Y')
+                )
+            })
+
+        # Créer la nouvelle distribution
+        nouvelle_distribution = DistributionCharge.objects.create(
+            tache=tache,
+            date=nouvelle_date,
+            heures_planifiees=distribution.heures_planifiees,
+            heure_debut=distribution.heure_debut,
+            heure_fin=distribution.heure_fin,
+            commentaire=f"Report de {distribution.date.strftime('%d/%m/%Y')} - {commentaire}".strip(),
+            status='NON_REALISEE',
+            distribution_origine=distribution
+        )
+
+        # Mettre à jour la distribution originale
+        distribution.status = 'REPORTEE'
+        distribution.motif_report_annulation = motif
+        distribution.commentaire = commentaire or distribution.commentaire
+        distribution.distribution_remplacement = nouvelle_distribution
+        distribution.save()
+
+        # Étendre la tâche si nécessaire
+        tache_etendue = etendre_tache_si_necessaire(tache, nouvelle_date)
+
+        serializer = self.get_serializer(distribution)
+        nouvelle_serializer = self.get_serializer(nouvelle_distribution)
+
+        return Response({
+            'message': f'Distribution reportée au {nouvelle_date.strftime("%d/%m/%Y")}',
+            'distribution_originale': serializer.data,
+            'nouvelle_distribution': nouvelle_serializer.data,
+            'ancien_statut': ancien_statut,
+            'motif': motif,
+            'nombre_reports_chaine': nombre_reports + 1,
+            'tache_etendue': tache_etendue
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='annuler')
+    def annuler(self, request, pk=None):
+        """
+        Annule une distribution de charge (→ ANNULEE).
+
+        POST /api/planification/distributions/{id}/annuler/
+
+        Body:
+        {
+            "motif": "CLIENT",  // METEO, ABSENCE, EQUIPEMENT, CLIENT, URGENCE, AUTRE
+            "commentaire": "Client a annulé la prestation"  // Optionnel
+        }
+
+        Transitions autorisées:
+        - NON_REALISEE → ANNULEE
+        - EN_RETARD → ANNULEE
+        - EN_COURS → ANNULEE
+
+        Effets sur la tâche mère:
+        - Si toutes les distributions sont ANNULEE → Tâche ANNULEE
+        - Si certaines REALISEE, reste ANNULEE → Tâche TERMINEE
+        - Si plus de distributions actives et aucune réalisée → PLANIFIEE
+        """
+        from rest_framework.exceptions import ValidationError
+
+        distribution = self.get_object()
+        tache = distribution.tache
+        ancien_statut = distribution.status
+
+        # Récupérer les données
+        motif = request.data.get('motif')
+        commentaire = request.data.get('commentaire', '')
+
+        # Valider le motif
+        try:
+            valider_motif(motif, obligatoire=True)
+        except DjangoValidationError as e:
+            raise ValidationError({'motif': str(e)})
+
+        # Valider la transition
+        try:
+            valider_transition(ancien_statut, 'ANNULEE')
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Mettre à jour la distribution
+        distribution.status = 'ANNULEE'
+        distribution.motif_report_annulation = motif
+        distribution.commentaire = commentaire or distribution.commentaire
+        distribution.save()
+
+        # Synchroniser la tâche mère
+        tache_modifiee, nouveau_statut_tache = synchroniser_tache_apres_annulation(tache)
+
+        serializer = self.get_serializer(distribution)
+        return Response({
+            'message': 'Distribution annulée',
+            'distribution': serializer.data,
+            'ancien_statut': ancien_statut,
+            'nouveau_statut': 'ANNULEE',
+            'motif': motif,
+            'tache_synchronisee': tache_modifiee,
+            'tache_nouveau_statut': nouveau_statut_tache if tache_modifiee else None
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='restaurer')
+    def restaurer(self, request, pk=None):
+        """
+        Restaure une distribution annulée (ANNULEE → NON_REALISEE).
+
+        POST /api/planification/distributions/{id}/restaurer/
+
+        Transitions autorisées:
+        - ANNULEE → NON_REALISEE
+
+        Restrictions:
+        - Impossible si la tâche mère est EXPIREE
+
+        Effets sur la tâche mère:
+        - Si la tâche était ANNULEE, elle repasse en PLANIFIEE
+        """
+        from rest_framework.exceptions import ValidationError
+
+        distribution = self.get_object()
+        tache = distribution.tache
+        ancien_statut = distribution.status
+
+        # Vérifier que la tâche n'est pas expirée
+        if tache.statut == 'EXPIREE':
+            raise ValidationError({
+                'detail': "Impossible de restaurer : la tâche a expiré. "
+                          "Vous devez d'abord prolonger la date de fin de la tâche."
+            })
+
+        # Valider la transition
+        try:
+            valider_transition(ancien_statut, 'NON_REALISEE')
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Mettre à jour la distribution
+        distribution.status = 'NON_REALISEE'
+        distribution.motif_report_annulation = ''  # Vider le motif (chaîne vide, pas None)
+        distribution.save()
+
+        # Synchroniser la tâche mère
+        tache_modifiee, nouveau_statut_tache = synchroniser_tache_apres_restauration(tache)
+
+        serializer = self.get_serializer(distribution)
+        return Response({
+            'message': 'Distribution restaurée',
+            'distribution': serializer.data,
+            'ancien_statut': ancien_statut,
+            'nouveau_statut': 'NON_REALISEE',
+            'tache_synchronisee': tache_modifiee,
+            'tache_nouveau_statut': nouveau_statut_tache if tache_modifiee else None
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='par-jour')
+    def par_jour(self, request):
+        """
+        Retourne les distributions pour une date donnée avec les détails des tâches.
+
+        GET /api/planification/distributions/par-jour/?date=2024-01-15
+
+        Paramètres:
+        - date (requis): Date au format YYYY-MM-DD
+
+        Retourne:
+        - Liste des distributions pour cette date
+        - Chaque distribution inclut les informations de sa tâche associée
+        - Trié par heure de début
+        """
+        date = request.query_params.get('date')
+
+        if not date:
+            return Response(
+                {'error': "Le paramètre 'date' est requis (format YYYY-MM-DD)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupérer les distributions avec filtrage par rôle (via get_queryset)
+        qs = self.get_queryset().filter(date=date)
+
+        # Optimisation: prefetch les relations pour éviter N+1
+        qs = qs.select_related(
+            'tache',
+            'tache__id_type_tache',
+        ).prefetch_related(
+            'tache__equipes',
+            'tache__objets__site'
+        ).order_by('heure_debut', 'tache__reference')
+
+        # Utiliser le serializer enrichi
+        serializer = DistributionChargeEnrichedSerializer(qs, many=True)
+
+        # Calculs statistiques
+        stats = {
+            'total': qs.count(),
+            'par_statut': {},
+            'heures_planifiees_total': 0
+        }
+
+        for d in qs:
+            status_key = d.status or 'NON_REALISEE'
+            stats['par_statut'][status_key] = stats['par_statut'].get(status_key, 0) + 1
+            stats['heures_planifiees_total'] += d.heures_planifiees or 0
+
+        return Response({
+            'date': date,
+            'distributions': serializer.data,
+            'statistiques': stats
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='historique')
+    def historique(self, request, pk=None):
+        """
+        Retourne l'historique complet des reports pour une distribution.
+
+        GET /api/planification/distributions/{id}/historique/
+
+        Retourne:
+        - La chaîne complète des distributions liées par reports
+        - De l'origine jusqu'à la distribution finale
+        - Avec tous les motifs et dates intermédiaires
+        """
+        distribution = self.get_object()
+
+        # Récupérer la chaîne de reports
+        chaine = get_chaine_reports(distribution)
+
+        return Response({
+            'distribution_id': distribution.id,
+            'nombre_reports': len(chaine) - 1,  # -1 car l'origine n'est pas un report
+            'chaine_reports': chaine,
+            'distribution_origine_id': chaine[0]['id'] if chaine else None,
+            'distribution_finale_id': chaine[-1]['id'] if chaine else None
         }, status=status.HTTP_200_OK)
 
 

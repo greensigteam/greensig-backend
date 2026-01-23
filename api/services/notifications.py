@@ -93,7 +93,8 @@ class NotificationService:
         recipients: List[Union[int, 'Utilisateur']],
         data: dict = None,
         priorite: str = 'normal',
-        acteur: Optional[Union[int, 'Utilisateur']] = None
+        acteur: Optional[Union[int, 'Utilisateur']] = None,
+        use_celery: bool = False
     ) -> bool:
         """
         Envoie une notification a un ou plusieurs utilisateurs.
@@ -106,22 +107,70 @@ class NotificationService:
             data: Donnees supplementaires (IDs, liens, etc.)
             priorite: low, normal, high, urgent
             acteur: Utilisateur qui a declenche la notification
+            use_celery: Si True, envoie en arriere-plan via Celery (recommande pour > 5 destinataires)
 
         Returns:
             True si au moins une notification a ete envoyee
         """
-        # logger.debug(f"NotificationService.send: type={type_notification} recipients={recipients}")
-
-        from api.models import Notification
-        from api_users.models import Utilisateur
-
         if not recipients:
             logger.warning("Aucun destinataire pour la notification")
             return False
 
+        # Normaliser les IDs recipients
+        recipient_ids = []
+        for r in recipients:
+            if hasattr(r, 'id'):
+                recipient_ids.append(r.id)
+            else:
+                recipient_ids.append(r)
+
+        # Si beaucoup de destinataires ou use_celery demande, utiliser Celery
+        if use_celery or len(recipient_ids) > 5:
+            try:
+                from api.tasks import send_notification_async
+                acteur_id = acteur.id if hasattr(acteur, 'id') else acteur
+                send_notification_async.delay(
+                    user_ids=recipient_ids,
+                    message=message,
+                    notification_type=type_notification,
+                    title=titre,
+                    data=data
+                )
+                logger.info(f"[NOTIF] Envoi async via Celery: {len(recipient_ids)} destinataires")
+                return True
+            except Exception as e:
+                logger.warning(f"Celery non disponible, fallback synchrone: {e}")
+                # Continuer en mode synchrone si Celery n'est pas disponible
+
+        # Mode synchrone optimise avec bulk_create
+        return NotificationService._send_batch_sync(
+            type_notification=type_notification,
+            titre=titre,
+            message=message,
+            recipient_ids=recipient_ids,
+            data=data,
+            priorite=priorite,
+            acteur=acteur
+        )
+
+    @staticmethod
+    def _send_batch_sync(
+        type_notification: str,
+        titre: str,
+        message: str,
+        recipient_ids: List[int],
+        data: dict = None,
+        priorite: str = 'normal',
+        acteur: Optional[Union[int, 'Utilisateur']] = None
+    ) -> bool:
+        """
+        Envoi synchrone optimise avec bulk_create pour les notifications en base.
+        """
+        from api.models import Notification
+        from api_users.models import Utilisateur
+
         data = data or {}
         channel_layer = NotificationService._get_channel_layer()
-        sent_count = 0
 
         # Recuperer l'acteur si c'est un ID
         acteur_instance = None
@@ -134,34 +183,132 @@ class NotificationService:
             else:
                 acteur_instance = acteur
 
-        for recipient in recipients:
+        # Recuperer tous les utilisateurs actifs en une seule requete
+        users = Utilisateur.objects.filter(
+            id__in=recipient_ids,
+            actif=True
+        ).only('id', 'email', 'prenom', 'nom')
+
+        if not users.exists():
+            logger.warning(f"Aucun utilisateur actif parmi {recipient_ids}")
+            return False
+
+        # Creer toutes les notifications en batch
+        notifications_to_create = []
+        user_map = {}
+        for user in users:
+            notification = Notification(
+                destinataire=user,
+                type_notification=type_notification,
+                titre=titre,
+                message=message,
+                priorite=priorite,
+                data=data,
+                acteur=acteur_instance,
+            )
+            notifications_to_create.append(notification)
+            user_map[user.id] = user
+
+        # Bulk create - beaucoup plus rapide que des creates individuels
+        created_notifications = Notification.objects.bulk_create(notifications_to_create)
+        logger.info(f"[NOTIF] {len(created_notifications)} notifications creees en batch")
+
+        # Envoyer via WebSocket (toujours individuel car chaque user a son groupe)
+        sent_count = 0
+        for notification in created_notifications:
+            user = notification.destinataire
+            group_name = NotificationService._get_user_group_name(user.id)
             try:
-                # Recuperer l'ID utilisateur
-                if hasattr(recipient, 'id'):
-                    user_id = recipient.id
-                else:
-                    user_id = recipient
-
-                # Recuperer l'utilisateur
-                try:
-                    user = Utilisateur.objects.get(id=user_id, actif=True)
-                except Utilisateur.DoesNotExist:
-                    logger.warning(f"Utilisateur {user_id} non trouve ou inactif")
-                    continue
-
-                # Creer la notification en base
-                notification = Notification.objects.create(
-                    destinataire=user,
-                    type_notification=type_notification,
-                    titre=titre,
-                    message=message,
-                    priorite=priorite,
-                    data=data,
-                    acteur=acteur_instance,
+                async_to_sync(channel_layer.group_send)(
+                    group_name,
+                    {
+                        'type': 'notification_message',
+                        'notification': notification.to_websocket_payload(),
+                    }
                 )
+                sent_count += 1
+            except Exception as e:
+                # L'utilisateur n'est peut-etre pas connecte - normal
+                sent_count += 1  # La notification est quand meme creee en base
 
-                # Envoyer via WebSocket
-                group_name = NotificationService._get_user_group_name(user_id)
+        return sent_count > 0
+
+    @staticmethod
+    def send_bulk(
+        notifications_data: List[dict],
+        use_celery: bool = True
+    ) -> int:
+        """
+        Envoie plusieurs notifications differentes en une seule operation.
+        Utile pour envoyer des notifications personnalisees a differents utilisateurs.
+
+        Args:
+            notifications_data: Liste de dicts avec les cles:
+                - type_notification
+                - titre
+                - message
+                - recipient_id (int)
+                - data (optionnel)
+                - priorite (optionnel, defaut: 'normal')
+                - acteur_id (optionnel)
+            use_celery: Si True, traite en arriere-plan via Celery
+
+        Returns:
+            Nombre de notifications creees
+        """
+        if not notifications_data:
+            return 0
+
+        # Si Celery demande, deleguer a une tache
+        if use_celery:
+            try:
+                from api.tasks import send_bulk_notifications_async
+                send_bulk_notifications_async.delay(notifications_data)
+                logger.info(f"[NOTIF] Envoi bulk async via Celery: {len(notifications_data)} notifications")
+                return len(notifications_data)
+            except Exception as e:
+                logger.warning(f"Celery non disponible pour bulk, fallback synchrone: {e}")
+
+        # Mode synchrone avec bulk_create
+        from api.models import Notification
+        from api_users.models import Utilisateur
+
+        # Collecter tous les IDs necessaires
+        recipient_ids = [n['recipient_id'] for n in notifications_data if 'recipient_id' in n]
+        acteur_ids = [n['acteur_id'] for n in notifications_data if n.get('acteur_id')]
+
+        # Charger tous les utilisateurs en une requete
+        all_user_ids = set(recipient_ids + acteur_ids)
+        users_map = {u.id: u for u in Utilisateur.objects.filter(id__in=all_user_ids)}
+
+        notifications_to_create = []
+        for notif_data in notifications_data:
+            recipient_id = notif_data.get('recipient_id')
+            recipient = users_map.get(recipient_id)
+            if not recipient or not recipient.actif:
+                continue
+
+            acteur = users_map.get(notif_data.get('acteur_id')) if notif_data.get('acteur_id') else None
+
+            notification = Notification(
+                destinataire=recipient,
+                type_notification=notif_data.get('type_notification', 'info'),
+                titre=notif_data.get('titre', ''),
+                message=notif_data.get('message', ''),
+                priorite=notif_data.get('priorite', 'normal'),
+                data=notif_data.get('data', {}),
+                acteur=acteur,
+            )
+            notifications_to_create.append(notification)
+
+        if notifications_to_create:
+            created = Notification.objects.bulk_create(notifications_to_create)
+            logger.info(f"[NOTIF] {len(created)} notifications creees en bulk")
+
+            # Envoyer via WebSocket
+            channel_layer = NotificationService._get_channel_layer()
+            for notification in created:
+                group_name = NotificationService._get_user_group_name(notification.destinataire_id)
                 try:
                     async_to_sync(channel_layer.group_send)(
                         group_name,
@@ -170,17 +317,12 @@ class NotificationService:
                             'notification': notification.to_websocket_payload(),
                         }
                     )
-                    logger.info(f"[DEBUG-NOTIF-WS] Notification envoyee via WebSocket a {user.email}: {titre}")
-                    sent_count += 1
-                except Exception as e:
-                    # L'utilisateur n'est peut-etre pas connecte
-                    logger.info(f"[DEBUG-NOTIF-WS] WebSocket NON DISPONIBLE pour {user.email} (mais creee en base): {e}")
-                    sent_count += 1  # La notification est quand meme creee en base
+                except Exception:
+                    pass  # WebSocket non disponible, normal
 
-            except Exception as e:
-                logger.error(f"Erreur envoi notification a {recipient}: {e}")
+            return len(created)
 
-        return sent_count > 0
+        return 0
 
     # =========================================================================
     # NOTIFICATIONS TACHES
