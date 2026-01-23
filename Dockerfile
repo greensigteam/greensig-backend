@@ -1,4 +1,4 @@
-# Dockerfile pour Django + GDAL/PostGIS sur Fly.io
+# Dockerfile pour Django + GDAL/PostGIS
 FROM python:3.12-slim-bookworm
 
 # Variables d'environnement
@@ -32,14 +32,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copier le code de l'application
 COPY . .
 
-# Copier et rendre exécutable le script d'entrypoint
-COPY entrypoint.sh /entrypoint.sh
-# Convertir les fins de ligne Windows (CRLF) en Unix (LF) et rendre exécutable
-RUN apt-get update && apt-get install -y dos2unix && \
-    dos2unix /entrypoint.sh && \
-    chmod +x /entrypoint.sh && \
-    rm -rf /var/lib/apt/lists/*
-
 # Collecter les fichiers statiques (variables temporaires pour le build uniquement)
 RUN SECRET_KEY=build-secret-key-not-for-production \
     DEBUG=False \
@@ -52,5 +44,6 @@ RUN SECRET_KEY=build-secret-key-not-for-production \
 # Exposer le port
 EXPOSE 8000
 
-# Script d'entrypoint qui gère les migrations et démarre Daphne
-ENTRYPOINT ["/entrypoint.sh"]
+# Commande par défaut : Daphne (ASGI server)
+# Peut être overridé par docker-compose pour celery worker/beat
+CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "greensig_web.asgi:application"]

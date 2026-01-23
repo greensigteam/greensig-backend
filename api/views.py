@@ -1,11 +1,13 @@
 # api/views.py
-from rest_framework import generics, status
+from rest_framework import generics, status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.db.models import Q, Count
 from django.contrib.gis.geos import GEOSGeometry
 from celery.result import AsyncResult
 import json
+
+from api_users.permissions import IsAdmin, IsAdminOrSuperviseur
 
 from .models import (
     Site, SousSite, Objet, Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee,
@@ -1250,6 +1252,9 @@ class StatisticsView(APIView):
 class ExportDataView(APIView):
     """
     Vue générique pour exporter les données en Excel, GeoJSON, KML ou Shapefile.
+
+    Permission: ADMIN ou SUPERVISEUR uniquement (export de données sensibles)
+
     Paramètres de requête:
     - model: nom du modèle (arbres, gazons, palmiers, etc.)
     - format: xlsx, geojson, kml, shp (défaut: xlsx)
@@ -1261,6 +1266,7 @@ class ExportDataView(APIView):
     - Retourne un task_id pour suivre la progression
     - Utiliser GET /api/tasks/<task_id>/status/ pour vérifier le statut
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     MODEL_MAPPING = {
         'sites': Site,
@@ -1471,6 +1477,9 @@ class ExportDataView(APIView):
 class InventoryExportExcelView(APIView):
     """
     Vue spécialisée pour l'export Excel professionnel de l'inventaire.
+
+    Permission: ADMIN ou SUPERVISEUR uniquement (export de données sensibles)
+
     Supporte:
     - Formatage professionnel (styles, couleurs, filtres Excel)
     - Export multi-types avec onglets séparés
@@ -1484,6 +1493,7 @@ class InventoryExportExcelView(APIView):
     - famille: famille botanique (optionnel)
     - search: recherche textuelle (optionnel)
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     MODEL_MAPPING = {
         'Arbre': Arbre,
@@ -1831,6 +1841,9 @@ class InventoryExportExcelView(APIView):
 class InventoryExportPDFView(APIView):
     """
     Vue pour l'export PDF professionnel de l'inventaire.
+
+    Permission: ADMIN ou SUPERVISEUR uniquement (export de données sensibles)
+
     Génère un document PDF avec:
     - En-tête avec logo et titre
     - Tableau formaté des données
@@ -1844,6 +1857,7 @@ class InventoryExportPDFView(APIView):
     - famille: famille botanique (optionnel)
     - search: recherche textuelle (optionnel)
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     MODEL_MAPPING = {
         'Arbre': Arbre,
@@ -2091,8 +2105,28 @@ class InventoryExportPDFView(APIView):
             # Données - Afficher TOUS les éléments
             data_rows = list(queryset.values(*fields))
 
-            # Construire le tableau
-            table_data = [headers]
+            # Style pour les cellules avec retour à la ligne
+            cell_style = ParagraphStyle(
+                'CellStyle',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=10,  # Espacement entre les lignes
+                wordWrap='CJK',  # Permet le retour à la ligne sur n'importe quel caractère
+            )
+
+            # Style pour l'en-tête (texte blanc sur fond vert)
+            header_cell_style = ParagraphStyle(
+                'HeaderCellStyle',
+                parent=styles['Normal'],
+                fontSize=9,
+                leading=11,
+                textColor=colors.whitesmoke,
+                fontName='Helvetica-Bold',
+                alignment=TA_CENTER,
+            )
+
+            # Construire le tableau avec des Paragraph pour le retour à la ligne
+            table_data = [[Paragraph(str(h), header_cell_style) for h in headers]]
 
             for row_data in data_rows:
                 row = []
@@ -2107,7 +2141,8 @@ class InventoryExportPDFView(APIView):
                     else:
                         value = str(value)
 
-                    row.append(value)
+                    # Utiliser Paragraph pour permettre le retour à la ligne automatique
+                    row.append(Paragraph(value, cell_style))
 
                 table_data.append(row)
 
@@ -2117,11 +2152,18 @@ class InventoryExportPDFView(APIView):
             stats_text = "Répartition: " + " | ".join([f"{k.capitalize()}: {v}" for k, v in etat_summary.items()])
 
             # Ajouter une ligne de statistiques à la fin du tableau
-            table_data.append([stats_text] + ['' for _ in range(len(fields) - 1)])
+            table_data.append([Paragraph(stats_text, cell_style)] + [Paragraph('', cell_style) for _ in range(len(fields) - 1)])
             stats_row_index = len(table_data) - 1
 
-            # Créer le tableau
-            col_widths = [3*cm] * len(fields)  # Largeur égale pour toutes les colonnes
+            # Créer le tableau avec des largeurs de colonnes adaptées
+            # Première colonne (nom/marque) plus large pour les textes longs
+            num_cols = len(fields)
+            if num_cols >= 5:
+                # Format typique: Nom(5cm), Famille(3cm), Taille/Surface(2.5cm), Site(4cm), État(2.5cm)
+                col_widths = [5*cm] + [3*cm] * (num_cols - 3) + [4*cm, 2.5*cm]
+            else:
+                col_widths = [4*cm] * num_cols
+
             table = Table(table_data, colWidths=col_widths, repeatRows=1)  # repeatRows=1 pour répéter l'en-tête sur chaque page
 
             # Style du tableau
@@ -3286,6 +3328,8 @@ class GeoImportPreviewView(APIView):
     POST /api/import/preview/
     Content-Type: multipart/form-data
 
+    Permission: ADMIN uniquement (import de données sensibles)
+
     Body:
         - file: The geo file (GeoJSON, KML, KMZ, or ZIP with Shapefile)
         - format: 'geojson' | 'kml' | 'shapefile' (auto-detected if not provided)
@@ -3308,6 +3352,7 @@ class GeoImportPreviewView(APIView):
             "errors": []
         }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
@@ -3379,6 +3424,8 @@ class GeoImportValidateView(APIView):
 
     POST /api/import/validate/
 
+    Permission: ADMIN uniquement (import de données sensibles)
+
     Body:
         {
             "features": [...],  // From preview response
@@ -3404,6 +3451,7 @@ class GeoImportValidateView(APIView):
             ]
         }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
 
     def post(self, request):
         features = request.data.get('features', [])
@@ -3623,6 +3671,8 @@ class GeoImportExecuteView(APIView):
 
     POST /api/import/execute/
 
+    Permission: ADMIN uniquement (création de données en masse)
+
     Body:
         {
             "features": [...],
@@ -3646,6 +3696,7 @@ class GeoImportExecuteView(APIView):
             }
         }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
 
     def post(self, request):
         features = request.data.get('features', [])
@@ -3813,6 +3864,8 @@ class GeometrySimplifyView(APIView):
     POST /api/geometry/simplify/
     Simplifie une géométrie en réduisant le nombre de sommets.
 
+    Permission: ADMIN ou SUPERVISEUR uniquement (modification de données GIS)
+
     Request body:
     {
         "geometry": { GeoJSON geometry },
@@ -3831,6 +3884,7 @@ class GeometrySimplifyView(APIView):
         }
     }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     def post(self, request):
         geometry_data = request.data.get('geometry')
@@ -3868,6 +3922,8 @@ class GeometrySplitView(APIView):
     POST /api/geometry/split/
     Divise un polygone avec une ligne de coupe.
 
+    Permission: ADMIN ou SUPERVISEUR uniquement (modification de données GIS)
+
     Request body:
     {
         "polygon": { GeoJSON Polygon },
@@ -3884,6 +3940,7 @@ class GeometrySplitView(APIView):
         }
     }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     def post(self, request):
         polygon_data = request.data.get('polygon')
@@ -3922,6 +3979,8 @@ class GeometryMergeView(APIView):
     POST /api/geometry/merge/
     Fusionne plusieurs polygones en un seul.
 
+    Permission: ADMIN ou SUPERVISEUR uniquement (modification de données GIS)
+
     Request body:
     {
         "polygons": [ { GeoJSON Polygon }, { GeoJSON Polygon }, ... ]
@@ -3938,6 +3997,7 @@ class GeometryMergeView(APIView):
         }
     }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     def post(self, request):
         polygons_data = request.data.get('polygons', [])
@@ -4111,6 +4171,8 @@ class GeometryBufferView(APIView):
     POST /api/geometry/buffer/
     Crée un buffer (zone tampon) autour d'une géométrie.
 
+    Permission: ADMIN ou SUPERVISEUR uniquement (modification de données GIS)
+
     Request body:
     {
         "geometry": { GeoJSON geometry },
@@ -4128,6 +4190,7 @@ class GeometryBufferView(APIView):
         }
     }
     """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
 
     def post(self, request):
         geometry_data = request.data.get('geometry')

@@ -58,6 +58,24 @@ class IsClient(permissions.BasePermission):
         return request.user.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
 
 
+class IsAdminOrSuperviseur(permissions.BasePermission):
+    """
+    Permission : Utilisateur est ADMIN ou SUPERVISEUR.
+
+    Utilisé pour les actions d'écriture sur les tâches, distributions, etc.
+    Plus fiable que l'opérateur | (OR) qui peut avoir des comportements inattendus.
+    """
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Vérifier si l'utilisateur a le rôle ADMIN ou SUPERVISEUR
+        return request.user.roles_utilisateur.filter(
+            role__nom_role__in=['ADMIN', 'SUPERVISEUR']
+        ).exists()
+
+
 class IsAdminOrReadOnly(permissions.BasePermission):
     """
     Permission : ADMIN peut tout faire, les autres en lecture seule.

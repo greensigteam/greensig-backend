@@ -33,7 +33,7 @@ from .utils import (
 )
 from rest_framework.pagination import PageNumberPagination
 from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
-from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur
+from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur, IsAdminOrSuperviseur
 
 # Import des règles métier pour les distributions
 from .business_rules import (
@@ -184,11 +184,11 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
 
     # Permissions par action (RoleBasedPermissionMixin)
     permission_classes_by_action = {
-        'create': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
-        'update': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
-        'partial_update': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
-        'destroy': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
-        'update_distributions': [permissions.IsAuthenticated, IsAdmin | IsSuperviseur],
+        'create': [permissions.IsAuthenticated, IsAdminOrSuperviseur],
+        'update': [permissions.IsAuthenticated, IsAdminOrSuperviseur],
+        'partial_update': [permissions.IsAuthenticated, IsAdminOrSuperviseur],
+        'destroy': [permissions.IsAuthenticated, IsAdminOrSuperviseur],
+        'update_distributions': [permissions.IsAuthenticated, IsAdminOrSuperviseur],
         'valider': [permissions.IsAuthenticated, IsAdmin],
         'default': [permissions.IsAuthenticated],
     }
@@ -1111,7 +1111,7 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         Permissions adaptées par action:
         - ADMIN: Tout
         - SUPERVISEUR: CRUD pour ses équipes + actions de statut
-        - CLIENT: Lecture seule + historique
+        - CLIENT: Lecture seule uniquement (PAS d'actions de modification)
         """
         # Actions d'écriture (modification de statut)
         actions_ecriture = [
@@ -1122,8 +1122,8 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         ]
 
         if self.action in actions_ecriture:
-            # Écriture: ADMIN ou SUPERVISEUR
-            permission_classes = [permissions.IsAuthenticated, IsAdmin | IsSuperviseur]
+            # Écriture: ADMIN ou SUPERVISEUR uniquement (CLIENT refusé)
+            permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
         else:
             # Lecture (list, retrieve, historique): Tous authentifiés
             permission_classes = [permissions.IsAuthenticated]
