@@ -22,8 +22,8 @@ class DistributionChargeFilter(django_filters.FilterSet):
     - Recherche textuelle
 
     Exemples d'utilisation :
-        /distributions/?status=EN_RETARD
-        /distributions/?status__in=NON_REALISEE,EN_RETARD
+        /distributions/?status=NON_REALISEE
+        /distributions/?status__in=NON_REALISEE,EN_COURS
         /distributions/?date=2026-01-22
         /distributions/?date__gte=2026-01-01&date__lte=2026-01-31
         /distributions/?tache=123
@@ -41,28 +41,23 @@ class DistributionChargeFilter(django_filters.FilterSet):
 
     status = django_filters.ChoiceFilter(
         choices=DistributionCharge.STATUT_CHOICES,
-        help_text="Statut exact (NON_REALISEE, EN_COURS, REALISEE, REPORTEE, ANNULEE, EN_RETARD)"
+        help_text="Statut exact (NON_REALISEE, EN_COURS, REALISEE, REPORTEE, ANNULEE)"
     )
 
     status__in = django_filters.BaseInFilter(
         field_name='status',
-        help_text="Liste de statuts séparés par virgule (ex: NON_REALISEE,EN_RETARD)"
+        help_text="Liste de statuts separes par virgule (ex: NON_REALISEE,EN_COURS)"
     )
 
     # Raccourcis pratiques pour les statuts courants
     actif = django_filters.BooleanFilter(
         method='filter_actif',
-        help_text="true = NON_REALISEE, EN_COURS, EN_RETARD (travail à faire)"
+        help_text="true = NON_REALISEE, EN_COURS (travail a faire)"
     )
 
     termine = django_filters.BooleanFilter(
         method='filter_termine',
-        help_text="true = REALISEE, REPORTEE, ANNULEE (pas de travail à faire)"
-    )
-
-    en_retard = django_filters.BooleanFilter(
-        method='filter_en_retard',
-        help_text="true = uniquement EN_RETARD"
+        help_text="true = REALISEE, REPORTEE, ANNULEE (pas de travail a faire)"
     )
 
     # ==========================================================================
@@ -282,22 +277,16 @@ class DistributionChargeFilter(django_filters.FilterSet):
     # ==========================================================================
 
     def filter_actif(self, queryset, name, value):
-        """Filtre les distributions actives (travail à faire)."""
+        """Filtre les distributions actives (travail a faire)."""
         if value:
-            return queryset.filter(status__in=['NON_REALISEE', 'EN_COURS', 'EN_RETARD'])
-        return queryset.exclude(status__in=['NON_REALISEE', 'EN_COURS', 'EN_RETARD'])
+            return queryset.filter(status__in=['NON_REALISEE', 'EN_COURS'])
+        return queryset.exclude(status__in=['NON_REALISEE', 'EN_COURS'])
 
     def filter_termine(self, queryset, name, value):
         """Filtre les distributions terminées."""
         if value:
             return queryset.filter(status__in=['REALISEE', 'REPORTEE', 'ANNULEE'])
         return queryset.exclude(status__in=['REALISEE', 'REPORTEE', 'ANNULEE'])
-
-    def filter_en_retard(self, queryset, name, value):
-        """Filtre uniquement les distributions en retard."""
-        if value:
-            return queryset.filter(status='EN_RETARD')
-        return queryset.exclude(status='EN_RETARD')
 
     def filter_aujourd_hui(self, queryset, name, value):
         """Filtre les distributions du jour."""

@@ -227,16 +227,19 @@ def get_chaine_reports(distribution) -> list:
 # SYNCHRONISATION TÂCHE ↔ DISTRIBUTION
 # ==============================================================================
 
-def synchroniser_tache_apres_demarrage(tache, est_premiere_distribution: bool):
+def synchroniser_tache_apres_demarrage(tache, est_premiere_distribution: bool, date_debut_reelle=None):
     """
     Met à jour le statut de la tâche après le démarrage d'une distribution.
 
     Règle: Si c'est la première distribution démarrée et que la tâche
-    est en PLANIFIEE/EN_RETARD/EXPIREE, passer la tâche en EN_COURS.
+    est en PLANIFIEE, passer la tâche en EN_COURS.
+
+    ✅ SIMPLIFIÉ: Plus de EN_RETARD ni EXPIREE
 
     Args:
         tache: Instance de Tache
         est_premiere_distribution: True si aucune distribution active avant
+        date_debut_reelle: Date réelle de début (optionnel, défaut: aujourd'hui)
 
     Returns:
         bool: True si la tâche a été modifiée
@@ -244,16 +247,17 @@ def synchroniser_tache_apres_demarrage(tache, est_premiere_distribution: bool):
     if not est_premiere_distribution:
         return False
 
-    if tache.statut in ['PLANIFIEE', 'EN_RETARD', 'EXPIREE']:
+    if tache.statut == 'PLANIFIEE':
         tache.statut = 'EN_COURS'
-        tache.date_debut_reelle = timezone.now().date()
+        # Utiliser la date fournie ou aujourd'hui par défaut
+        tache.date_debut_reelle = date_debut_reelle if date_debut_reelle else timezone.now().date()
         tache.save(update_fields=['statut', 'date_debut_reelle'])
         return True
 
     return False
 
 
-def synchroniser_tache_apres_completion(tache) -> bool:
+def synchroniser_tache_apres_completion(tache, date_fin_reelle=None) -> bool:
     """
     Met à jour le statut de la tâche après la complétion d'une distribution.
 
@@ -262,6 +266,7 @@ def synchroniser_tache_apres_completion(tache) -> bool:
 
     Args:
         tache: Instance de Tache
+        date_fin_reelle: Date réelle de fin (optionnel, défaut: aujourd'hui)
 
     Returns:
         bool: True si la tâche a été marquée comme terminée
@@ -271,7 +276,8 @@ def synchroniser_tache_apres_completion(tache) -> bool:
 
     if verifier_toutes_distributions_terminees(tache):
         tache.statut = 'TERMINEE'
-        tache.date_fin_reelle = timezone.now().date()
+        # Utiliser la date fournie ou aujourd'hui par défaut
+        tache.date_fin_reelle = date_fin_reelle if date_fin_reelle else timezone.now().date()
         tache.save(update_fields=['statut', 'date_fin_reelle'])
         return True
 
@@ -344,6 +350,33 @@ def synchroniser_tache_apres_restauration(tache) -> tuple:
         return True, 'PLANIFIEE'
 
     return False, tache.statut
+
+
+def restaurer_distributions_apres_replanification(tache) -> int:
+    """
+    Restaure les distributions ANNULEE en NON_REALISEE après replanification d'une tâche.
+
+    Appelé quand une tâche ANNULEE est modifiee (replanifiee).
+    Les distributions qui etaient annulees doivent etre restaurees
+    pour permettre leur execution.
+
+    Args:
+        tache: Instance de Tache
+
+    Returns:
+        int: Nombre de distributions restaurées
+    """
+    from .models import DistributionCharge
+
+    # Restaurer toutes les distributions ANNULEE en NON_REALISEE
+    distributions_annulees = tache.distributions_charge.filter(status='ANNULEE')
+    count = distributions_annulees.count()
+
+    if count > 0:
+        distributions_annulees.update(status='NON_REALISEE')
+        print(f"[REPLANIFICATION] {count} distribution(s) restaurée(s) pour la tâche #{tache.id}")
+
+    return count
 
 
 def etendre_tache_si_necessaire(tache, nouvelle_date) -> bool:
@@ -478,7 +511,7 @@ def compter_distributions_actives(tache) -> int:
         tache: Instance de Tache
 
     Returns:
-        int: Nombre de distributions actives (NON_REALISEE, EN_COURS, EN_RETARD)
+        int: Nombre de distributions actives (NON_REALISEE, EN_COURS)
     """
     return tache.distributions_charge.filter(status__in=STATUTS_ACTIFS).count()
 
@@ -506,39 +539,12 @@ def valider_terminaison_tache(tache) -> bool:
     return True
 
 
-def synchroniser_distributions_apres_expiration_tache(tache) -> int:
-    """
-    Annule toutes les distributions actives d'une tâche expirée.
-
-    Cette fonction est appelée quand une tâche passe au statut EXPIREE.
-    Toutes les distributions actives (NON_REALISEE, EN_COURS, EN_RETARD)
-    sont automatiquement annulées avec le motif "EXPIRATION".
-
-    Args:
-        tache: Instance de Tache
-
-    Returns:
-        int: Nombre de distributions annulées
-    """
-    distributions_actives = tache.distributions_charge.filter(status__in=STATUTS_ACTIFS)
-    count = distributions_actives.count()
-
-    if count > 0:
-        distributions_actives.update(
-            status='ANNULEE',
-            motif_report_annulation='EXPIRATION',
-            updated_at=timezone.now()
-        )
-
-    return count
-
-
 def synchroniser_distributions_apres_annulation_tache(tache) -> int:
     """
     Annule toutes les distributions actives d'une tâche annulée.
 
     Cette fonction est appelée quand une tâche passe au statut ANNULEE.
-    Toutes les distributions actives (NON_REALISEE, EN_COURS, EN_RETARD)
+    Toutes les distributions actives (NON_REALISEE, EN_COURS)
     sont automatiquement annulées avec le motif "ANNULATION_TACHE".
 
     Args:
@@ -558,25 +564,6 @@ def synchroniser_distributions_apres_annulation_tache(tache) -> int:
         )
 
     return count
-
-
-def corriger_distributions_tache_expiree(tache) -> int:
-    """
-    Corrige les distributions d'une tâche déjà expirée (migration de données).
-
-    Cette fonction est utilisée pour corriger les données existantes où
-    une tâche est EXPIREE mais ses distributions sont encore actives.
-
-    Args:
-        tache: Instance de Tache (doit être au statut EXPIREE)
-
-    Returns:
-        int: Nombre de distributions corrigées
-    """
-    if tache.statut != 'EXPIREE':
-        return 0
-
-    return synchroniser_distributions_apres_expiration_tache(tache)
 
 
 def corriger_distributions_tache_annulee(tache) -> int:

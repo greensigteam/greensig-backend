@@ -63,22 +63,33 @@ class ReportingView(APIView):
         seven_days_ago = now - timedelta(days=7)
         thirty_days_ago = now - timedelta(days=30)
 
+        # Déterminer le filtre structure pour les utilisateurs CLIENT
+        structure_filter = None
+        user = request.user
+        if user.roles_utilisateur.filter(role__nom_role='CLIENT').exists():
+            if hasattr(user, 'client_profile') and user.client_profile.structure:
+                structure_filter = user.client_profile.structure
+
         stats = {
-            'taches': self._get_taches_stats(now, seven_days_ago),
-            'reclamations': self._get_reclamations_stats(now, seven_days_ago),
-            'equipes': self._get_equipes_stats(),
-            'inventaire': self._get_inventaire_stats(),
+            'taches': self._get_taches_stats(now, seven_days_ago, structure_filter),
+            'reclamations': self._get_reclamations_stats(now, seven_days_ago, structure_filter),
+            'equipes': self._get_equipes_stats(structure_filter),
+            'inventaire': self._get_inventaire_stats(structure_filter),
         }
 
         return Response(stats)
 
-    def _get_taches_stats(self, now, seven_days_ago):
+    def _get_taches_stats(self, now, seven_days_ago, structure_filter=None):
         """Statistiques des tâches."""
         try:
             from api_planification.models import Tache
 
             # Tâches non supprimées
             taches = Tache.objects.filter(deleted_at__isnull=True)
+
+            # Filtrer par structure pour les utilisateurs CLIENT
+            if structure_filter:
+                taches = taches.filter(site__structure_client=structure_filter)
 
             total = taches.count()
             terminees = taches.filter(statut='TERMINEE').count()
@@ -135,12 +146,19 @@ class ReportingView(APIView):
                 'error': str(e)
             }
 
-    def _get_reclamations_stats(self, now, seven_days_ago):
+    def _get_reclamations_stats(self, now, seven_days_ago, structure_filter=None):
         """Statistiques des réclamations."""
         try:
             from api_reclamations.models import Reclamation, SatisfactionClient
 
             reclamations = Reclamation.objects.all()
+
+            # Filtrer par structure pour les utilisateurs CLIENT
+            if structure_filter:
+                reclamations = reclamations.filter(
+                    Q(structure_client=structure_filter) |
+                    Q(site__structure_client=structure_filter)
+                )
 
             total = reclamations.count()
 
@@ -155,9 +173,9 @@ class ReportingView(APIView):
                 statut__in=['NOUVELLE', 'PRISE_EN_COMPTE', 'EN_COURS']
             ).count()
 
-            # Résolues dans les 7 derniers jours
+            # Clôturées dans les 7 derniers jours
             resolues_7j = reclamations.filter(
-                statut__in=['RESOLUE', 'CLOTUREE'],
+                statut='CLOTUREE',
                 date_cloture_reelle__gte=seven_days_ago
             ).count()
 
@@ -216,7 +234,7 @@ class ReportingView(APIView):
                 'error': str(e)
             }
 
-    def _get_equipes_stats(self):
+    def _get_equipes_stats(self, structure_filter=None):
         """Statistiques des équipes."""
         try:
             from api_users.models import Equipe, Operateur, Absence, StatutAbsence
@@ -228,6 +246,10 @@ class ReportingView(APIView):
             week_end = week_start + timedelta(days=6)
 
             equipes = Equipe.objects.filter(actif=True)
+
+            # Filtrer par structure pour les utilisateurs CLIENT
+            if structure_filter:
+                equipes = equipes.filter(site__structure_client=structure_filter)
             total_equipes = equipes.count()
 
             charges = []
@@ -277,7 +299,7 @@ class ReportingView(APIView):
 
                 charges.append({
                     'id': equipe.id,
-                    'nom': equipe.nomEquipe,
+                    'nom': equipe.nom_equipe,
                     'charge_percent': round(charge_percent, 1),
                     'heures_planifiees': round(heures_planifiees_semaine, 1),  # ✅ NOUVEAU
                     'capacite_heures': capacite_heures,  # ✅ NOUVEAU
@@ -304,7 +326,7 @@ class ReportingView(APIView):
                 'error': str(e)
             }
 
-    def _get_inventaire_stats(self):
+    def _get_inventaire_stats(self, structure_filter=None):
         """Statistiques de l'inventaire."""
         vegetation_models = [Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee]
         hydraulic_models = [Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon]
@@ -313,7 +335,11 @@ class ReportingView(APIView):
         vegetation_counts = {}
         total_vegetation = 0
         for Model in vegetation_models:
-            count = Model.objects.count()
+            qs = Model.objects.all()
+            # Filtrer par structure pour les utilisateurs CLIENT
+            if structure_filter:
+                qs = qs.filter(site__structure_client=structure_filter)
+            count = qs.count()
             vegetation_counts[Model.__name__.lower()] = count
             total_vegetation += count
 
@@ -321,21 +347,32 @@ class ReportingView(APIView):
         hydraulic_counts = {}
         total_hydraulic = 0
         for Model in hydraulic_models:
-            count = Model.objects.count()
+            qs = Model.objects.all()
+            # Filtrer par structure pour les utilisateurs CLIENT
+            if structure_filter:
+                qs = qs.filter(site__structure_client=structure_filter)
+            count = qs.count()
             hydraulic_counts[Model.__name__.lower()] = count
             total_hydraulic += count
 
         # Par état (tous objets)
         par_etat = {'bon': 0, 'moyen': 0, 'mauvais': 0, 'critique': 0}
         for Model in vegetation_models + hydraulic_models:
-            state_counts = Model.objects.values('etat').annotate(count=Count('id'))
+            qs = Model.objects.all()
+            # Filtrer par structure pour les utilisateurs CLIENT
+            if structure_filter:
+                qs = qs.filter(site__structure_client=structure_filter)
+            state_counts = qs.values('etat').annotate(count=Count('id'))
             for item in state_counts:
                 if item['etat'] in par_etat:
                     par_etat[item['etat']] += item['count']
 
         # Sites
-        total_sites = Site.objects.count()
-        sites_actifs = Site.objects.filter(actif=True).count()
+        sites_qs = Site.objects.all()
+        if structure_filter:
+            sites_qs = sites_qs.filter(structure_client=structure_filter)
+        total_sites = sites_qs.count()
+        sites_actifs = sites_qs.filter(actif=True).count()
 
         return {
             'total_objets': total_vegetation + total_hydraulic,

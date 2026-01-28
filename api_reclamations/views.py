@@ -1119,16 +1119,17 @@ class ReclamationExportExcelView(APIView):
             cell.alignment = header_alignment
             cell.border = header_border
 
-        # Couleurs par statut
+        # Couleurs par statut (synchronisées avec le frontend constants.ts)
+        # Versions claires des couleurs UI pour lisibilité Excel
         statut_colors = {
-            'NOUVELLE': 'E3F2FD',       # Bleu clair
-            'PRISE_EN_COMPTE': 'FFF3E0', # Orange clair
-            'EN_COURS': 'FFF9C4',        # Jaune clair
-            'RESOLUE': 'E8F5E9',         # Vert clair
-            'EN_ATTENTE_VALIDATION_CLOTURE': 'F3E5F5',  # Violet clair
-            'INTERVENTION_REFUSEE': 'FFCCBC',  # Orange
-            'CLOTUREE': 'C8E6C9',        # Vert
-            'REJETEE': 'FFCDD2',         # Rouge clair
+            'NOUVELLE': 'FEE2E2',        # Rouge clair (UI: #ef4444)
+            'PRISE_EN_COMPTE': 'FFEDD5', # Orange clair (UI: #f97316)
+            'EN_COURS': 'FFEDD5',        # Orange clair (UI: #f97316)
+            'RESOLUE': 'DCFCE7',         # Vert clair (UI: #22c55e)
+            'EN_ATTENTE_VALIDATION_CLOTURE': 'D1FAE5',  # Émeraude clair (UI: #10b981)
+            'INTERVENTION_REFUSEE': 'FECACA',  # Rouge foncé clair (UI: #dc2626)
+            'CLOTUREE': 'DCFCE7',        # Vert clair (UI: #22c55e)
+            'REJETEE': 'E5E7EB',         # Gris clair (UI: #6b7280)
         }
 
         # Données

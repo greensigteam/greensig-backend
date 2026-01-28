@@ -7,7 +7,7 @@ from django.contrib.gis.geos import GEOSGeometry
 from celery.result import AsyncResult
 import json
 
-from api_users.permissions import IsAdmin, IsAdminOrSuperviseur
+from api_users.permissions import IsAdmin, IsAdminOrSuperviseur, CanExportData
 
 from .models import (
     Site, SousSite, Objet, Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee,
@@ -1227,8 +1227,8 @@ class StatisticsView(APIView):
                         statistics['superviseur_stats'] = {
                             'taches_today': mes_taches.filter(date_debut_planifiee__date=today).count(),
                             'taches_en_cours': mes_taches.filter(statut='EN_COURS').count(),
-                            'taches_a_faire': mes_taches.filter(statut='A_FAIRE').count(),
-                            'taches_retard': mes_taches.filter(statut='EN_RETARD').count(), 
+                            'taches_planifiees': mes_taches.filter(statut='PLANIFIEE').count(),
+                            'taches_terminees': mes_taches.filter(statut='TERMINEE').count(),
                             'absences_today': absences_today,
                             'equipes_count': len(mes_equipes_ids)
                         }
@@ -1253,7 +1253,7 @@ class ExportDataView(APIView):
     """
     Vue générique pour exporter les données en Excel, GeoJSON, KML ou Shapefile.
 
-    Permission: ADMIN ou SUPERVISEUR uniquement (export de données sensibles)
+    Permission: ADMIN, SUPERVISEUR et CLIENT (données filtrées par structure pour CLIENT)
 
     Paramètres de requête:
     - model: nom du modèle (arbres, gazons, palmiers, etc.)
@@ -1266,7 +1266,7 @@ class ExportDataView(APIView):
     - Retourne un task_id pour suivre la progression
     - Utiliser GET /api/tasks/<task_id>/status/ pour vérifier le statut
     """
-    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
+    permission_classes = [permissions.IsAuthenticated, CanExportData]
 
     MODEL_MAPPING = {
         'sites': Site,
@@ -1347,6 +1347,21 @@ class ExportDataView(APIView):
 
         # Appliquer les filtres
         queryset = model_class.objects.all()
+
+        # Filtrer par structure pour les utilisateurs CLIENT
+        user = request.user
+        if user.roles_utilisateur.filter(role__nom_role='CLIENT').exists():
+            if hasattr(user, 'client_profile') and user.client_profile.structure:
+                structure = user.client_profile.structure
+                # Les modèles Objet ont une relation site -> structure_client
+                if hasattr(model_class, 'site'):
+                    queryset = queryset.filter(site__structure_client=structure)
+                # Sites ont directement structure_client
+                elif hasattr(model_class, 'structure_client'):
+                    queryset = queryset.filter(structure_client=structure)
+                # SousSite via site
+                elif model_class == SousSite:
+                    queryset = queryset.filter(site__structure_client=structure)
 
         # Filtre par IDs si fourni
         ids_param = request.query_params.get('ids', '')
@@ -1478,7 +1493,7 @@ class InventoryExportExcelView(APIView):
     """
     Vue spécialisée pour l'export Excel professionnel de l'inventaire.
 
-    Permission: ADMIN ou SUPERVISEUR uniquement (export de données sensibles)
+    Permission: ADMIN, SUPERVISEUR et CLIENT (données filtrées par structure pour CLIENT)
 
     Supporte:
     - Formatage professionnel (styles, couleurs, filtres Excel)
@@ -1493,7 +1508,7 @@ class InventoryExportExcelView(APIView):
     - famille: famille botanique (optionnel)
     - search: recherche textuelle (optionnel)
     """
-    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
+    permission_classes = [permissions.IsAuthenticated, CanExportData]
 
     MODEL_MAPPING = {
         'Arbre': Arbre,
@@ -1842,7 +1857,7 @@ class InventoryExportPDFView(APIView):
     """
     Vue pour l'export PDF professionnel de l'inventaire.
 
-    Permission: ADMIN ou SUPERVISEUR uniquement (export de données sensibles)
+    Permission: ADMIN, SUPERVISEUR et CLIENT (données filtrées par structure pour CLIENT)
 
     Génère un document PDF avec:
     - En-tête avec logo et titre
@@ -1857,7 +1872,7 @@ class InventoryExportPDFView(APIView):
     - famille: famille botanique (optionnel)
     - search: recherche textuelle (optionnel)
     """
-    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
+    permission_classes = [permissions.IsAuthenticated, CanExportData]
 
     MODEL_MAPPING = {
         'Arbre': Arbre,

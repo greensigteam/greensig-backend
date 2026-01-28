@@ -185,7 +185,7 @@ class MonthlyReportView(APIView):
 
             taches = Tache.objects.filter(
                 deleted_at__isnull=True,
-                statut__in=['PLANIFIEE', 'EN_RETARD', 'EXPIREE'],
+                statut__in=['PLANIFIEE'],
                 date_debut_planifiee__gte=next_period_start,
                 date_debut_planifiee__lte=next_period_end,
                 objets__site_id=site_id
@@ -468,7 +468,7 @@ class MonthlyReportView(APIView):
             reclamations = Reclamation.objects.filter(
                 date_creation__gte=date_debut,
                 date_creation__lte=date_fin,
-                zone__site_id=site_id
+                site_id=site_id
             ).select_related('zone', 'type_reclamation', 'urgence')
 
             result = []
@@ -536,8 +536,8 @@ class MonthlyReportView(APIView):
                 taches_planifiees_et_terminees / taches_planifiees * 100, 1
             ) if taches_planifiees > 0 else 0
 
-            # Réclamations sur le site
-            reclamations_base = Reclamation.objects.filter(zone__site_id=site_id)
+            # Réclamations sur le site (utiliser le champ site direct, zone peut être NULL)
+            reclamations_base = Reclamation.objects.filter(site_id=site_id)
 
             reclamations_creees = reclamations_base.filter(
                 date_creation__gte=date_debut,
@@ -545,7 +545,7 @@ class MonthlyReportView(APIView):
             ).count()
 
             reclamations_resolues = reclamations_base.filter(
-                statut__in=['RESOLUE', 'CLOTUREE'],
+                statut='CLOTUREE',
                 date_cloture_reelle__gte=date_debut,
                 date_cloture_reelle__lte=date_fin
             ).count()
@@ -562,12 +562,26 @@ class MonthlyReportView(APIView):
                 objets__site_id=site_id
             ).distinct().prefetch_related('distributions_charge', 'participations')
 
-            # Calculer le total simplement
+            # Calculer le total et le ratio de productivité
             heures_totales = 0
+            heures_theoriques_totales = 0
+
             for tache in taches_terminees_periode:
                 temps_travail = tache.temps_travail_total
-                # Ajouter les heures de la tâche (PAS de multiplication)
-                heures_totales += temps_travail['heures']
+                heures_reelles = temps_travail['heures']
+                heures_totales += heures_reelles
+
+                # Ajouter les heures théoriques (charge estimée)
+                if tache.charge_estimee_heures and tache.charge_estimee_heures > 0:
+                    heures_theoriques_totales += tache.charge_estimee_heures
+
+            # Ratio de productivité: heures réelles / heures théoriques * 100
+            # < 100% = plus efficace (moins de temps que prévu)
+            # > 100% = moins efficace (plus de temps que prévu)
+            # = 100% = conforme à la norme
+            ratio_productivite = None
+            if heures_theoriques_totales > 0 and heures_totales > 0:
+                ratio_productivite = round((heures_totales / heures_theoriques_totales) * 100, 1)
 
             return {
                 'taches_planifiees': taches_planifiees,
@@ -576,6 +590,8 @@ class MonthlyReportView(APIView):
                 'reclamations_creees': reclamations_creees,
                 'reclamations_resolues': reclamations_resolues,
                 'heures_travaillees': round(heures_totales, 1),
+                'heures_theoriques': round(heures_theoriques_totales, 1),
+                'ratio_productivite': ratio_productivite,
             }
 
         except Exception as e:

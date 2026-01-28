@@ -24,7 +24,6 @@ class NotificationTypes:
     TACHE_ASSIGNEE = 'tache_assignee'
     TACHE_MODIFIEE = 'tache_modifiee'
     TACHE_TERMINEE = 'tache_terminee'
-    TACHE_EN_RETARD = 'tache_en_retard'
     TACHE_ANNULEE = 'tache_annulee'
     TACHE_VALIDEE = 'tache_validee'
     TACHE_REJETEE = 'tache_rejetee'
@@ -442,36 +441,6 @@ class NotificationService:
         )
 
     @classmethod
-    def notify_tache_en_retard(cls, tache: 'Tache'):
-        """
-        Notifier qu'une tache est en retard.
-        Destinataires: Superviseur, admins
-        """
-        destinataires = cls._get_tache_destinataires(tache, include_admins=True)
-
-        if not destinataires:
-            return
-
-        site_nom = cls._get_tache_site_nom(tache)
-        tache_titre = cls._get_tache_titre(tache)
-        jours_retard = cls._calculer_jours_retard(tache)
-
-        cls.send(
-            type_notification=NotificationTypes.TACHE_EN_RETARD,
-            titre=f"Tache en retard: {tache_titre}",
-            message=f"{jours_retard} jour(s) de retard - {site_nom}",
-            recipients=destinataires,
-            data={
-                'tache_id': tache.id,
-                'titre': tache_titre,
-                'site': site_nom,
-                'date_fin_prevue': str(tache.date_fin_planifiee) if tache.date_fin_planifiee else '',
-                'jours_retard': jours_retard,
-            },
-            priorite='urgent'
-        )
-
-    @classmethod
     def notify_tache_validee(cls, tache: 'Tache', etat_validation: str, valideur: Optional['Utilisateur'] = None, commentaire: str = ''):
         """
         Notifier la validation ou le rejet d'une tâche.
@@ -831,19 +800,6 @@ class NotificationService:
         ).values_list('utilisateur_id', flat=True)
 
         return list(admin_ids)
-
-    @classmethod
-    def _calculer_jours_retard(cls, tache: 'Tache') -> int:
-        """Calculer le nombre de jours de retard d'une tache"""
-        from django.utils import timezone
-
-        if not tache.date_fin_planifiee:
-            return 0
-
-        today = timezone.now().date()
-        if tache.date_fin_planifiee < today:
-            return (today - tache.date_fin_planifiee).days
-        return 0
 
     @classmethod
     def _get_priorite_label(cls, priorite: int) -> str:

@@ -275,10 +275,11 @@ class KPIView(APIView):
             date_debut_dt = timezone.make_aware(datetime.combine(date_debut, datetime.min.time()))
             date_fin_dt = timezone.make_aware(datetime.combine(date_fin, datetime.max.time()))
 
-            # Réclamations OUVERTES dans la période M
+            # Réclamations OUVERTES dans la période M (seulement celles visibles par le client)
             queryset_ouvertes = Reclamation.objects.filter(
                 date_creation__gte=date_debut_dt,
-                date_creation__lte=date_fin_dt
+                date_creation__lte=date_fin_dt,
+                visible_client=True  # Exclure les réclamations internes
             )
 
             if site_id:
@@ -344,12 +345,13 @@ class KPIView(APIView):
             date_debut_dt = timezone.make_aware(datetime.combine(date_debut, datetime.min.time()))
             date_fin_dt = timezone.make_aware(datetime.combine(date_fin, datetime.max.time()))
 
-            # Réclamations clôturées dans la période M
+            # Réclamations clôturées dans la période M (seulement celles visibles par le client)
             queryset = Reclamation.objects.filter(
                 statut='CLOTUREE',
                 date_cloture_reelle__gte=date_debut_dt,
                 date_cloture_reelle__lte=date_fin_dt,
-                date_cloture_reelle__isnull=False
+                date_cloture_reelle__isnull=False,
+                visible_client=True  # Exclure les réclamations internes
             )
 
             if site_id:
@@ -404,6 +406,42 @@ class KPIView(APIView):
                 'error': str(e),
             }
 
+    def _calculer_quantites_objets(self, all_objet_ids):
+        """
+        Pré-calcule surfaces (m²) et longueurs (ml) pour un ensemble d'objets.
+        Retourne deux dicts: surfaces[objet_id] = float, longueurs[objet_id] = float
+        """
+        from api.models import Gazon, Arbuste, Vivace, Cactus, Graminee
+        from api.models import Canalisation, Aspersion, Goutte
+        from django.contrib.gis.db.models.functions import Area, Length, Transform
+
+        surfaces = {}  # objet_id → m²
+        longueurs = {}  # objet_id → ml
+
+        # Surfaces des polygones (5 types)
+        for Model in [Gazon, Arbuste, Vivace, Cactus, Graminee]:
+            qs = Model.objects.filter(
+                objet_ptr_id__in=all_objet_ids
+            ).annotate(
+                area_m2=Area(Transform('geometry', 3857))
+            ).values_list('objet_ptr_id', 'area_m2')
+            for obj_id, area in qs:
+                if area:
+                    surfaces[obj_id] = area.sq_m
+
+        # Longueurs des lignes (3 types)
+        for Model in [Canalisation, Aspersion, Goutte]:
+            qs = Model.objects.filter(
+                objet_ptr_id__in=all_objet_ids
+            ).annotate(
+                length_m=Length(Transform('geometry', 3857))
+            ).values_list('objet_ptr_id', 'length_m')
+            for obj_id, length in qs:
+                if length:
+                    longueurs[obj_id] = length.m
+
+        return surfaces, longueurs
+
     def _get_temps_realisation_taches(self, date_debut, date_fin, site_id=None, type_tache_id=None):
         """
         KPI 4: Temps de réalisation par tâche
@@ -444,7 +482,19 @@ class KPIView(APIView):
             details_par_site = {}  # ✅ NOUVEAU: Groupement par site uniquement
             details_par_site_type = {}  # Groupement par site ET type
 
-            for tache in queryset.select_related('id_type_tache').prefetch_related('objets', 'reclamation', 'distributions_charge', 'participations'):
+            # Pré-charger les tâches avec leurs objets pour collecter tous les objet_ids
+            taches_list = list(queryset.select_related('id_type_tache').prefetch_related('objets', 'reclamation', 'distributions_charge', 'participations'))
+
+            # Collecter tous les objet_ids pour le calcul batch des quantités
+            all_objet_ids = set()
+            for tache in taches_list:
+                for objet in tache.objets.all():
+                    all_objet_ids.add(objet.pk)
+
+            # Pré-calculer surfaces et longueurs (8 requêtes SQL)
+            surfaces, longueurs = self._calculer_quantites_objets(all_objet_ids) if all_objet_ids else ({}, {})
+
+            for tache in taches_list:
                 # ✅ NOUVEAU: Utiliser temps_travail_total (Option 2: Approche Hybride)
                 temps_travail = tache.temps_travail_total
                 heures = temps_travail['heures']
@@ -452,18 +502,29 @@ class KPIView(APIView):
 
                 # Type de tâche
                 type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Non défini'
+                unite_prod = tache.id_type_tache.unite_productivite if tache.id_type_tache else 'm2'
 
                 # Identifier le site
                 site_nom = "Non attribué"
                 site_obj = None
+                tache_objet_ids = []
                 for objet in tache.objets.all():
-                    if objet.site:
+                    tache_objet_ids.append(objet.pk)
+                    if objet.site and not site_obj:
                         site_obj = objet.site
                         site_nom = site_obj.nom_site
-                        break
                 if not site_obj and tache.reclamation and tache.reclamation.site:
                     site_obj = tache.reclamation.site
                     site_nom = site_obj.nom_site
+
+                # Calculer la quantité selon l'unité de productivité
+                quantite = 0.0
+                if unite_prod == 'm2':
+                    quantite = sum(surfaces.get(oid, 0) for oid in tache_objet_ids)
+                elif unite_prod == 'ml':
+                    quantite = sum(longueurs.get(oid, 0) for oid in tache_objet_ids)
+                elif unite_prod in ('unite', 'arbres', 'cuvettes'):
+                    quantite = float(len(tache_objet_ids))
 
                 # Grouper par type de tâche (global)
                 if type_nom not in details_par_type:
@@ -471,10 +532,16 @@ class KPIView(APIView):
                         'count': 0,
                         'total_heures': 0,
                         'durees': [],  # ✅ Pour calculer écart-type
+                        'total_quantite': 0.0,
+                        'unite_productivite': unite_prod,
+                        'taches_avec_quantite': 0,
                     }
                 details_par_type[type_nom]['count'] += 1
                 details_par_type[type_nom]['total_heures'] += heures
                 details_par_type[type_nom]['durees'].append(heures)
+                details_par_type[type_nom]['total_quantite'] += quantite
+                if quantite > 0:
+                    details_par_type[type_nom]['taches_avec_quantite'] += 1
 
                 # ✅ NOUVEAU: Grouper par site uniquement
                 if site_nom not in details_par_site:
@@ -495,10 +562,16 @@ class KPIView(APIView):
                         'count': 0,
                         'total_heures': 0,
                         'durees': [],
+                        'total_quantite': 0.0,
+                        'unite_productivite': unite_prod,
+                        'taches_avec_quantite': 0,
                     }
                 details_par_site_type[site_nom][type_nom]['count'] += 1
                 details_par_site_type[site_nom][type_nom]['total_heures'] += heures
                 details_par_site_type[site_nom][type_nom]['durees'].append(heures)
+                details_par_site_type[site_nom][type_nom]['total_quantite'] += quantite
+                if quantite > 0:
+                    details_par_site_type[site_nom][type_nom]['taches_avec_quantite'] += 1
 
             # Calcul de la moyenne globale pour comparaisons
             temps_total = sum(durees) if durees else 0
@@ -514,6 +587,10 @@ class KPIView(APIView):
                 ecart_type = round(statistics.stdev(data['durees']), 1) if len(data['durees']) > 1 else 0
                 ecart_moyenne = round(((moyenne - temps_moyen_global) / temps_moyen_global * 100), 1) if temps_moyen_global > 0 else 0
 
+                total_quantite = data['total_quantite']
+                ratio_efficacite = round(data['total_heures'] / total_quantite, 6) if total_quantite > 0 else None
+                taches_sans_quantite = data['count'] - data['taches_avec_quantite']
+
                 par_type_array.append({
                     'type_tache': type_tache,
                     'count': data['count'],
@@ -522,6 +599,12 @@ class KPIView(APIView):
                     'ecart_type': ecart_type,
                     'ecart_moyenne_global': ecart_moyenne,  # ✅ % écart vs moyenne globale
                     'inefficace': moyenne > temps_moyen_global * 1.2,  # ✅ +20% = inefficace
+                    # Ratio normalisé par quantité
+                    'unite_productivite': data['unite_productivite'],
+                    'total_quantite': round(total_quantite, 2),
+                    'ratio_efficacite': ratio_efficacite,
+                    'taches_avec_quantite': data['taches_avec_quantite'],
+                    'taches_sans_quantite': taches_sans_quantite,
                 })
 
             # Trier par moyenne décroissante (les plus lentes en premier)
@@ -554,6 +637,9 @@ class KPIView(APIView):
                     moyenne = data['total_heures'] / data['count'] if data['count'] > 0 else 0
                     ecart_type = round(statistics.stdev(data['durees']), 1) if len(data['durees']) > 1 else 0
 
+                    total_quantite = data['total_quantite']
+                    ratio_efficacite = round(data['total_heures'] / total_quantite, 6) if total_quantite > 0 else None
+
                     par_site_et_type_array.append({
                         'site_nom': site_nom,
                         'type_tache': type_nom,
@@ -561,6 +647,10 @@ class KPIView(APIView):
                         'total_heures': round(data['total_heures'], 1),
                         'moyenne_heures': round(moyenne, 1),
                         'ecart_type': ecart_type,
+                        # Ratio normalisé
+                        'unite_productivite': data['unite_productivite'],
+                        'total_quantite': round(total_quantite, 2),
+                        'ratio_efficacite': ratio_efficacite,
                     })
 
             # Trier par moyenne décroissante

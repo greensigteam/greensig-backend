@@ -9,20 +9,21 @@ MAX_REPORTS_CHAIN = 5
 # STATUTS DES DISTRIBUTIONS
 # ==============================================================================
 
+# ✅ SIMPLIFIÉ: Plus de EN_RETARD
 STATUT_DISTRIBUTION_CHOICES = [
     ('NON_REALISEE', 'Non Réalisée'),
     ('EN_COURS', 'En Cours'),
     ('REALISEE', 'Réalisée'),
     ('REPORTEE', 'Reportée'),
     ('ANNULEE', 'Annulée'),
-    ('EN_RETARD', 'En Retard'),
 ]
 
 # Statuts terminaux (pas de transition possible)
 STATUTS_TERMINAUX = ['REALISEE', 'REPORTEE']
 
 # Statuts actifs (travail en cours ou à faire)
-STATUTS_ACTIFS = ['NON_REALISEE', 'EN_COURS', 'EN_RETARD']
+# ✅ SIMPLIFIÉ: Plus de EN_RETARD
+STATUTS_ACTIFS = ['NON_REALISEE', 'EN_COURS']
 
 # Statuts considérés comme "gérés" pour le calcul de complétion de tâche
 STATUTS_GERES = ['REALISEE', 'ANNULEE']
@@ -54,13 +55,13 @@ TOUS_MOTIFS = [code for code, _ in MOTIF_CHOICES]
 # ==============================================================================
 
 # Dictionnaire définissant les transitions autorisées pour chaque statut
+# ✅ SIMPLIFIÉ: Plus de EN_RETARD
 ALLOWED_TRANSITIONS = {
     'NON_REALISEE': ['EN_COURS', 'REPORTEE', 'ANNULEE'],
     'EN_COURS': ['REALISEE', 'ANNULEE'],
     'REALISEE': [],  # État terminal
     'REPORTEE': [],  # État terminal (nouvelle distribution créée)
     'ANNULEE': ['NON_REALISEE'],  # Restauration possible
-    'EN_RETARD': ['EN_COURS', 'REPORTEE', 'ANNULEE'],
 }
 
 # ==============================================================================

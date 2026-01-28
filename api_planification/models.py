@@ -45,10 +45,10 @@ class Tache(models.Model):
         (5, 'Priorité 5 (Urgent)'),
     ]
     
+    # ✅ SIMPLIFIÉ: Plus de EN_RETARD ni EXPIREE
+    # Une tâche reste PLANIFIEE jusqu'à démarrage explicite
     STATUT_CHOICES = [
         ('PLANIFIEE', 'Planifiée'),
-        ('EN_RETARD', 'En retard'),  # Heure de début passée sans démarrage
-        ('EXPIREE', 'Expirée'),      # Heure de fin passée sans démarrage
         ('EN_COURS', 'En cours'),
         ('TERMINEE', 'Terminée'),
         ('ANNULEE', 'Annulée'),
@@ -150,6 +150,13 @@ class Tache(models.Model):
 
     reference = models.CharField(max_length=100, unique=True, blank=True, null=True, db_index=True, verbose_name="Référence technique")
 
+    # Flag de replanification (legacy, conserve pour compatibilite)
+    a_ete_replanifiee = models.BooleanField(
+        default=False,
+        verbose_name="A été replanifiée",
+        help_text="Flag legacy - conserve pour compatibilite avec les donnees existantes"
+    )
+
     # Gestion du temps de travail (Option 2: Approche Hybride)
     temps_travail_manuel = models.FloatField(
         null=True,
@@ -195,93 +202,15 @@ class Tache(models.Model):
     @property
     def computed_statut(self):
         """
-        ✅ Calcule dynamiquement le statut réel basé sur les dates/heures actuelles.
+        ✅ SIMPLIFIÉ: Retourne simplement le statut stocké.
 
-        Cette propriété ignore le statut stocké et calcule ce que devrait être
-        le statut en fonction de l'heure actuelle et des distributions.
-
-        Règles de recalcul (conventions standard de gestion de projet):
-
-        STATUTS FINAUX (protégés - ne jamais recalculer pour l'affichage):
-        - TERMINEE: travail effectué, audit trail
-        - VALIDEE: validation finale du client/superviseur
-        - REJETEE: décision prise, nécessite nouvelle tâche
-        - ANNULEE: annulation explicite (réactivation via action utilisateur uniquement)
-
-        STATUTS CONDITIONNELS:
-        - EN_COURS:
-            * Si distributions REALISEE existent → protégé (travail en cours)
-            * Si aucune distribution REALISEE → recalcul autorisé (pas de travail effectif)
-
-        STATUTS RECALCULABLES:
-        - PLANIFIEE, EN_RETARD, EXPIREE: toujours recalculés selon les dates
-
-        NOTE: La réactivation d'une tâche ANNULEE se fait via le formulaire de
-        replanification qui change explicitement le statut, PAS via computed_statut.
+        Plus de calcul automatique EN_RETARD/EXPIREE.
+        Une tâche reste PLANIFIEE jusqu'à démarrage explicite par l'utilisateur.
 
         Returns:
-            str: Le statut calculé dynamiquement
+            str: Le statut stocké
         """
-        # ══════════════════════════════════════════════════════════════════════
-        # STATUTS FINAUX - Ne jamais recalculer (actions explicites requises)
-        # ══════════════════════════════════════════════════════════════════════
-        if self.statut in ('TERMINEE', 'VALIDEE', 'REJETEE', 'ANNULEE'):
-            return self.statut
-
-        # ══════════════════════════════════════════════════════════════════════
-        # EN_COURS - Protéger seulement si du travail a été effectivement fait
-        # ══════════════════════════════════════════════════════════════════════
-        if self.statut == 'EN_COURS':
-            # Vérifier si des distributions ont été marquées comme réalisées
-            has_realisee = self.distributions_charge.filter(status='REALISEE').exists()
-            if has_realisee:
-                # Du travail effectif a été fait → garder EN_COURS
-                return self.statut
-            # Aucun travail effectif → permettre le recalcul (replanification possible)
-
-        # ══════════════════════════════════════════════════════════════════════
-        # EN_RETARD, EXPIREE, PLANIFIEE - Recalcul basé sur les dates
-        # ══════════════════════════════════════════════════════════════════════
-
-        now = timezone.now()
-        today = now.date()
-        current_time = now.time()
-
-        # Récupérer les distributions triées
-        distributions = list(self.distributions_charge.order_by('date', 'heure_debut'))
-
-        if distributions:
-            first_dist = distributions[0]
-            last_dist = distributions[-1]
-
-            # Vérifier si EXPIREE (dernière distribution passée)
-            if last_dist.date < today:
-                return 'EXPIREE'
-            if last_dist.date == today and last_dist.heure_fin and current_time > last_dist.heure_fin:
-                return 'EXPIREE'
-
-            # Vérifier si EN_RETARD (première distribution passée mais pas expirée)
-            if first_dist.date < today:
-                return 'EN_RETARD'
-            if first_dist.date == today and first_dist.heure_debut and current_time > first_dist.heure_debut:
-                return 'EN_RETARD'
-
-            # Sinon PLANIFIEE
-            return 'PLANIFIEE'
-
-        # Pas de distributions - utiliser les dates planifiées
-        if self.date_fin_planifiee:
-            # Convertir en date si c'est un datetime
-            fin_date = self.date_fin_planifiee.date() if hasattr(self.date_fin_planifiee, 'date') else self.date_fin_planifiee
-            if fin_date < today:
-                return 'EXPIREE'
-
-        if self.date_debut_planifiee:
-            debut_date = self.date_debut_planifiee.date() if hasattr(self.date_debut_planifiee, 'date') else self.date_debut_planifiee
-            if debut_date < today:
-                return 'EN_RETARD'
-
-        return 'PLANIFIEE'
+        return self.statut
 
     @property
     def charge_totale_distributions(self):
@@ -410,123 +339,6 @@ class Tache(models.Model):
             'manuel_date': None
         }
 
-    @property
-    def is_late(self):
-        """
-        Vérifie si la tâche est en retard (la première distribution a commencé sans démarrage).
-
-        Une tâche est en retard si:
-        - Son statut est PLANIFIEE
-        - La PREMIÈRE distribution (date + heure_debut) est passée
-        - OU si pas de distributions, la date de début planifiée est passée
-
-        Returns:
-            bool: True si la tâche est en retard
-        """
-        if self.statut != 'PLANIFIEE':
-            return False
-
-        now = timezone.now()
-        today = now.date()
-        current_time = now.time()
-
-        # Récupérer toutes les distributions triées chronologiquement (date ASC, heure_debut ASC)
-        distributions = list(self.distributions_charge.order_by('date', 'heure_debut'))
-
-        if distributions:
-            # La première distribution chronologiquement
-            first_dist = distributions[0]
-
-            # Si la date de la première distribution est passée (avant aujourd'hui)
-            if first_dist.date < today:
-                return True
-
-            # Si la première distribution est aujourd'hui, vérifier si son heure de début est passée
-            if first_dist.date == today and first_dist.heure_debut is not None:
-                if current_time > first_dist.heure_debut:
-                    return True
-
-            # La première distribution est dans le futur ou aujourd'hui mais pas encore commencée
-            return False
-
-        # Pas de distributions → utiliser date_debut_planifiee
-        return self.date_debut_planifiee < today
-
-    def mark_as_late(self):
-        """
-        Marque la tâche comme en retard.
-        Appelé automatiquement quand l'heure de début est dépassée sans démarrage.
-
-        Returns:
-            bool: True si le statut a été changé
-        """
-        if self.is_late and self.statut == 'PLANIFIEE':
-            self.statut = 'EN_RETARD'
-            self.save(update_fields=['statut'])
-            return True
-        return False
-
-    @property
-    def is_expired(self):
-        """
-        Vérifie si la tâche est expirée (la dernière distribution est passée).
-
-        Une tâche est expirée si:
-        - Son statut est PLANIFIEE ou EN_RETARD
-        - La DERNIÈRE distribution (date + heure_fin) est passée
-        - OU si pas de distributions, la date de fin planifiée est passée
-
-        Returns:
-            bool: True si la tâche est expirée
-        """
-        if self.statut not in ('PLANIFIEE', 'EN_RETARD'):
-            return False
-
-        now = timezone.now()
-        today = now.date()
-        current_time = now.time()
-
-        # Récupérer toutes les distributions triées chronologiquement (date ASC, heure_fin ASC)
-        distributions = list(self.distributions_charge.order_by('date', 'heure_fin'))
-
-        if distributions:
-            # La dernière distribution chronologiquement
-            last_dist = distributions[-1]
-
-            # Si la date de la dernière distribution est passée (avant aujourd'hui)
-            if last_dist.date < today:
-                return True
-
-            # Si la dernière distribution est aujourd'hui, vérifier si son heure de fin est passée
-            if last_dist.date == today and last_dist.heure_fin is not None:
-                if current_time > last_dist.heure_fin:
-                    return True
-
-            # La dernière distribution est dans le futur ou aujourd'hui mais pas encore terminée
-            return False
-
-        # Pas de distributions → utiliser date_fin_planifiee
-        return self.date_fin_planifiee < today
-
-    def mark_as_expired(self):
-        """
-        Marque la tâche comme expirée et annule les distributions actives.
-        Appelé automatiquement quand l'heure de fin est dépassée sans démarrage.
-
-        Returns:
-            bool: True si le statut a été changé
-        """
-        if self.is_expired and self.statut in ('PLANIFIEE', 'EN_RETARD'):
-            self.statut = 'EXPIREE'
-            self.save(update_fields=['statut'])
-
-            # Synchroniser les distributions : annuler les actives
-            from api_planification.business_rules import synchroniser_distributions_apres_expiration_tache
-            synchroniser_distributions_apres_expiration_tache(self)
-
-            return True
-        return False
-
     def save(self, *args, **kwargs):
         # Détecter les changements de statut pour la synchronisation des distributions
         old_statut = None
@@ -590,7 +402,6 @@ class Tache(models.Model):
 class DistributionCharge(models.Model):
     """
     ✅ Distribution journalière de la charge pour tâches multi-jours.
-    Version 2.0 avec statuts avancés et support du report chaîné.
 
     Permet de planifier précisément combien d'heures sont allouées chaque jour
     pour une tâche qui s'étend sur plusieurs jours.
@@ -607,7 +418,6 @@ class DistributionCharge(models.Model):
     - REALISEE: Travail terminé avec succès
     - REPORTEE: Décalée à une autre date (avec lien vers nouvelle distribution)
     - ANNULEE: Définitivement abandonnée
-    - EN_RETARD: Date passée sans démarrage (calculé automatiquement)
 
     Report chaîné:
     - Maximum 5 reports consécutifs
@@ -618,13 +428,13 @@ class DistributionCharge(models.Model):
     # CHOIX DE STATUTS ET MOTIFS
     # ==============================================================================
 
+    # ✅ SIMPLIFIÉ: Plus de EN_RETARD
     STATUT_CHOICES = [
         ('NON_REALISEE', 'Non Réalisée'),
         ('EN_COURS', 'En Cours'),
         ('REALISEE', 'Réalisée'),
         ('REPORTEE', 'Reportée'),
         ('ANNULEE', 'Annulée'),
-        ('EN_RETARD', 'En Retard'),
     ]
 
     MOTIF_CHOICES = [
@@ -686,6 +496,24 @@ class DistributionCharge(models.Model):
         blank=True,
         verbose_name="Heure de fin",
         help_text="Heure de fin de travail prévue (ex: 17:00)"
+    )
+
+    # ==============================================================================
+    # HEURES RÉELLES (SAISIE À FROID PAR LE SUPERVISEUR)
+    # ==============================================================================
+
+    heure_debut_reelle = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name="Heure de début réelle",
+        help_text="Heure réelle de début rapportée par l'équipe"
+    )
+
+    heure_fin_reelle = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name="Heure de fin réelle",
+        help_text="Heure réelle de fin rapportée par l'équipe"
     )
 
     # ==============================================================================
@@ -795,6 +623,16 @@ class DistributionCharge(models.Model):
             self.date_completion = timezone.now()
 
         # ==============================================================================
+        # CALCUL AUTOMATIQUE DES HEURES RÉELLES
+        # ==============================================================================
+        # Si les deux heures réelles sont saisies et heures_reelles n'est pas encore défini,
+        # on calcule automatiquement. Le Superviseur peut ensuite modifier si besoin.
+        if self.heure_debut_reelle and self.heure_fin_reelle and self.heures_reelles is None:
+            heures_calculees = self.calculer_heures_reelles_depuis_horaires()
+            if heures_calculees is not None:
+                self.heures_reelles = heures_calculees
+
+        # ==============================================================================
         # GÉNÉRATION DE RÉFÉRENCE
         # ==============================================================================
 
@@ -854,15 +692,28 @@ class DistributionCharge(models.Model):
         """
         Calcule les heures planifiées à partir de heure_debut et heure_fin.
         Retourne le nombre d'heures (float) ou None si les heures ne sont pas définies.
-        
         """
         if self.heure_debut and self.heure_fin:
-            # Convertir time en datetime pour calculer la différence
-            from datetime import datetime, timedelta
+            from datetime import datetime
             debut = datetime.combine(datetime.today(), self.heure_debut)
             fin = datetime.combine(datetime.today(), self.heure_fin)
 
-            # Calculer la différence en heures
+            diff = fin - debut
+            heures = diff.total_seconds() / 3600
+
+            return round(heures, 2) if heures > 0 else 0
+        return None
+
+    def calculer_heures_reelles_depuis_horaires(self):
+        """
+        Calcule les heures réelles à partir de heure_debut_reelle et heure_fin_reelle.
+        Retourne le nombre d'heures (float) ou None si les heures ne sont pas définies.
+        """
+        if self.heure_debut_reelle and self.heure_fin_reelle:
+            from datetime import datetime
+            debut = datetime.combine(datetime.today(), self.heure_debut_reelle)
+            fin = datetime.combine(datetime.today(), self.heure_fin_reelle)
+
             diff = fin - debut
             heures = diff.total_seconds() / 3600
 
@@ -904,11 +755,18 @@ class DistributionCharge(models.Model):
                 'heures_reelles': "Les heures réelles doivent être positives"
             })
 
-        # Vérifier que heure_fin > heure_debut
-        if self.heure_debut and self.heure_fin :
+        # Vérifier que heure_fin > heure_debut (planifiées)
+        if self.heure_debut and self.heure_fin:
             if self.heure_fin <= self.heure_debut:
                 raise ValidationError({
                     'heure_fin': "L'heure de fin doit être postérieure à l'heure de début"
+                })
+
+        # Vérifier que heure_fin_reelle > heure_debut_reelle
+        if self.heure_debut_reelle and self.heure_fin_reelle:
+            if self.heure_fin_reelle <= self.heure_debut_reelle:
+                raise ValidationError({
+                    'heure_fin_reelle': "L'heure de fin réelle doit être postérieure à l'heure de début réelle"
                 })
 
 

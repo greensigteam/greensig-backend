@@ -168,6 +168,8 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
             'heure_debut', 'heure_fin',
+            # Heures réelles (saisie à froid par le superviseur)
+            'heure_debut_reelle', 'heure_fin_reelle',
             'commentaire', 'status',
             # Nouveaux champs v2
             'motif_report_annulation',
@@ -295,6 +297,8 @@ class DistributionChargeEnrichedSerializer(serializers.ModelSerializer):
             'id', 'tache', 'date',
             'heures_planifiees', 'heures_reelles',
             'heure_debut', 'heure_fin',
+            # Heures réelles (saisie à froid par le superviseur)
+            'heure_debut_reelle', 'heure_fin_reelle',
             'commentaire', 'status',
             'motif_report_annulation',
             'date_demarrage', 'date_completion',
@@ -601,9 +605,7 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
             # Format: {statut_actuel: [statuts_autorisés]}
             TRANSITIONS_VALIDES = {
                 'PLANIFIEE': ['EN_COURS', 'ANNULEE'],
-                'EN_RETARD': ['EN_COURS', 'ANNULEE'],
                 'EN_COURS': ['TERMINEE', 'ANNULEE'],
-                'EXPIREE': ['PLANIFIEE', 'ANNULEE'],  # PLANIFIEE via replanification
                 'ANNULEE': ['PLANIFIEE'],  # Réactivation via replanification
                 'TERMINEE': ['VALIDEE', 'REJETEE'],  # Validation uniquement
                 'REJETEE': ['PLANIFIEE'],  # Replanification après rejet
@@ -975,10 +977,21 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         print(f"[PERF] Extracted M2M - equipes: {len(equipes) if equipes else 0}, objets: {len(objets) if objets else 0}")
         print(f"[DEBUG] validated_data après pops: {validated_data}")
 
+        # Capturer l'ancien statut avant la mise à jour
+        ancien_statut_stocke = instance.statut
+        # ✅ FIX: Utiliser le statut calculé pour refléter l'état réel (ce que l'utilisateur voit)
+        ancien_statut_calcule = instance.computed_statut
+
         start_super = time.time()
         instance = super().update(instance, validated_data)
         print(f"[PERF] super().update() took {time.time() - start_super:.2f}s")
         print(f"[DEBUG] Statut après super().update(): {instance.statut}")
+
+        # REPLANIFICATION: Restaurer les distributions si modification d'une tâche ANNULEE
+        if ancien_statut_calcule == 'ANNULEE':
+            from .business_rules import restaurer_distributions_apres_replanification
+            nb_restaurees = restaurer_distributions_apres_replanification(instance)
+            print(f"[REPLANIFICATION] Tâche #{instance.id}: ANNULEE modifiée, {nb_restaurees} distribution(s) restaurée(s)")
 
         # Set M2M relationships
         if equipes is not None:

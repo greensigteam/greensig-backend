@@ -27,38 +27,168 @@ class Command(BaseCommand):
         TYPES_VEGETATION = ['Palmier', 'Arbre', 'Arbuste', 'Vivace', 'Cactus', 'Graminee', 'Gazon']
         TYPES_HYDRAULIQUE = ['Puit', 'Pompe', 'Vanne', 'Clapet', 'Ballon', 'Canalisation', 'Aspersion', 'Goutte']
 
-        # Matrice d'applicabilité
+        # Matrice d'applicabilité basée sur le tableau de productivité théorique
         # Format: nom_tache: liste des types d'objets applicables
-        # Le ratio utilisé est celui de la productivité théorique du TypeTache
+        # Basé sur le tableau Oui/Non fourni par l'utilisateur
         APPLICABILITE = {
-            # Tâches applicables à tous les végétaux
+            # ========== NETTOYAGE ==========
             'Nettoyage': TYPES_VEGETATION,
-            'Binage': TYPES_VEGETATION,
-            'Confection cuvette': TYPES_VEGETATION,
+            'Nettoyage des arbres': ['Arbre'],
+            'Nettoyage des palmiers': ['Palmier'],
+
+            # ========== BINAGE ==========
+            'Binage': ['Arbre', 'Arbuste', 'Vivace', 'Cactus', 'Graminee'],  # Pas Palmier ni Gazon
+            'Binage des arbustes': ['Arbuste'],
+            'Binage des vivaces': ['Vivace'],
+            'Binage des cactus': ['Cactus'],
+            'Binage des graminées': ['Graminee'],
+
+            # ========== CONFECTION CUVETTE ==========
+            'Confection cuvette': ['Palmier', 'Arbre', 'Arbuste'],  # Uniquement plantes ligneuses
+
+            # ========== TRAITEMENT ==========
             'Traitement': TYPES_VEGETATION,
-            'Arrosage': TYPES_VEGETATION,
-            'Sablage': TYPES_VEGETATION,
+            'Traitement des arbres': ['Arbre'],
+            'Traitement des palmiers': ['Palmier'],
+
+            # ========== ARROSAGE ==========
+            'Arrosage des arbres': ['Arbre'],
+            'Arrosage des arbustes': ['Arbuste'],
+            'Arrosage des palmiers': ['Palmier'],
+            'Arrosage des graminées': ['Graminee'],
+            'Arrosage des vivaces': ['Vivace'],
+            'Arrosage des cactus': ['Cactus'],
+            'Arrosage du gazon': ['Gazon'],
+
+            # ========== ÉLAGAGE ==========
+            'Élagage': ['Arbre', 'Arbuste'],  # Pas Palmier (voir Élagage des palmiers)
+            'Élagage des palmiers': ['Palmier'],
+
+            # ========== TUTEURAGE ==========
+            'Tuteurage des arbres': ['Arbre'],
+            'Tuteurage des palmiers': ['Palmier'],
+            'Tuteurage des arbustes': ['Arbuste'],
+
+            # ========== SABLAGE ==========
+            # Le sablage s'applique uniquement au gazon
+            'Sablage': ['Gazon'],
+
+            # ========== FERTILISATION ==========
             'Fertilisation': TYPES_VEGETATION,
-            'Paillage': TYPES_VEGETATION,
+            'Fertilisation chimique': TYPES_VEGETATION,
+            'Fertilisation organique': TYPES_VEGETATION,
+            'Fertilisation des arbres': ['Arbre'],
+            'Fertilisation des palmiers': ['Palmier'],
+
+            # ========== PAILLAGE ==========
+            'Paillage': ['Palmier', 'Arbre', 'Arbuste', 'Vivace', 'Cactus', 'Graminee'],  # Pas Gazon
+            'Paillage des arbres': ['Arbre'],
+            'Paillage des palmiers': ['Palmier'],
+
+            # ========== NIVELLEMENT ==========
             'Nivellement du sol': TYPES_VEGETATION,
-            'Aération des sols': TYPES_VEGETATION,
-            'Replantation': TYPES_VEGETATION,
-            'Taille d\'entretien': TYPES_VEGETATION,
+
+            # ========== AÉRATION DES SOLS ==========
+            'Aération des sols pour gazon': ['Gazon'],
+
+            # ========== REPLANTATION ==========
+            'Replantation des arbres': ['Arbre'],
+            'Replantation des palmiers': ['Palmier'],
+            'Replantation des arbustes': ['Arbuste'],
+            'Replantation des vivaces': ['Vivace'],
+            'Replantation des graminées': ['Graminee'],
+            'Replantation des cactus': ['Cactus'],
+
+            # ========== TAILLE DE FORMATION ==========
+            'Taille de formation': ['Arbre', 'Arbuste'],
+            'Taille de formation des arbres': ['Arbre'],
+
+            # ========== TAILLE D'ENTRETIEN ==========
+            'Taille d\'entretien des arbres': ['Arbre'],
+            'Taille d\'entretien des arbustes': ['Arbuste'],
+
+            # ========== TAILLE DE RAJEUNISSEMENT ==========
+            'Taille de rajeunissement': ['Arbre', 'Arbuste', 'Vivace'],
+
+            # ========== TAILLE D'ÉCLAIRCISSAGE ==========
+            'Taille d\'éclaircissage': ['Arbre', 'Arbuste'],
+
+            # ========== TAILLE DÉCORATIVE ==========
+            'Taille décorative': ['Arbre', 'Arbuste', 'Vivace'],
+
+            # ========== TERREAUTAGE ==========
             'Terreautage': TYPES_VEGETATION,
+            'Terreautage des arbres': ['Arbre'],
+            'Terreautage des palmiers': ['Palmier'],
+
+            # ========== ENTRETIEN GAZON ==========
+            'Topdressing gazon': ['Gazon'],
+            'Compactage du gazon': ['Gazon'],
+            'Scarification': ['Gazon'],  # Uniquement gazon (pas graminées)
+            'Tonte': ['Gazon'],  # Uniquement gazon
+            'Tonte rasée': ['Gazon'],
+            'Sursemis': ['Gazon'],
+
+            # ========== RAMASSAGE DES DÉCHETS VERTS ==========
             'Ramassage des déchets verts': TYPES_VEGETATION,
-            'Désherbage': TYPES_VEGETATION,
-            'Nivellement des bordures': TYPES_VEGETATION,
-            'Arrachage des plantes mortes': TYPES_VEGETATION,
+            'Ramassage des déchets verts des arbres': ['Arbre'],
+            'Ramassage des déchets verts des palmiers': ['Palmier'],
 
-            # Tâches avec applicabilité restreinte
-            'Élagage': ['Palmier', 'Arbre', 'Arbuste'],
-            'Tuteurage': ['Palmier', 'Arbre', 'Arbuste', 'Vivace', 'Cactus'],
-            'Taille de formation': ['Arbre', 'Arbuste', 'Vivace'],
-            'Scarification': ['Graminee', 'Gazon'],
-            'Tonte': ['Graminee', 'Gazon'],
+            # ========== DÉSHERBAGE ==========
+            'Désherbage manuel des arbres': ['Arbre'],
+            'Désherbage manuel des palmiers': ['Palmier'],
+            'Désherbage manuel des arbustes': ['Arbuste'],
+            'Désherbage manuel des vivaces': ['Vivace'],
+            'Désherbage manuel des graminées': ['Graminee'],
+            'Désherbage manuel des cactus': ['Cactus'],
+            'Désherbage chimique': TYPES_VEGETATION,
 
-            # Tâche hydraulique uniquement
+            # ========== TRAÇAGE DES BORDURES ==========
+            'Traçage des bordures': ['Gazon', 'Arbuste', 'Vivace', 'Graminee'],
+
+            # ========== ARRACHAGE DES VÉGÉTAUX MORTS ==========
+            'Arrachage des arbres morts': ['Arbre'],
+            'Arrachage des palmiers morts': ['Palmier'],
+            'Arrachage des arbustes morts': ['Arbuste'],
+            'Arrachage des graminées mortes': ['Graminee'],
+            'Arrachage des cactus morts': ['Cactus'],
+            'Arrachage des vivaces mortes': ['Vivace'],
+
+            # ========== APPORT DE TERRE ==========
+            'Apport de terre végétale': TYPES_VEGETATION,
+
+            # ========== ENTRETIEN POTS INTÉRIEURS ==========
+            'Entretien des pots intérieurs': ['Arbuste', 'Vivace', 'Cactus', 'Graminee'],
+            'Arrosage des pots intérieurs': ['Arbuste', 'Vivace', 'Cactus', 'Graminee'],
+            'Remplacement du substrat': ['Arbuste', 'Vivace', 'Cactus', 'Graminee'],
+
+            # ========== DÉCORTICAGE (PALMIERS UNIQUEMENT) ==========
+            'Décorticage des palmiers': ['Palmier'],
+
+            # ========== PALISSAGE ==========
+            'Palissage': ['Arbuste', 'Vivace'],  # Plantes grimpantes
+
+            # ========== PLANTATION ==========
+            'Plantation': TYPES_VEGETATION,
+            'Plantation des arbres': ['Arbre'],
+            'Plantation des palmiers': ['Palmier'],
+            'Plantation des arbustes': ['Arbuste'],
+
+            # ========== MASTICAGE ==========
+            'Masticage': ['Palmier', 'Arbre', 'Arbuste'],  # Après taille/blessure
+
+            # ========== MULTIPLICATION VÉGÉTATIVE ==========
+            'Multiplication végétative': ['Arbuste', 'Vivace', 'Graminee', 'Cactus'],
+
+            # ========== PINCEMENT ==========
+            'Pincement': ['Arbuste', 'Vivace'],
+
+            # ========== ÉLIMINATION DES DRAGEONS ==========
+            'Élimination des drageons': ['Palmier', 'Arbre', 'Arbuste'],
+
+            # ========== HYDROLOGIE ==========
             'Réparation des fuites': TYPES_HYDRAULIQUE,
+            'Contrôle du système d\'irrigation': TYPES_HYDRAULIQUE,
         }
 
         created_count = 0
@@ -85,6 +215,9 @@ class Command(BaseCommand):
                 'unite': 'unite',
                 'cuvettes': 'unite',
                 'arbres': 'unite',
+                'palmiers': 'unite',
+                'pots': 'unite',
+                'm3': 'm2',
             }
             unite_ratio = unite_mapping.get(unite, 'unite')
 

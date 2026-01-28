@@ -418,100 +418,19 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
     @action(detail=False, methods=['post'], url_path='refresh-task-statuses')
     def refresh_task_statuses(self, request):
         """
-        Rafraîchit les statuts des tâches en retard et expirées.
-        POST /api/planification/taches/refresh-task-statuses/
+        DESACTIVEE: Endpoint conserve pour compatibilite.
 
-        ⚡ OPTIMISÉ: Utilise des annotations SQL au lieu de requêtes N+1.
-
-        Vérifie toutes les tâches PLANIFIEE/EN_RETARD et met à jour leurs statuts:
-        - PLANIFIEE → EN_RETARD si heure de début passée
-        - PLANIFIEE/EN_RETARD → EXPIREE si heure de fin passée
-
-        Returns:
-            - late_count: Nombre de tâches marquées en retard
-            - late_ids: Liste des IDs des tâches en retard
-            - expired_count: Nombre de tâches marquées expirées
-            - expired_ids: Liste des IDs des tâches expirées
+        Le systeme simplifie ne calcule plus automatiquement les statuts
+        EN_RETARD et EXPIREE. Les taches restent PLANIFIEE jusqu'a
+        demarrage explicite par l'utilisateur.
         """
-        from django.db.models import Min, Max
-        from datetime import datetime, time
-
-        now = timezone.now()
-        today = now.date()
-        current_time = now.time()
-
-        # ⚡ OPTIMISATION: Annoter les tâches avec les dates/heures min/max des distributions
-        # Une seule requête au lieu de N requêtes
-        taches = Tache.objects.filter(
-            statut__in=['PLANIFIEE', 'EN_RETARD'],
-            deleted_at__isnull=True
-        ).annotate(
-            first_dist_date=Min('distributions_charge__date'),
-            first_dist_heure=Min('distributions_charge__heure_debut'),
-            last_dist_date=Max('distributions_charge__date'),
-            last_dist_heure=Max('distributions_charge__heure_fin')
-        ).values(
-            'id', 'statut', 'date_debut_planifiee', 'date_fin_planifiee',
-            'first_dist_date', 'first_dist_heure', 'last_dist_date', 'last_dist_heure'
-        )
-
-        expired_ids = []
-        late_ids = []
-
-        for tache in taches:
-            tache_id = tache['id']
-            statut = tache['statut']
-
-            # Déterminer les dates de début/fin effectives
-            first_date = tache['first_dist_date'] or tache['date_debut_planifiee']
-            first_heure = tache['first_dist_heure']
-            last_date = tache['last_dist_date'] or tache['date_fin_planifiee']
-            last_heure = tache['last_dist_heure']
-
-            # Vérifier si EXPIREE (dernière date/heure passée)
-            is_expired = False
-            if last_date:
-                if last_date < today:
-                    is_expired = True
-                elif last_date == today and last_heure and current_time > last_heure:
-                    is_expired = True
-
-            if is_expired:
-                expired_ids.append(tache_id)
-                continue  # Pas besoin de vérifier EN_RETARD
-
-            # Vérifier si EN_RETARD (première date/heure passée, mais pas expirée)
-            if statut == 'PLANIFIEE':
-                is_late = False
-                if first_date:
-                    if first_date < today:
-                        is_late = True
-                    elif first_date == today and first_heure and current_time > first_heure:
-                        is_late = True
-
-                if is_late:
-                    late_ids.append(tache_id)
-
-        # ⚡ Mise à jour en batch (2 requêtes au lieu de N)
-        if expired_ids:
-            Tache.objects.filter(id__in=expired_ids).update(statut='EXPIREE')
-            # Synchroniser les distributions des tâches expirées
-            DistributionCharge.objects.filter(
-                tache_id__in=expired_ids,
-                status__in=['NON_REALISEE', 'EN_RETARD']
-            ).update(status='ANNULEE', motif_report_annulation='AUTRE')
-
-        if late_ids:
-            Tache.objects.filter(id__in=late_ids).update(statut='EN_RETARD')
-
-        total_updated = len(late_ids) + len(expired_ids)
         return Response({
-            'message': f'{total_updated} tâche(s) mise(s) à jour ({len(late_ids)} en retard, {len(expired_ids)} expirée(s))',
-            'late_count': len(late_ids),
-            'late_ids': late_ids,
-            'expired_count': len(expired_ids),
-            'expired_ids': expired_ids,
-            'total_updated': total_updated
+            'message': 'Endpoint desactive - systeme de statuts simplifie',
+            'late_count': 0,
+            'late_ids': [],
+            'expired_count': 0,
+            'expired_ids': [],
+            'total_updated': 0
         })
 
     @action(detail=True, methods=['post'])
@@ -1052,27 +971,26 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
     - CLIENT: Voit uniquement les distributions des tâches de sa structure
 
     Filtres disponibles (via DistributionChargeFilter):
-    - ?status=EN_RETARD : Par statut
-    - ?status__in=NON_REALISEE,EN_RETARD : Plusieurs statuts
-    - ?actif=true : Distributions actives (NON_REALISEE, EN_COURS, EN_RETARD)
-    - ?en_retard=true : Uniquement en retard
+    - ?status=NON_REALISEE : Par statut
+    - ?status__in=NON_REALISEE,EN_COURS : Plusieurs statuts
+    - ?actif=true : Distributions actives (NON_REALISEE, EN_COURS)
     - ?date=2024-01-15 : Date exacte
-    - ?date__gte=2024-01-01&date__lte=2024-01-31 : Période
+    - ?date__gte=2024-01-01&date__lte=2024-01-31 : Periode
     - ?aujourd_hui=true : Distributions du jour
     - ?semaine_courante=true : Distributions de la semaine
-    - ?tache=123 : Par tâche
-    - ?equipe=5 : Par équipe
+    - ?tache=123 : Par tache
+    - ?equipe=5 : Par equipe
     - ?site=10 : Par site
     - ?structure=3 : Par structure client
-    - ?priorite__gte=4 : Par priorité de la tâche
-    - ?urgent=true : Tâches urgentes (priorité >= 4)
-    - ?type_tache__nom=élagage : Par type de tâche
+    - ?priorite__gte=4 : Par priorite de la tache
+    - ?urgent=true : Taches urgentes (priorite >= 4)
+    - ?type_tache__nom=elagage : Par type de tache
     - ?est_report=true : Distributions issues d'un report
     - ?search=keyword : Recherche textuelle
     - ?ordering=-date : Tri
 
     Exemples:
-    - GET /api/planification/distributions/?status=EN_RETARD&aujourd_hui=true
+    - GET /api/planification/distributions/?status=NON_REALISEE&aujourd_hui=true
     - GET /api/planification/distributions/?equipe=5&actif=true
     - GET /api/planification/distributions/?site=10&date__gte=2024-01-01
     """
@@ -1244,13 +1162,11 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         }
 
         Logique automatique:
-        - Si c'est la première distribution marquée comme réalisée
-        - Et que la tâche est en statut PLANIFIEE ou EN_RETARD
+        - Si c'est la premiere distribution marquee comme realisee
+        - Et que la tache est en statut PLANIFIEE
         - Alors:
-          * La tâche passe automatiquement en statut EN_COURS
-          * La date_debut_reelle de la tâche est définie avec la date actuelle (aujourd'hui)
-          * Note: Pour les tâches EN_RETARD, cela permet de tracer le retard via la différence
-                  entre date_debut_planifiee et date_debut_reelle
+          * La tache passe automatiquement en statut EN_COURS
+          * La date_debut_reelle de la tache est definie avec la date actuelle
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -1269,10 +1185,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         distribution.save()
 
-        # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE ou EN_RETARD,
+        # Si c'est la première distribution réalisée et que la tâche est PLANIFIEE,
         # passer la tâche en EN_COURS et définir la date de début réelle
-        # Note: Permet de démarrer une tâche en retard pour la traçabilité
-        if est_premiere_distribution and tache.statut in ('PLANIFIEE', 'EN_RETARD'):
+        if est_premiere_distribution and tache.statut == 'PLANIFIEE':
             tache.statut = 'EN_COURS'
             tache.date_debut_reelle = timezone.now().date()  # Date actuelle (aujourd'hui)
             tache.save()
@@ -1292,12 +1207,11 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         POST /api/planification/distributions/{id}/marquer-non-realisee/
 
         Logique automatique:
-        - Si c'était la dernière distribution réalisée
-        - Et que la tâche est en statut EN_COURS
+        - Si c'etait la derniere distribution realisee
+        - Et que la tache est en statut EN_COURS
         - Alors:
-          * Si l'heure de début est passée → tâche passe en EN_RETARD
-          * Sinon → tâche passe en PLANIFIEE
-          * La date_debut_reelle de la tâche est supprimée (remise à None)
+          * La tache repasse en PLANIFIEE
+          * La date_debut_reelle de la tache est supprimee (remise a None)
         """
         distribution = self.get_object()
         tache = distribution.tache
@@ -1315,37 +1229,15 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.save()
 
         # Si c'était la dernière distribution réalisée et que la tâche est EN_COURS,
-        # remettre la tâche en statut approprié (EN_RETARD si en retard, sinon PLANIFIEE)
+        # remettre la tâche en PLANIFIEE
         # et supprimer la date de début réelle
         nouveau_statut = None
         if est_derniere_distribution and tache.statut == 'EN_COURS':
             tache.date_debut_reelle = None
 
-            # Vérifier si la tâche devrait être EN_RETARD (heure de début passée)
-            # Note: On ne peut pas utiliser tache.is_late car il vérifie statut == PLANIFIEE
-            now = timezone.now()
-            today = now.date()
-            current_time = now.time()
-
-            should_be_late = False
-            distributions = list(tache.distributions_charge.order_by('date', 'heure_debut'))
-            if distributions:
-                first_dist = distributions[0]
-                if first_dist.date < today:
-                    should_be_late = True
-                elif first_dist.date == today and first_dist.heure_debut is not None:
-                    if current_time > first_dist.heure_debut:
-                        should_be_late = True
-            else:
-                # Pas de distributions → utiliser date_debut_planifiee
-                should_be_late = tache.date_debut_planifiee < today
-
-            if should_be_late:
-                tache.statut = 'EN_RETARD'
-                nouveau_statut = 'EN_RETARD'
-            else:
-                tache.statut = 'PLANIFIEE'
-                nouveau_statut = 'PLANIFIEE'
+            # Remettre la tâche en PLANIFIEE
+            tache.statut = 'PLANIFIEE'
+            nouveau_statut = 'PLANIFIEE'
             tache.save()
 
         serializer = self.get_serializer(distribution)
@@ -1364,24 +1256,40 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='demarrer')
     def demarrer(self, request, pk=None):
         """
-        Démarre une distribution de charge (NON_REALISEE/EN_RETARD → EN_COURS).
+        Démarre une distribution de charge (NON_REALISEE → EN_COURS).
 
         POST /api/planification/distributions/{id}/demarrer/
 
+        Body (optionnel):
+        {
+            "heure_debut_reelle": "08:00",    // Heure réelle de début (terrain)
+            "date_debut_reelle": "2024-01-15" // Date réelle de début de la tâche
+        }
+
         Transitions autorisées:
         - NON_REALISEE → EN_COURS
-        - EN_RETARD → EN_COURS
+
+        Impossible de demarrer avant la date planifiee.
 
         Effets sur la tâche mère:
         - Si c'est la première distribution démarrée et que la tâche est
-          PLANIFIEE/EN_RETARD/EXPIREE, la tâche passe en EN_COURS.
-        - date_debut_reelle est définie sur la tâche.
+          PLANIFIEE, la tâche passe en EN_COURS.
+        - date_debut_reelle est définie sur la tâche (avec la date fournie ou aujourd'hui).
         """
         from rest_framework.exceptions import ValidationError
+        from datetime import datetime
 
         distribution = self.get_object()
         tache = distribution.tache
         ancien_statut = distribution.status
+
+        # ✅ NOUVEAU: Impossible de démarrer avant la date planifiée
+        today = timezone.now().date()
+        if distribution.date > today:
+            raise ValidationError({
+                'detail': f"Impossible de démarrer cette distribution avant sa date planifiée ({distribution.date}). "
+                          f"La date actuelle est {today}."
+            })
 
         # Valider la transition
         try:
@@ -1395,10 +1303,31 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         # Mettre à jour la distribution
         distribution.status = 'EN_COURS'
         distribution.date_demarrage = timezone.now()
+
+        # Enregistrer l'heure réelle de début (optionnel)
+        heure_debut_reelle = request.data.get('heure_debut_reelle')
+        if heure_debut_reelle:
+            try:
+                distribution.heure_debut_reelle = datetime.strptime(heure_debut_reelle, '%H:%M').time()
+            except ValueError:
+                try:
+                    distribution.heure_debut_reelle = datetime.strptime(heure_debut_reelle, '%H:%M:%S').time()
+                except ValueError:
+                    raise ValidationError({'heure_debut_reelle': 'Format invalide. Utilisez HH:MM ou HH:MM:SS'})
+
         distribution.save()
 
-        # Synchroniser la tâche mère
-        tache_modifiee = synchroniser_tache_apres_demarrage(tache, est_premiere)
+        # Extraire la date réelle de début (optionnel)
+        date_debut_reelle = None
+        date_debut_reelle_str = request.data.get('date_debut_reelle')
+        if date_debut_reelle_str:
+            try:
+                date_debut_reelle = datetime.strptime(date_debut_reelle_str, '%Y-%m-%d').date()
+            except ValueError:
+                raise ValidationError({'date_debut_reelle': 'Format invalide. Utilisez YYYY-MM-DD'})
+
+        # Synchroniser la tâche mère (avec la date réelle si fournie)
+        tache_modifiee = synchroniser_tache_apres_demarrage(tache, est_premiere, date_debut_reelle)
 
         serializer = self.get_serializer(distribution)
         return Response({
@@ -1419,7 +1348,10 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         Body (optionnel):
         {
-            "heures_reelles": 7.5  // Heures réellement travaillées
+            "heure_debut_reelle": "08:00",  // Heure réelle de début (terrain)
+            "heure_fin_reelle": "12:30",    // Heure réelle de fin (terrain)
+            "heures_reelles": 4.5,          // Override manuel (sinon auto-calculé)
+            "date_fin_reelle": "2024-01-15" // Date réelle de fin de la tâche
         }
 
         Transitions autorisées:
@@ -1427,9 +1359,10 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         Effets sur la tâche mère:
         - Si toutes les distributions sont terminées (REALISEE/ANNULEE),
-          la tâche passe en TERMINEE.
+          la tâche passe en TERMINEE avec la date_fin_reelle fournie ou aujourd'hui.
         """
         from rest_framework.exceptions import ValidationError
+        from datetime import datetime
 
         distribution = self.get_object()
         tache = distribution.tache
@@ -1445,7 +1378,36 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         distribution.status = 'REALISEE'
         distribution.date_completion = timezone.now()
 
-        # Optionnellement, enregistrer les heures réelles
+        # Enregistrer les heures réelles de terrain (optionnel)
+        heure_debut_reelle = request.data.get('heure_debut_reelle')
+        heure_fin_reelle = request.data.get('heure_fin_reelle')
+
+        if heure_debut_reelle:
+            try:
+                distribution.heure_debut_reelle = datetime.strptime(heure_debut_reelle, '%H:%M').time()
+            except ValueError:
+                try:
+                    distribution.heure_debut_reelle = datetime.strptime(heure_debut_reelle, '%H:%M:%S').time()
+                except ValueError:
+                    raise ValidationError({'heure_debut_reelle': 'Format invalide. Utilisez HH:MM ou HH:MM:SS'})
+
+        if heure_fin_reelle:
+            try:
+                distribution.heure_fin_reelle = datetime.strptime(heure_fin_reelle, '%H:%M').time()
+            except ValueError:
+                try:
+                    distribution.heure_fin_reelle = datetime.strptime(heure_fin_reelle, '%H:%M:%S').time()
+                except ValueError:
+                    raise ValidationError({'heure_fin_reelle': 'Format invalide. Utilisez HH:MM ou HH:MM:SS'})
+
+        # Validation: heure_fin_reelle > heure_debut_reelle
+        if distribution.heure_debut_reelle and distribution.heure_fin_reelle:
+            if distribution.heure_fin_reelle <= distribution.heure_debut_reelle:
+                raise ValidationError({
+                    'heure_fin_reelle': "L'heure de fin réelle doit être postérieure à l'heure de début réelle"
+                })
+
+        # Heures réelles: override manuel ou auto-calculé dans save()
         heures_reelles = request.data.get('heures_reelles')
         if heures_reelles is not None:
             try:
@@ -1455,8 +1417,17 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         distribution.save()
 
-        # Synchroniser la tâche mère
-        tache_modifiee = synchroniser_tache_apres_completion(tache)
+        # Extraire la date réelle de fin (optionnel)
+        date_fin_reelle = None
+        date_fin_reelle_str = request.data.get('date_fin_reelle')
+        if date_fin_reelle_str:
+            try:
+                date_fin_reelle = datetime.strptime(date_fin_reelle_str, '%Y-%m-%d').date()
+            except ValueError:
+                raise ValidationError({'date_fin_reelle': 'Format invalide. Utilisez YYYY-MM-DD'})
+
+        # Synchroniser la tâche mère (avec la date réelle si fournie)
+        tache_modifiee = synchroniser_tache_apres_completion(tache, date_fin_reelle)
 
         serializer = self.get_serializer(distribution)
         return Response({
@@ -1482,10 +1453,8 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
             "commentaire": "Pluie intense prévue"  // Optionnel
         }
 
-        Transitions autorisées:
-        - NON_REALISEE → REPORTEE
-        - EN_RETARD → REPORTEE
-        - EN_COURS → ANNULEE (via annuler, pas reporter)
+        Transitions autorisees:
+        - NON_REALISEE -> REPORTEE
 
         Règles:
         - La nouvelle date doit être dans le futur
@@ -1595,10 +1564,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
             "commentaire": "Client a annulé la prestation"  // Optionnel
         }
 
-        Transitions autorisées:
-        - NON_REALISEE → ANNULEE
-        - EN_RETARD → ANNULEE
-        - EN_COURS → ANNULEE
+        Transitions autorisees:
+        - NON_REALISEE -> ANNULEE
+        - EN_COURS -> ANNULEE
 
         Effets sur la tâche mère:
         - Si toutes les distributions sont ANNULEE → Tâche ANNULEE
@@ -1657,24 +1625,14 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         Transitions autorisées:
         - ANNULEE → NON_REALISEE
 
-        Restrictions:
-        - Impossible si la tâche mère est EXPIREE
-
-        Effets sur la tâche mère:
-        - Si la tâche était ANNULEE, elle repasse en PLANIFIEE
+        Effets sur la tache mere:
+        - Si la tache etait ANNULEE, elle repasse en PLANIFIEE
         """
         from rest_framework.exceptions import ValidationError
 
         distribution = self.get_object()
         tache = distribution.tache
         ancien_statut = distribution.status
-
-        # Vérifier que la tâche n'est pas expirée
-        if tache.statut == 'EXPIREE':
-            raise ValidationError({
-                'detail': "Impossible de restaurer : la tâche a expiré. "
-                          "Vous devez d'abord prolonger la date de fin de la tâche."
-            })
 
         # Valider la transition
         try:
