@@ -46,7 +46,6 @@ class Urgence(models.Model):
 
     niveau_urgence = models.CharField(max_length=20, choices=NIVEAU_CHOICES, verbose_name="Niveau d'urgence")
     couleur = models.CharField(max_length=20, help_text="Code couleur HEX (ex: #FF0000)", verbose_name="Couleur")
-    delai_max_traitement = models.IntegerField(help_text="Délai maximum en heures", verbose_name="Délai max (h)")
     ordre = models.IntegerField(help_text="Ordre de priorité (1-4)", verbose_name="Ordre", default=1)
 
     class Meta:
@@ -55,7 +54,7 @@ class Urgence(models.Model):
         ordering = ['ordre']
 
     def __str__(self):
-        return f"{self.niveau_urgence} ({self.delai_max_traitement}h)"
+        return self.niveau_urgence
 
 
 # ==============================================================================
@@ -119,6 +118,13 @@ class Reclamation(models.Model):
     localisation = models.GeometryField(srid=4326, blank=True, null=True, verbose_name="Zone affectée")
     
     description = models.TextField(verbose_name="Description du problème")
+    type_autre_description = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        verbose_name="Précision type (si Autre)",
+        help_text="Obligatoire si le type de réclamation est 'Autre'"
+    )
     justification_rejet = models.TextField(blank=True, null=True, verbose_name="Justification rejet/retard")
 
     # Rejet par l'administrateur
@@ -138,8 +144,7 @@ class Reclamation(models.Model):
     date_prise_en_compte = models.DateTimeField(null=True, blank=True, verbose_name="Date prise en compte")
     date_debut_traitement = models.DateTimeField(null=True, blank=True, verbose_name="Date début traitement")
     date_resolution = models.DateTimeField(null=True, blank=True, verbose_name="Date résolution")
-    
-    date_cloture_prevue = models.DateTimeField(null=True, blank=True, verbose_name="Date clôture prévue")
+
     date_cloture_reelle = models.DateTimeField(null=True, blank=True, verbose_name="Date clôture réelle")
 
     # Workflow de validation de clôture
@@ -235,13 +240,6 @@ class Reclamation(models.Model):
             else:
                 new_num = 1
             self.numero_reclamation = f"REC-{annee}-{new_num:04d}"
-            
-        # Calcul date de clôture prévue à la création
-        if not self.pk and self.urgence:
-            # Si c'est une création
-             if not self.date_cloture_prevue:
-                 delai_heures = self.urgence.delai_max_traitement
-                 self.date_cloture_prevue = timezone.now() + datetime.timedelta(hours=delai_heures)
 
         # T6.6.3.3 : Détection automatique de la zone (spatial)
         # Si une localisation est fournie mais pas de zone, on essaie de la trouver

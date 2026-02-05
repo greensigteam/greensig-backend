@@ -10,10 +10,10 @@ class Command(BaseCommand):
 
         # 1. URGENCES
         urgences = [
-            {'niveau_urgence': 'FAIBLE', 'couleur': '#2ecc71', 'delai_max_traitement': 72, 'ordre': 1},
-            {'niveau_urgence': 'MOYENNE', 'couleur': '#f1c40f', 'delai_max_traitement': 24, 'ordre': 2},
-            {'niveau_urgence': 'HAUTE', 'couleur': '#e67e22', 'delai_max_traitement': 8, 'ordre': 3},
-            {'niveau_urgence': 'CRITIQUE', 'couleur': '#e74c3c', 'delai_max_traitement': 2, 'ordre': 4},
+            {'niveau_urgence': 'FAIBLE', 'couleur': '#2ecc71', 'ordre': 1},
+            {'niveau_urgence': 'MOYENNE', 'couleur': '#f1c40f', 'ordre': 2},
+            {'niveau_urgence': 'HAUTE', 'couleur': '#e67e22', 'ordre': 3},
+            {'niveau_urgence': 'CRITIQUE', 'couleur': '#e74c3c', 'ordre': 4},
         ]
 
         urgences_created = 0
@@ -51,6 +51,9 @@ class Command(BaseCommand):
             # RESSOURCES
             {'nom_reclamation': "Manque matériel", 'code_reclamation': 'RES-MATERIEL', 'categorie': 'RESSOURCES', 'symbole': '🛠️'},
             {'nom_reclamation': "Manque effectif", 'code_reclamation': 'RES-EFFECTIF', 'categorie': 'RESSOURCES', 'symbole': '👷'},
+
+            # AUTRE
+            {'nom_reclamation': "Autre", 'code_reclamation': 'AUTRE-DIVERS', 'categorie': 'AUTRE', 'symbole': '📝'},
         ]
 
         types_created = 0

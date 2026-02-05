@@ -2046,7 +2046,6 @@ class StatistiquesUtilisateursView(APIView):
                 equipes_ids.update(superviseur.equipes_gerees.values_list('id', flat=True))
 
                 taches_sur_mes_sites = Tache.objects.filter(
-                    deleted_at__isnull=True,
                     objets__site__superviseur=superviseur
                 ).distinct()
 

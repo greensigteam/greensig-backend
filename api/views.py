@@ -166,10 +166,8 @@ class SiteListCreateView(generics.ListCreateAPIView):
             if not equipes_gerees_ids:
                 return []
 
-            # Tâches assignées à ces équipes (non supprimées)
+            # Tâches assignées à ces équipes
             taches_ids = Tache.objects.filter(
-                deleted_at__isnull=True
-            ).filter(
                 Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
             ).values_list('id', flat=True).distinct()
 
@@ -697,8 +695,6 @@ class SearchView(APIView):
                 return []
 
             taches_ids = Tache.objects.filter(
-                deleted_at__isnull=True
-            ).filter(
                 Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
             ).values_list('id', flat=True).distinct()
 
@@ -1206,8 +1202,7 @@ class StatisticsView(APIView):
 
                         # Tâches de ses équipes
                         mes_taches = Tache.objects.filter(
-                            Q(equipes__id__in=mes_equipes_ids) | Q(id_equipe__in=mes_equipes_ids),
-                            deleted_at__isnull=True
+                            Q(equipes__id__in=mes_equipes_ids) | Q(id_equipe__in=mes_equipes_ids)
                         ).distinct()
 
                         # Absences dans ses équipes (membres)
@@ -1732,8 +1727,7 @@ class InventoryExportExcelView(APIView):
                             from api_planification.models import Tache
                             derniere_tache = Tache.objects.filter(
                                 objets__id=obj.objet_ptr_id,
-                                statut='TERMINEE',
-                                deleted_at__isnull=True
+                                statut='TERMINEE'
                             ).order_by('-date_fin_reelle').values('date_fin_reelle').first()
                             if derniere_tache:
                                 value = derniere_tache['date_fin_reelle']

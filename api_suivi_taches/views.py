@@ -8,6 +8,18 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.db.models import Q
+from rest_framework.pagination import PageNumberPagination
+
+
+# ==============================================================================
+# PAGINATION
+# ==============================================================================
+
+class PhotoPagination(PageNumberPagination):
+    """Pagination pour les photos - évite les problèmes mémoire avec 100+ photos."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 50
 
 from .models import (
     Produit,
@@ -252,18 +264,22 @@ class ConsommationProduitViewSet(viewsets.ModelViewSet):
 class PhotoViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour gérer les photos des interventions.
-    
+
     Endpoints:
-    - GET /photos/ : Liste des photos
+    - GET /photos/ : Liste des photos (paginée)
     - GET /photos/{id}/ : Détail d'une photo
     - POST /photos/ : Ajouter une photo
     - PUT/PATCH /photos/{id}/ : Modifier une photo
     - DELETE /photos/{id}/ : Supprimer une photo
-    - GET /photos/par_tache/?tache_id=X : Photos d'une tâche
+    - GET /photos/par_tache/?tache_id=X : Photos d'une tâche (paginée)
     - GET /photos/avant/?tache_id=X : Photos avant d'une tâche
     - GET /photos/apres/?tache_id=X : Photos après d'une tâche
+
+    ⚡ OPTIMISATION: Pagination ajoutée pour éviter les problèmes mémoire
+    avec les tâches ayant 100+ photos.
     """
     permission_classes = [IsAuthenticated]
+    pagination_class = PhotoPagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['type_photo', 'tache', 'objet', 'reclamation']
     ordering_fields = ['date_prise']
@@ -284,9 +300,12 @@ class PhotoViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def par_tache(self, request):
         """
-        Retourne toutes les photos d'une tâche.
+        Retourne toutes les photos d'une tâche (paginé).
 
         GET /photos/par_tache/?tache_id=X
+        GET /photos/par_tache/?tache_id=X&page=2
+
+        ⚡ OPTIMISATION: Support de la pagination pour les tâches avec beaucoup de photos.
         """
         tache_id = request.query_params.get('tache_id')
         if not tache_id:
@@ -296,6 +315,13 @@ class PhotoViewSet(viewsets.ModelViewSet):
             )
 
         photos = self.get_queryset().filter(tache_id=tache_id)
+
+        # Utiliser la pagination si configurée
+        page = self.paginate_queryset(photos)
+        if page is not None:
+            serializer = PhotoListSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+
         serializer = PhotoListSerializer(photos, many=True, context={'request': request})
         return Response(serializer.data)
     

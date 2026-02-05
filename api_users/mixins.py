@@ -122,7 +122,6 @@ class RoleBasedQuerySetMixin:
             from api_planification.models import Tache
 
             taches_sur_mes_sites = Tache.objects.filter(
-                deleted_at__isnull=True,
                 objets__site__superviseur=superviseur
             ).distinct()
 
@@ -161,7 +160,6 @@ class RoleBasedQuerySetMixin:
             sites_superviseur_ids = superviseur.equipes_gerees.values_list('site_id', flat=True).distinct()
 
             taches_sur_mes_sites = Tache.objects.filter(
-                deleted_at__isnull=True,
                 objets__site__superviseur=superviseur
             ).distinct()
 
@@ -348,7 +346,6 @@ class RoleBasedQuerySetMixin:
 
             # 2. Opérateurs dont l'équipe a des tâches sur les sites du client
             taches_sur_sites_client = Tache.objects.filter(
-                deleted_at__isnull=True,
                 objets__site__structure_client=client.structure
             ).distinct()
             logger.info(f"[RoleBasedQuerySetMixin] Operateur: {taches_sur_sites_client.count()} tâches sur les sites du client")

@@ -57,7 +57,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
     filterset_class = ReclamationFilter
-    ordering_fields = ['date_creation', 'date_cloture_prevue']
+    ordering_fields = ['date_creation']
     search_fields = ['numero_reclamation', 'description']
 
     def get_queryset(self):
@@ -87,7 +87,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                 'satisfaction',
                 Prefetch(
                     'taches_correctives',
-                    queryset=Tache.objects.filter(deleted_at__isnull=True).select_related(
+                    queryset=Tache.objects.select_related(
                         'id_type_tache', 'id_equipe'
                     ).prefetch_related('equipes')
                 )
@@ -128,9 +128,11 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         return queryset.filter(createur=user)
 
     def perform_destroy(self, instance):
-        """Soft delete instead of physical deletion."""
-        instance.actif = False
-        instance.save()
+        """Suppression réelle de la réclamation.
+
+        Les tâches correctives associées sont supprimées automatiquement (CASCADE).
+        """
+        instance.delete()
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -293,8 +295,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Vérification 3: Il doit y avoir au moins une tâche corrective (non soft-deleted)
-        taches = reclamation.taches_correctives.filter(deleted_at__isnull=True)
+        # Vérification 3: Il doit y avoir au moins une tâche corrective
+        taches = reclamation.taches_correctives.all()
         nombre_taches = taches.count()
 
         if nombre_taches == 0:
@@ -1013,22 +1015,23 @@ class ReclamationExportExcelView(APIView):
         roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
 
         if 'ADMIN' in roles:
-            queryset = Reclamation.objects.all()
+            queryset = Reclamation.objects.filter(actif=True)
         elif 'CLIENT' in roles and hasattr(user, 'client_profile'):
             structure = user.client_profile.structure
             if structure:
                 # Le client voit ses réclamations + celles de sa structure si visible_client=True
                 queryset = Reclamation.objects.filter(
                     Q(createur=user) |
-                    Q(structure_client=structure, visible_client=True)
+                    Q(structure_client=structure, visible_client=True),
+                    actif=True
                 )
             else:
-                queryset = Reclamation.objects.filter(createur=user)
+                queryset = Reclamation.objects.filter(createur=user, actif=True)
         elif 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
             superviseur = user.superviseur_profile
-            queryset = Reclamation.objects.filter(site__superviseur=superviseur)
+            queryset = Reclamation.objects.filter(site__superviseur=superviseur, actif=True)
         else:
-            queryset = Reclamation.objects.filter(createur=user)
+            queryset = Reclamation.objects.filter(createur=user, actif=True)
 
         # Appliquer les filtres
         statut = request.query_params.get('statut')
@@ -1106,7 +1109,6 @@ class ReclamationExportExcelView(APIView):
             'Date prise en compte',
             'Date début traitement',
             'Date résolution',
-            'Date clôture prévue',
             'Date clôture réelle',
             'Délai traitement (h)',
         ]
@@ -1155,7 +1157,6 @@ class ReclamationExportExcelView(APIView):
                 rec.date_prise_en_compte.strftime('%d/%m/%Y %H:%M') if rec.date_prise_en_compte else '-',
                 rec.date_debut_traitement.strftime('%d/%m/%Y %H:%M') if rec.date_debut_traitement else '-',
                 rec.date_resolution.strftime('%d/%m/%Y %H:%M') if rec.date_resolution else '-',
-                rec.date_cloture_prevue.strftime('%d/%m/%Y %H:%M') if rec.date_cloture_prevue else '-',
                 rec.date_cloture_reelle.strftime('%d/%m/%Y %H:%M') if rec.date_cloture_reelle else '-',
                 delai if delai else '-',
             ]
@@ -1168,7 +1169,7 @@ class ReclamationExportExcelView(APIView):
                     cell.fill = fill
 
         # Ajuster les largeurs de colonnes
-        column_widths = [18, 20, 12, 25, 20, 15, 20, 20, 40, 18, 18, 18, 18, 18, 18, 18, 15]
+        column_widths = [18, 20, 12, 25, 20, 15, 20, 20, 40, 18, 18, 18, 18, 18, 18, 15]
         for i, width in enumerate(column_widths, 1):
             ws_list.column_dimensions[ws_list.cell(1, i).column_letter].width = width
 

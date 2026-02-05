@@ -189,8 +189,17 @@ class DistributionChargeSerializer(serializers.ModelSerializer):
         ]
 
     def get_nombre_reports(self, obj) -> int:
-        """Retourne le nombre de reports dans la chaîne."""
-        return obj.get_nombre_reports() if obj.pk else 0
+        """
+        Retourne le nombre de reports dans la chaîne.
+
+        ⚡ OPTIMISATION: Évite le calcul coûteux si pas nécessaire.
+        """
+        if not obj.pk:
+            return 0
+        # Si cette distribution n'a jamais été impliquée dans un report, retourner 0
+        if obj.distribution_origine_id is None and obj.distribution_remplacement_id is None:
+            return 0
+        return obj.get_nombre_reports()
 
     def get_est_report(self, obj) -> bool:
         """Retourne True si cette distribution est issue d'un report."""
@@ -313,8 +322,17 @@ class DistributionChargeEnrichedSerializer(serializers.ModelSerializer):
         read_only_fields = fields  # Tout est read-only pour ce serializer de lecture
 
     def get_nombre_reports(self, obj) -> int:
-        """Retourne le nombre de reports dans la chaîne."""
-        return obj.get_nombre_reports() if obj.pk else 0
+        """
+        Retourne le nombre de reports dans la chaîne.
+
+        ⚡ OPTIMISATION: Évite le calcul coûteux si pas nécessaire.
+        """
+        if not obj.pk:
+            return 0
+        # Si cette distribution n'a jamais été impliquée dans un report, retourner 0
+        if obj.distribution_origine_id is None and obj.distribution_remplacement_id is None:
+            return 0
+        return obj.get_nombre_reports()
 
     def get_est_report(self, obj) -> bool:
         """Retourne True si cette distribution est issue d'un report."""
@@ -400,25 +418,50 @@ class TacheSerializer(serializers.ModelSerializer):
     site_nom = serializers.SerializerMethodField()
 
     def get_site_id(self, obj):
-        """Retourne le site_id déduit des objets ou de la réclamation."""
-        # 1. D'abord essayer depuis les objets
-        if obj.objets.exists():
+        """
+        Retourne le site_id déduit des objets ou de la réclamation.
+
+        ⚡ OPTIMISATION: Utilise les données prefetchées pour éviter N+1.
+        """
+        # 1. D'abord essayer depuis les objets prefetchés
+        objets_cache = getattr(obj, '_prefetched_objects_cache', {}).get('objets')
+        if objets_cache is not None:
+            # Utiliser les données prefetchées
+            for objet in objets_cache:
+                if objet.site_id:
+                    return objet.site_id
+        elif obj.objets.exists():
+            # Fallback si pas prefetché (devrait être rare)
             first_obj = obj.objets.first()
             if first_obj and first_obj.site_id:
                 return first_obj.site_id
-        # 2. Sinon depuis la réclamation
+
+        # 2. Sinon depuis la réclamation (déjà select_related dans le viewset)
         if obj.reclamation and obj.reclamation.site_id:
             return obj.reclamation.site_id
         return None
 
     def get_site_nom(self, obj):
-        """Retourne le nom du site déduit des objets ou de la réclamation."""
-        # 1. D'abord essayer depuis les objets
-        if obj.objets.exists():
+        """
+        Retourne le nom du site déduit des objets ou de la réclamation.
+
+        ⚡ OPTIMISATION: Utilise les données prefetchées pour éviter N+1.
+        Le viewset prefetch 'objets__site' donc site.nom_site est déjà chargé.
+        """
+        # 1. D'abord essayer depuis les objets prefetchés
+        objets_cache = getattr(obj, '_prefetched_objects_cache', {}).get('objets')
+        if objets_cache is not None:
+            # Utiliser les données prefetchées
+            for objet in objets_cache:
+                if objet.site:
+                    return objet.site.nom_site
+        elif obj.objets.exists():
+            # Fallback si pas prefetché (devrait être rare)
             first_obj = obj.objets.select_related('site').first()
             if first_obj and first_obj.site:
                 return first_obj.site.nom_site
-        # 2. Sinon depuis la réclamation
+
+        # 2. Sinon depuis la réclamation (déjà select_related dans le viewset)
         if obj.reclamation and obj.reclamation.site:
             return obj.reclamation.site.nom_site
         return None
@@ -543,7 +586,7 @@ class TacheListSerializer(serializers.ModelSerializer):
             'charge_estimee_heures', 'charge_manuelle', 'description_travaux',
             'statut', 'note_qualite', 'etat_validation', 'date_validation',
             'validee_par', 'commentaire_validation', 'notifiee', 'confirmee',
-            'reclamation', 'deleted_at', 'date_creation', 'objets',
+            'reclamation', 'date_creation', 'objets',
             # Champs calculés/relations
             'client_detail', 'structure_client_detail', 'type_tache_detail',
             'equipe_detail', 'equipes_detail', 'objets_detail',
@@ -581,7 +624,7 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tache
         fields = '__all__'
-        read_only_fields = ['deleted_at']
+        read_only_fields = []
 
     def validate(self, data):
         start = data.get('date_debut_planifiee')
@@ -688,6 +731,13 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "statut": f"Impossible d'annuler une tâche {self.instance.statut.lower()}. "
                               "Les tâches terminées ou validées ne peuvent pas être annulées."
+                })
+
+            # Motif d'annulation OBLIGATOIRE
+            motif_annulation = data.get('motif_annulation')
+            if not motif_annulation:
+                raise serializers.ValidationError({
+                    "motif_annulation": "Le motif d'annulation est obligatoire pour annuler une tâche."
                 })
 
         # Si une charge est fournie manuellement, activer le flag charge_manuelle
@@ -987,11 +1037,23 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         print(f"[PERF] super().update() took {time.time() - start_super:.2f}s")
         print(f"[DEBUG] Statut après super().update(): {instance.statut}")
 
-        # REPLANIFICATION: Restaurer les distributions si modification d'une tâche ANNULEE
-        if ancien_statut_calcule == 'ANNULEE':
-            from .business_rules import restaurer_distributions_apres_replanification
-            nb_restaurees = restaurer_distributions_apres_replanification(instance)
-            print(f"[REPLANIFICATION] Tâche #{instance.id}: ANNULEE modifiée, {nb_restaurees} distribution(s) restaurée(s)")
+        # ✅ ANNULATION: Remplir automatiquement date_annulation et annulee_par
+        if statut_explicite_initial == 'ANNULEE' and ancien_statut_stocke != 'ANNULEE':
+            from django.utils import timezone
+            instance.date_annulation = timezone.now()
+            if current_user:
+                instance.annulee_par = current_user
+            instance.save(update_fields=['date_annulation', 'annulee_par'])
+            print(f"[ANNULATION] Tâche #{instance.id} annulée par {current_user} le {instance.date_annulation}")
+
+        # ✅ REPLANIFICATION: Nettoyer les champs d'annulation quand on réactive une tâche
+        if ancien_statut_stocke == 'ANNULEE' and statut_explicite_initial and statut_explicite_initial != 'ANNULEE':
+            instance.motif_annulation = None
+            instance.commentaire_annulation = ''
+            instance.date_annulation = None
+            instance.annulee_par = None
+            instance.save(update_fields=['motif_annulation', 'commentaire_annulation', 'date_annulation', 'annulee_par'])
+            print(f"[REPLANIFICATION] Tâche #{instance.id} réactivée, champs d'annulation nettoyés")
 
         # Set M2M relationships
         if equipes is not None:
@@ -1012,12 +1074,23 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         # ✅ NOUVEAU: Mettre à jour les distributions de charge (Smart Update)
         if distributions_data is not None:
             from datetime import datetime
-            
+            from .business_rules import valider_suppression_distributions_bulk
+
             # 1. Identifier les IDs à conserver (ceux présents dans la payload)
             ids_to_keep = [item.get('id') for item in distributions_data if item.get('id')]
-            
-            # 2. Supprimer les distributions qui ne sont plus dans la liste
-            instance.distributions_charge.exclude(id__in=ids_to_keep).delete()
+
+            # 2. Identifier les distributions à supprimer
+            distributions_a_supprimer = instance.distributions_charge.exclude(id__in=ids_to_keep)
+
+            # 3. Valider la suppression via les règles métier centralisées
+            if distributions_a_supprimer.exists():
+                valider_suppression_distributions_bulk(
+                    tache=instance,
+                    distributions_a_supprimer=distributions_a_supprimer,
+                    distributions_a_conserver=len(distributions_data)
+                )
+                # Supprimer les distributions (validations passées)
+                distributions_a_supprimer.delete()
 
             # 3. Créer ou Mettre à jour
             for dist_data in distributions_data:
@@ -1108,6 +1181,14 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                         # reference sera auto-générée
                     )
                     print(f"✅ Nouvelle distribution #{new_dist.id} créée pour la date {new_dist.date}")
+
+        # REPLANIFICATION: Restaurer les distributions APRÈS le traitement de distributions_data
+        # Le frontend envoie les distributions avec leur ancien status='ANNULEE',
+        # ce qui écrasait la restauration si elle était faite avant.
+        if ancien_statut_calcule == 'ANNULEE':
+            from .business_rules import restaurer_distributions_apres_replanification
+            nb_restaurees = restaurer_distributions_apres_replanification(instance)
+            print(f"[REPLANIFICATION] Tâche #{instance.id}: ANNULEE modifiée, {nb_restaurees} distribution(s) restaurée(s)")
 
         # ✅ SYNC STATUT: Synchroniser le statut stocké avec le statut calculé dynamiquement
         # Ceci permet de replanifier automatiquement les tâches expirées

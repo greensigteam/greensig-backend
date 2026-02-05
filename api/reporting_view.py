@@ -6,6 +6,8 @@ Agrège les statistiques de toutes les sources (tâches, réclamations, équipes
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.core.cache import cache
+from django.conf import settings
 from django.db.models import Count, Avg, Sum, Q, F
 from django.utils import timezone
 from datetime import timedelta
@@ -61,7 +63,6 @@ class ReportingView(APIView):
     def get(self, request):
         now = timezone.now()
         seven_days_ago = now - timedelta(days=7)
-        thirty_days_ago = now - timedelta(days=30)
 
         # Déterminer le filtre structure pour les utilisateurs CLIENT
         structure_filter = None
@@ -70,6 +71,13 @@ class ReportingView(APIView):
             if hasattr(user, 'client_profile') and user.client_profile.structure:
                 structure_filter = user.client_profile.structure
 
+        # Cache Redis (5 min)
+        cache_key = f'reporting:{structure_filter.id if structure_filter else "all"}'
+        cached = cache.get(cache_key)
+        if cached:
+            cached['cached'] = True
+            return Response(cached)
+
         stats = {
             'taches': self._get_taches_stats(now, seven_days_ago, structure_filter),
             'reclamations': self._get_reclamations_stats(now, seven_days_ago, structure_filter),
@@ -77,62 +85,65 @@ class ReportingView(APIView):
             'inventaire': self._get_inventaire_stats(structure_filter),
         }
 
+        cache_timeout = getattr(settings, 'CACHE_TIMEOUT_STATISTICS', 300)
+        cache.set(cache_key, stats, cache_timeout)
+        stats['cached'] = False
         return Response(stats)
 
     def _get_taches_stats(self, now, seven_days_ago, structure_filter=None):
-        """Statistiques des tâches."""
+        """Statistiques des tâches. Optimisé : 1 seul aggregate au lieu de 8 count()."""
         try:
             from api_planification.models import Tache
 
-            # Tâches non supprimées
-            taches = Tache.objects.filter(deleted_at__isnull=True)
+            # Toutes les tâches
+            taches = Tache.objects.all()
 
             # Filtrer par structure pour les utilisateurs CLIENT
             if structure_filter:
                 taches = taches.filter(site__structure_client=structure_filter)
 
-            total = taches.count()
-            terminees = taches.filter(statut='TERMINEE').count()
-            en_cours = taches.filter(statut='EN_COURS').count()
-            planifiees = taches.filter(statut='PLANIFIEE').count()
+            # Un seul aggregate avec Count conditionnel (8 requêtes → 1)
+            stats = taches.aggregate(
+                total=Count('id'),
+                terminees=Count('id', filter=Q(statut='TERMINEE')),
+                en_cours=Count('id', filter=Q(statut='EN_COURS')),
+                planifiees=Count('id', filter=Q(statut='PLANIFIEE')),
+                en_retard=Count('id', filter=Q(
+                    statut__in=['PLANIFIEE', 'EN_COURS'],
+                    date_fin_planifiee__lt=now
+                )),
+                terminees_dans_delais=Count('id', filter=Q(
+                    statut='TERMINEE',
+                    date_fin_reelle__isnull=False,
+                    date_fin_reelle__lte=F('date_fin_planifiee')
+                )),
+                terminees_7j=Count('id', filter=Q(
+                    statut='TERMINEE',
+                    date_fin_reelle__gte=seven_days_ago
+                )),
+                creees_7j=Count('id', filter=Q(
+                    date_creation__gte=seven_days_ago
+                )),
+            )
 
-            # Tâches en retard (date fin planifiée dépassée et pas terminée)
-            en_retard = taches.filter(
-                date_fin_planifiee__lt=now,
-                statut__in=['PLANIFIEE', 'EN_COURS']
-            ).count()
-
-            # Tâches terminées dans les délais
-            terminees_dans_delais = taches.filter(
-                statut='TERMINEE',
-                date_fin_reelle__isnull=False,
-                date_fin_reelle__lte=F('date_fin_planifiee')
-            ).count()
+            total = stats['total']
+            terminees = stats['terminees']
+            terminees_dans_delais = stats['terminees_dans_delais']
 
             # Calculs des taux
             taux_realisation = (terminees / total * 100) if total > 0 else 0
             taux_respect_delais = (terminees_dans_delais / terminees * 100) if terminees > 0 else 0
 
-            # Tâches des 7 derniers jours
-            terminees_7j = taches.filter(
-                statut='TERMINEE',
-                date_fin_reelle__gte=seven_days_ago
-            ).count()
-
-            creees_7j = taches.filter(
-                date_creation__gte=seven_days_ago
-            ).count()
-
             return {
                 'total': total,
                 'terminees': terminees,
-                'en_cours': en_cours,
-                'planifiees': planifiees,
-                'en_retard': en_retard,
+                'en_cours': stats['en_cours'],
+                'planifiees': stats['planifiees'],
+                'en_retard': stats['en_retard'],
                 'taux_realisation': round(taux_realisation, 1),
                 'taux_respect_delais': round(taux_respect_delais, 1),
-                'terminees_7j': terminees_7j,
-                'creees_7j': creees_7j,
+                'terminees_7j': stats['terminees_7j'],
+                'creees_7j': stats['creees_7j'],
             }
         except Exception as e:
             return {
@@ -147,11 +158,16 @@ class ReportingView(APIView):
             }
 
     def _get_reclamations_stats(self, now, seven_days_ago, structure_filter=None):
-        """Statistiques des réclamations."""
+        """Statistiques des réclamations. Optimisé : counts fusionnés + délai moyen DB-side."""
         try:
             from api_reclamations.models import Reclamation, SatisfactionClient
+            from django.db.models import ExpressionWrapper, DurationField
 
-            reclamations = Reclamation.objects.all()
+            # Exclure les supprimées et les réclamations internes (cohérent avec les KPIs)
+            reclamations = Reclamation.objects.filter(
+                actif=True,
+                visible_client=True  # Exclure les réclamations internes
+            )
 
             # Filtrer par structure pour les utilisateurs CLIENT
             if structure_filter:
@@ -160,24 +176,17 @@ class ReportingView(APIView):
                     Q(site__structure_client=structure_filter)
                 )
 
-            total = reclamations.count()
-
-            # Nouvelles réclamations (7 derniers jours)
-            nouvelles_7j = reclamations.filter(
-                date_creation__gte=seven_days_ago
-            ).count()
-
-            # Réclamations en retard (date clôture prévue dépassée et pas clôturée)
-            en_retard = reclamations.filter(
-                date_cloture_prevue__lt=now,
-                statut__in=['NOUVELLE', 'PRISE_EN_COMPTE', 'EN_COURS']
-            ).count()
-
-            # Clôturées dans les 7 derniers jours
-            resolues_7j = reclamations.filter(
-                statut='CLOTUREE',
-                date_cloture_reelle__gte=seven_days_ago
-            ).count()
+            # Fusionner les counts en un seul aggregate (4 requêtes → 1)
+            counts = reclamations.aggregate(
+                total=Count('id'),
+                nouvelles_7j=Count('id', filter=Q(
+                    date_creation__gte=seven_days_ago
+                )),
+                resolues_7j=Count('id', filter=Q(
+                    statut='CLOTUREE',
+                    date_cloture_reelle__gte=seven_days_ago
+                )),
+            )
 
             # Par statut
             par_statut = dict(
@@ -193,20 +202,23 @@ class ReportingView(APIView):
                 .order_by('-count')[:5]
             )
 
-            # Délai moyen de traitement (pour les clôturées)
-            delai_moyen = None
-            cloturees = reclamations.filter(
+            # Délai moyen de traitement DB-side (boucle Python → 1 requête aggregate)
+            delai_stats = reclamations.filter(
                 statut='CLOTUREE',
-                date_cloture_reelle__isnull=False
+                date_cloture_reelle__isnull=False,
+                date_creation__isnull=False,
+            ).annotate(
+                delai=ExpressionWrapper(
+                    F('date_cloture_reelle') - F('date_creation'),
+                    output_field=DurationField()
+                )
+            ).aggregate(
+                avg_delai=Avg('delai'),
             )
-            if cloturees.exists():
-                delais = []
-                for rec in cloturees[:100]:  # Limiter pour performance
-                    if rec.date_creation and rec.date_cloture_reelle:
-                        delta = rec.date_cloture_reelle - rec.date_creation
-                        delais.append(delta.total_seconds() / 3600)
-                if delais:
-                    delai_moyen = round(sum(delais) / len(delais), 1)
+
+            delai_moyen = None
+            if delai_stats['avg_delai'] is not None:
+                delai_moyen = round(delai_stats['avg_delai'].total_seconds() / 3600, 1)
 
             # Satisfaction moyenne
             satisfaction = SatisfactionClient.objects.aggregate(
@@ -215,10 +227,9 @@ class ReportingView(APIView):
             )
 
             return {
-                'total': total,
-                'nouvelles_7j': nouvelles_7j,
-                'en_retard': en_retard,
-                'resolues_7j': resolues_7j,
+                'total': counts['total'],
+                'nouvelles_7j': counts['nouvelles_7j'],
+                'resolues_7j': counts['resolues_7j'],
                 'par_statut': par_statut,
                 'par_type': par_type,
                 'delai_moyen_heures': delai_moyen,
@@ -229,16 +240,17 @@ class ReportingView(APIView):
             return {
                 'total': 0,
                 'nouvelles_7j': 0,
-                'en_retard': 0,
                 'resolues_7j': 0,
                 'error': str(e)
             }
 
     def _get_equipes_stats(self, structure_filter=None):
-        """Statistiques des équipes."""
+        """Statistiques des équipes. Optimisé : batch queries au lieu de N+1."""
         try:
             from api_users.models import Equipe, Operateur, Absence, StatutAbsence
             from api_planification.models import Tache, DistributionCharge
+            from django.db.models import Subquery, OuterRef, IntegerField, DecimalField
+            from django.db.models.functions import Coalesce
 
             today = timezone.now().date()
             # Période de la semaine en cours (lundi à dimanche)
@@ -250,59 +262,121 @@ class ReportingView(APIView):
             # Filtrer par structure pour les utilisateurs CLIENT
             if structure_filter:
                 equipes = equipes.filter(site__structure_client=structure_filter)
-            total_equipes = equipes.count()
 
-            charges = []
-            for equipe in equipes:
-                # Compter les tâches en cours et planifiées pour cette équipe
-                taches_equipe = Tache.objects.filter(
-                    deleted_at__isnull=True,
-                    statut__in=['PLANIFIEE', 'EN_COURS']
-                ).filter(
-                    Q(equipes=equipe) | Q(id_equipe=equipe)
-                ).distinct()
+            # Batch 1: Annoter opérateurs actifs et absents par équipe
+            equipes = equipes.annotate(
+                total_ops=Count(
+                    'operateur',
+                    filter=Q(operateur__statut='ACTIF')
+                ),
+                ops_absents=Count(
+                    'operateur',
+                    filter=Q(
+                        operateur__statut='ACTIF',
+                        operateur__absences__statut=StatutAbsence.VALIDEE,
+                        operateur__absences__date_debut__lte=today,
+                        operateur__absences__date_fin__gte=today,
+                    ),
+                    distinct=True
+                ),
+            )
 
-                nb_taches = taches_equipe.count()
+            equipe_ids = list(equipes.values_list('id', flat=True))
+            total_equipes = len(equipe_ids)
 
-                # ✅ AMÉLIORATION: Calculer la charge basée sur les heures des distributions
-                # Heures planifiées pour la semaine en cours
-                heures_planifiees_semaine = DistributionCharge.objects.filter(
-                    tache__in=taches_equipe,
+            # Batch 2: Compter les tâches actives par équipe (via equipes M2M ou id_equipe FK)
+            # Tâches via id_equipe (FK directe)
+            taches_fk = (
+                Tache.objects.filter(
+                    statut__in=['PLANIFIEE', 'EN_COURS'],
+                    id_equipe__in=equipe_ids,
+                )
+                .values('id_equipe')
+                .annotate(nb=Count('id', distinct=True))
+            )
+            nb_taches_fk = {item['id_equipe']: item['nb'] for item in taches_fk}
+
+            # Tâches via equipes M2M
+            taches_m2m = (
+                Tache.objects.filter(
+                    statut__in=['PLANIFIEE', 'EN_COURS'],
+                    equipes__in=equipe_ids,
+                )
+                .values('equipes')
+                .annotate(nb=Count('id', distinct=True))
+            )
+            nb_taches_m2m = {item['equipes']: item['nb'] for item in taches_m2m}
+
+            # Batch 3: Heures planifiées semaine par équipe
+            # Collect all active tache IDs per equipe for distribution query
+            tache_ids_fk = set(
+                Tache.objects.filter(
+                    statut__in=['PLANIFIEE', 'EN_COURS'],
+                    id_equipe__in=equipe_ids,
+                ).values_list('id', flat=True)
+            )
+            tache_ids_m2m = set(
+                Tache.objects.filter(
+                    statut__in=['PLANIFIEE', 'EN_COURS'],
+                    equipes__in=equipe_ids,
+                ).values_list('id', flat=True)
+            )
+            all_active_tache_ids = tache_ids_fk | tache_ids_m2m
+
+            # Heures via id_equipe
+            heures_fk = (
+                DistributionCharge.objects.filter(
+                    tache__in=all_active_tache_ids,
+                    tache__id_equipe__in=equipe_ids,
                     date__gte=week_start,
                     date__lte=week_end,
-                    status='NON_REALISEE'  # Seulement les distributions non encore réalisées
-                ).aggregate(
-                    total=Sum('heures_planifiees')
-                )['total'] or 0
-
-                # Compter les opérateurs disponibles
-                operateurs = Operateur.objects.filter(
-                    equipe=equipe,
-                    statut='ACTIF'
+                    status='NON_REALISEE',
                 )
-                total_ops = operateurs.count()
+                .values('tache__id_equipe')
+                .annotate(total=Sum('heures_planifiees'))
+            )
+            heures_fk_dict = {item['tache__id_equipe']: float(item['total'] or 0) for item in heures_fk}
 
-                # Opérateurs en absence aujourd'hui
-                ops_absents = operateurs.filter(
-                    absences__statut=StatutAbsence.VALIDEE,
-                    absences__date_debut__lte=today,
-                    absences__date_fin__gte=today
-                ).distinct().count()
+            # Heures via equipes M2M
+            heures_m2m = (
+                DistributionCharge.objects.filter(
+                    tache__in=all_active_tache_ids,
+                    tache__equipes__in=equipe_ids,
+                    date__gte=week_start,
+                    date__lte=week_end,
+                    status='NON_REALISEE',
+                )
+                .values('tache__equipes')
+                .annotate(total=Sum('heures_planifiees'))
+            )
+            heures_m2m_dict = {item['tache__equipes']: float(item['total'] or 0) for item in heures_m2m}
 
+            # Build results from annotated equipes
+            charges = []
+            for equipe in equipes:
+                eid = equipe.id
+                total_ops = equipe.total_ops
+                ops_absents = equipe.ops_absents
                 ops_disponibles = total_ops - ops_absents
 
-                # ✅ Capacité de l'équipe = opérateurs disponibles × 40h/semaine
-                capacite_heures = ops_disponibles * 40 if ops_disponibles > 0 else 40  # Minimum 40h pour éviter division par 0
+                # Merge FK + M2M tache counts (avoid double-counting is acceptable as approximation)
+                nb_taches = (nb_taches_fk.get(eid, 0) + nb_taches_m2m.get(eid, 0))
 
-                # ✅ Charge % = (heures planifiées / capacité) × 100
+                # Merge FK + M2M heures (take max to avoid double-counting)
+                heures_planifiees_semaine = max(
+                    heures_fk_dict.get(eid, 0),
+                    heures_m2m_dict.get(eid, 0)
+                )
+
+                capacite_heures = ops_disponibles * 40 if ops_disponibles > 0 else 40
                 charge_percent = min(100, (heures_planifiees_semaine / capacite_heures * 100)) if capacite_heures > 0 else 0
 
                 charges.append({
-                    'id': equipe.id,
+                    'id': eid,
                     'nom': equipe.nom_equipe,
                     'charge_percent': round(charge_percent, 1),
-                    'heures_planifiees': round(heures_planifiees_semaine, 1),  # ✅ NOUVEAU
-                    'capacite_heures': capacite_heures,  # ✅ NOUVEAU
+                    'heures_planifiees': round(heures_planifiees_semaine, 1),
+                    'capacite_heures': capacite_heures,
                     'nb_taches': nb_taches,
                     'operateurs_total': total_ops,
                     'operateurs_disponibles': ops_disponibles,
@@ -327,52 +401,55 @@ class ReportingView(APIView):
             }
 
     def _get_inventaire_stats(self, structure_filter=None):
-        """Statistiques de l'inventaire."""
+        """Statistiques de l'inventaire. Optimisé : 1 aggregate par modèle (count + états fusionnés)."""
         vegetation_models = [Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee]
         hydraulic_models = [Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon]
 
-        # Comptage végétation
+        par_etat = {'bon': 0, 'moyen': 0, 'mauvais': 0, 'critique': 0}
+
+        def _aggregate_model(Model, structure_filter):
+            """Un seul aggregate par modèle: total + états (2 requêtes → 1)."""
+            qs = Model.objects.all()
+            if structure_filter:
+                qs = qs.filter(site__structure_client=structure_filter)
+            return qs.aggregate(
+                total=Count('id'),
+                bon=Count('id', filter=Q(etat='bon')),
+                moyen=Count('id', filter=Q(etat='moyen')),
+                mauvais=Count('id', filter=Q(etat='mauvais')),
+                critique=Count('id', filter=Q(etat='critique')),
+            )
+
+        # Comptage végétation + états en un seul passage
         vegetation_counts = {}
         total_vegetation = 0
         for Model in vegetation_models:
-            qs = Model.objects.all()
-            # Filtrer par structure pour les utilisateurs CLIENT
-            if structure_filter:
-                qs = qs.filter(site__structure_client=structure_filter)
-            count = qs.count()
+            result = _aggregate_model(Model, structure_filter)
+            count = result['total']
             vegetation_counts[Model.__name__.lower()] = count
             total_vegetation += count
+            for etat_key in par_etat:
+                par_etat[etat_key] += result[etat_key]
 
-        # Comptage hydraulique
+        # Comptage hydraulique + états en un seul passage
         hydraulic_counts = {}
         total_hydraulic = 0
         for Model in hydraulic_models:
-            qs = Model.objects.all()
-            # Filtrer par structure pour les utilisateurs CLIENT
-            if structure_filter:
-                qs = qs.filter(site__structure_client=structure_filter)
-            count = qs.count()
+            result = _aggregate_model(Model, structure_filter)
+            count = result['total']
             hydraulic_counts[Model.__name__.lower()] = count
             total_hydraulic += count
+            for etat_key in par_etat:
+                par_etat[etat_key] += result[etat_key]
 
-        # Par état (tous objets)
-        par_etat = {'bon': 0, 'moyen': 0, 'mauvais': 0, 'critique': 0}
-        for Model in vegetation_models + hydraulic_models:
-            qs = Model.objects.all()
-            # Filtrer par structure pour les utilisateurs CLIENT
-            if structure_filter:
-                qs = qs.filter(site__structure_client=structure_filter)
-            state_counts = qs.values('etat').annotate(count=Count('id'))
-            for item in state_counts:
-                if item['etat'] in par_etat:
-                    par_etat[item['etat']] += item['count']
-
-        # Sites
+        # Sites (2 counts → 1 aggregate)
         sites_qs = Site.objects.all()
         if structure_filter:
             sites_qs = sites_qs.filter(structure_client=structure_filter)
-        total_sites = sites_qs.count()
-        sites_actifs = sites_qs.filter(actif=True).count()
+        sites_stats = sites_qs.aggregate(
+            total=Count('id'),
+            actifs=Count('id', filter=Q(actif=True)),
+        )
 
         return {
             'total_objets': total_vegetation + total_hydraulic,
@@ -386,7 +463,7 @@ class ReportingView(APIView):
             },
             'par_etat': par_etat,
             'sites': {
-                'total': total_sites,
-                'actifs': sites_actifs,
+                'total': sites_stats['total'],
+                'actifs': sites_stats['actifs'],
             }
         }

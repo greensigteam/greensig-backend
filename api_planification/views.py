@@ -2,11 +2,13 @@ from datetime import datetime
 import hashlib
 import json
 from django.db import models
+from django.db.models.deletion import ProtectedError
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.cache import cache
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from .models import Tache, TypeTache, ParticipationTache, RatioProductivite, DistributionCharge
 
 # Constantes pour le cache
@@ -32,7 +34,7 @@ from .utils import (
     calculer_duree_tache
 )
 from rest_framework.pagination import PageNumberPagination
-from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin
+from api_users.mixins import RoleBasedQuerySetMixin, RoleBasedPermissionMixin
 from api_users.permissions import IsAdmin, IsAdminOrReadOnly, IsSuperviseur, IsAdminOrSuperviseur
 
 # Import des règles métier pour les distributions
@@ -49,6 +51,10 @@ from .business_rules import (
     verifier_premiere_distribution_active,
     verifier_equipe_assignee,
     verifier_date_disponible,
+    # Validation de suppression des distributions
+    valider_suppression_distribution,
+    valider_suppression_distributions_bulk,
+    synchroniser_tache_apres_suppression_distribution,
 )
 from .constants import MOTIFS_VALIDES, ERROR_MESSAGES
 
@@ -68,7 +74,7 @@ class SmallPageNumberPagination(PageNumberPagination):
     """Pagination avec 20 items par page pour les ressources système."""
     page_size = 20
     page_size_query_param = 'page_size'
-    max_page_size = 100
+    max_page_size = 500  # Augmenté pour permettre le chargement de tous les types de tâches
 
 
 # ==============================================================================
@@ -165,7 +171,33 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
             'types_objets_compatibles': types_objets_compatibles
         })
 
-class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteMixin, viewsets.ModelViewSet):
+    def destroy(self, request, *args, **kwargs):
+        """
+        Supprime un type de tâche.
+
+        Retourne une erreur 400 si des tâches existantes utilisent ce type
+        (protection via foreign key PROTECT).
+        """
+        instance = self.get_object()
+        try:
+            self.perform_destroy(instance)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError as e:
+            # Compter le nombre de tâches liées
+            from .models import Tache
+            taches_count = Tache.objects.filter(id_type_tache=instance).count()
+            return Response(
+                {
+                    'error': 'protected_foreign_key',
+                    'message': f'Impossible de supprimer ce type de tâche car {taches_count} tâche(s) existante(s) l\'utilisent.',
+                    'detail': f'Le type "{instance.nom_tache}" est référencé par des tâches planifiées. Vous devez d\'abord supprimer ou modifier ces tâches.',
+                    'taches_count': taches_count
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet pour les tâches avec permissions automatiques via mixins.
 
@@ -175,7 +207,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
     - CLIENT: Lecture seule sur les tâches de ses sites (filtrage automatique)
 
     Filtrage automatique: RoleBasedQuerySetMixin filtre selon le rôle
-    Soft delete: SoftDeleteMixin gère la suppression douce
+    Suppression: Suppression réelle (CASCADE sur distributions)
     """
     queryset = Tache.objects.all()
     serializer_class = TacheSerializer
@@ -202,7 +234,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         - SUPERVISEUR: Tâches de ses équipes uniquement
         - CLIENT: Tâches de ses sites uniquement
 
-        Le soft-delete est géré par SoftDeleteMixin (exclut deleted_at != null).
+        Note: La suppression est réelle (pas de soft delete).
         """
         from django.db.models import Q, Prefetch, Sum, Count
         from api_users.models import Equipe
@@ -281,12 +313,15 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         return TacheSerializer  # Serializer complet pour le détail
 
     def _get_cache_key(self, request):
-        """Génère une clé de cache unique basée sur l'utilisateur et les filtres."""
+        """Génère une clé de cache unique basée sur l'utilisateur, son rôle et les filtres."""
         user_id = request.user.id if request.user.is_authenticated else 'anon'
+        # ⚡ SÉCURITÉ: Inclure le rôle dans la clé de cache pour éviter les fuites de données
+        # Différents rôles voient différentes données (ADMIN: tout, CLIENT: ses sites uniquement)
+        user_role = getattr(request.user, 'role', 'unknown') if request.user.is_authenticated else 'anon'
         # Hash des query params pour différencier les filtres
         params_str = json.dumps(dict(request.query_params), sort_keys=True)
         params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
-        return CACHE_KEY_TACHES.format(user_id=user_id, params_hash=params_hash)
+        return f'taches_list_{user_id}_{user_role}_{params_hash}'
 
     def list(self, request, *args, **kwargs):
         """
@@ -376,7 +411,7 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
 
-    # perform_destroy() est géré par SoftDeleteMixin
+    # perform_destroy() utilise la suppression standard (CASCADE sur distributions)
 
     @action(detail=True, methods=['post'])
     def add_participation(self, request, pk=None):
@@ -454,8 +489,15 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
         Cette action permet de sélectionner les jours de travail depuis le modal frontend
         et de créer automatiquement les distributions de charge correspondantes.
 
+        Validations (via business_rules):
+        - Tâche non terminée
+        - Au moins une distribution fournie
+        - Aucune distribution existante reportée
+
         Permission: IsAdmin ou IsSuperviseur
         """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
         tache = self.get_object()
         distributions_data = request.data.get('distributions', [])
 
@@ -465,8 +507,26 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Supprimer les anciennes distributions
-        tache.distributions_charge.all().delete()
+        # Validation: Au moins une distribution requise
+        if len(distributions_data) == 0:
+            return Response(
+                {'error': 'Au moins une distribution est requise'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validation via les règles métier centralisées
+        distributions_existantes = tache.distributions_charge.all()
+        try:
+            valider_suppression_distributions_bulk(
+                tache=tache,
+                distributions_a_supprimer=distributions_existantes,
+                distributions_a_conserver=len(distributions_data)
+            )
+        except DjangoValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Supprimer les anciennes distributions (validations passées)
+        distributions_existantes.delete()
 
         # Créer les nouvelles distributions
         created_distributions = []
@@ -585,8 +645,8 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, SoftDeleteM
 
             # Vérifier que la réclamation est dans un statut approprié
             if reclamation.statut in ['EN_COURS', 'RESOLUE']:
-                # Récupérer toutes les tâches actives de cette réclamation (non soft-deleted)
-                taches_reclamation = reclamation.taches_correctives.filter(deleted_at__isnull=True)
+                # Récupérer toutes les tâches de cette réclamation
+                taches_reclamation = reclamation.taches_correctives.all()
 
                 # Vérifier si toutes les tâches sont terminées ET validées
                 toutes_terminees = not taches_reclamation.exclude(statut='TERMINEE').exists()
@@ -1135,20 +1195,29 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         """
         Validation et nettoyage lors de la suppression d'une distribution.
 
-        Vérifie que la tâche n'est pas terminée avant de supprimer.
+        Utilise les règles métier centralisées de business_rules.py:
+        - valider_suppression_distribution()
+        - synchroniser_tache_apres_suppression_distribution()
         """
         from rest_framework.exceptions import ValidationError
+        from django.core.exceptions import ValidationError as DjangoValidationError
 
         tache = instance.tache
 
-        # Vérifier que la tâche n'est pas terminée
-        if tache.statut == 'TERMINEE':
-            raise ValidationError({
-                'detail': "Impossible de supprimer une distribution d'une tâche terminée"
-            })
+        # Valider la suppression via les règles métier centralisées
+        try:
+            valider_suppression_distribution(instance)
+        except DjangoValidationError as e:
+            raise ValidationError({'detail': str(e)})
+
+        # Capturer l'état avant suppression pour synchronisation
+        etait_en_cours = instance.status == 'EN_COURS'
 
         # Supprimer la distribution
         instance.delete()
+
+        # Synchroniser le statut de la tâche
+        synchroniser_tache_apres_suppression_distribution(tache, etait_en_cours)
 
     @action(detail=True, methods=['post'], url_path='marquer-realisee')
     def marquer_realisee(self, request, pk=None):
@@ -1283,7 +1352,14 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         tache = distribution.tache
         ancien_statut = distribution.status
 
-        # ✅ NOUVEAU: Impossible de démarrer avant la date planifiée
+        # Vérifier qu'une équipe est assignée à la tâche
+        if not verifier_equipe_assignee(tache):
+            raise ValidationError({
+                'detail': "Impossible de démarrer cette distribution : aucune équipe n'est assignée à la tâche. "
+                          "Veuillez d'abord assigner une équipe."
+            })
+
+        # Impossible de démarrer avant la date planifiée
         today = timezone.now().date()
         if distribution.date > today:
             raise ValidationError({
@@ -1751,7 +1827,7 @@ class TacheRecurrenceViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
     - SUPERVISEUR: Tâches sur ses sites uniquement
     - CLIENT: Tâches de sa structure uniquement
     """
-    queryset = Tache.objects.filter(deleted_at__isnull=True)
+    queryset = Tache.objects.all()
     permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer_class(self):
@@ -2073,3 +2149,170 @@ class TacheRecurrenceViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
                 {'error': f'Erreur lors du calcul des fréquences: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ==============================================================================
+# EXPORT PDF DU PLANNING
+# ==============================================================================
+
+import logging
+logger = logging.getLogger(__name__)
+
+
+class PlanningExportPDFView(APIView):
+    """
+    Export PDF du planning.
+
+    GET /api/planification/export/pdf/
+
+    Params:
+        start_date (required): YYYY-MM-DD
+        end_date (required): YYYY-MM-DD
+        structure_client_id: Filtrer par structure
+        equipe_id: Filtrer par equipe
+        sync: 'true' pour export synchrone (fallback si Celery non disponible)
+
+    Reponses:
+        202: {task_id, status} (mode async)
+        200: PDF direct (mode sync)
+        400: Erreur de validation des parametres
+
+    Permissions:
+        - ADMIN: toutes les taches
+        - SUPERVISEUR: taches de ses equipes uniquement
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
+
+    def get(self, request, *args, **kwargs):
+        from celery.result import AsyncResult
+
+        # Valider les parametres obligatoires
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        if not start_date or not end_date:
+            return Response(
+                {'error': 'Les parametres start_date et end_date sont requis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Valider le format des dates
+        try:
+            datetime.strptime(start_date, '%Y-%m-%d')
+            datetime.strptime(end_date, '%Y-%m-%d')
+        except ValueError:
+            return Response(
+                {'error': 'Format de date invalide. Utilisez YYYY-MM-DD'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Construire les filtres optionnels
+        filters = {}
+        structure_client_id = request.query_params.get('structure_client_id')
+        if structure_client_id:
+            try:
+                filters['structure_client_id'] = int(structure_client_id)
+            except ValueError:
+                return Response(
+                    {'error': 'structure_client_id doit etre un entier'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        equipe_id = request.query_params.get('equipe_id')
+        if equipe_id:
+            try:
+                filters['equipe_id'] = int(equipe_id)
+            except ValueError:
+                return Response(
+                    {'error': 'equipe_id doit etre un entier'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Mode synchrone (fallback)
+        sync_mode = request.query_params.get('sync', 'false').lower() == 'true'
+
+        if sync_mode:
+            # Export synchrone direct
+            logger.info(f"[PDF Export] Mode SYNC pour user {request.user.id}: {start_date} -> {end_date}")
+            from .tasks import export_planning_pdf_async
+            result = export_planning_pdf_async(
+                user_id=request.user.id,
+                start_date=start_date,
+                end_date=end_date,
+                filters=filters
+            )
+
+            if result.get('success'):
+                return Response({
+                    'task_id': 'sync',
+                    'status': 'SUCCESS',
+                    'ready': True,
+                    'result': {
+                        'download_url': result.get('download_url'),
+                        'filename': result.get('filename'),
+                        'record_count': result.get('record_count', 0),
+                    }
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response({
+                    'error': result.get('error', 'Erreur inconnue')
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Mode asynchrone (Celery)
+        logger.info(f"[PDF Export] Mode ASYNC pour user {request.user.id}: {start_date} -> {end_date}")
+
+        from .tasks import export_planning_pdf_async
+        task = export_planning_pdf_async.delay(
+            user_id=request.user.id,
+            start_date=start_date,
+            end_date=end_date,
+            filters=filters
+        )
+
+        logger.info(f"[PDF Export] Task Celery cree: {task.id}")
+
+        return Response({
+            'task_id': task.id,
+            'status': 'PENDING',
+            'message': 'Export PDF en cours de generation...'
+        }, status=status.HTTP_202_ACCEPTED)
+
+
+class PlanningExportStatusView(APIView):
+    """
+    Verifie le statut d'un export PDF.
+
+    GET /api/planification/export/status/<task_id>/
+
+    Reponses:
+        200: {status, ready, result} si termine
+        200: {status: 'PENDING', ready: false} si en cours
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, task_id, *args, **kwargs):
+        from celery.result import AsyncResult
+
+        task_result = AsyncResult(task_id)
+
+        response_data = {
+            'task_id': task_id,
+            'status': task_result.status,
+            'ready': task_result.ready(),
+        }
+
+        if task_result.ready():
+            if task_result.successful():
+                result = task_result.result
+                if result.get('success'):
+                    response_data['result'] = {
+                        'download_url': result.get('download_url'),
+                        'filename': result.get('filename'),
+                        'record_count': result.get('record_count', 0),
+                    }
+                else:
+                    response_data['error'] = result.get('error', 'Erreur inconnue')
+            else:
+                response_data['error'] = str(task_result.result) if task_result.result else 'Erreur lors de l\'export'
+
+        return Response(response_data, status=status.HTTP_200_OK)

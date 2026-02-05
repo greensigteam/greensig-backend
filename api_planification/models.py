@@ -4,9 +4,6 @@ from api_users.models import Client, StructureClient, Equipe, Operateur
 from api.models import Objet
 from django.utils import timezone
 
-# TODO: La fonctionnalité de création de type de tâche côté frontend a été supprimée (bouton "Créer un nouveau type").
-# Elle doit être réactivée uniquement si nécessaire, via le backend ou une interface admin dédiée.
-# Voir demande utilisateur du 17/12/2025.
 class TypeTache(models.Model):
     UNITE_PRODUCTIVITE_CHOICES = [
         ('m2', 'Mètres carrés (m²)'),
@@ -127,20 +124,56 @@ class Tache(models.Model):
     )
     commentaire_validation = models.TextField(blank=True, verbose_name="Commentaire de validation")
 
+    # Champs pour l'annulation
+    MOTIF_ANNULATION_CHOICES = [
+        ('METEO', 'Conditions météorologiques'),
+        ('ABSENCE', 'Absence équipe'),
+        ('EQUIPEMENT', 'Problème équipement'),
+        ('CLIENT', 'Demande client'),
+        ('URGENCE', 'Réaffectation urgente'),
+        ('DOUBLON', 'Tâche en doublon'),
+        ('ERREUR', 'Erreur de planification'),
+        ('AUTRE', 'Autre motif'),
+    ]
+    motif_annulation = models.CharField(
+        max_length=50,
+        choices=MOTIF_ANNULATION_CHOICES,
+        blank=True,
+        null=True,
+        verbose_name="Motif d'annulation"
+    )
+    commentaire_annulation = models.TextField(
+        blank=True,
+        verbose_name="Commentaire d'annulation"
+    )
+    date_annulation = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date d'annulation"
+    )
+    annulee_par = models.ForeignKey(
+        'api_users.Utilisateur',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='taches_annulees',
+        verbose_name="Annulée par"
+    )
+
     notifiee = models.BooleanField(default=False, verbose_name="Notifiée")
     confirmee = models.BooleanField(default=False, verbose_name="Confirmée")
     
     # Lien avec Réclamation (MCD Entité 19 / Note 54)
+    # CASCADE: Si la réclamation est supprimée, les tâches correctives le sont aussi
     reclamation = models.ForeignKey(
         'api_reclamations.Reclamation',
-        on_delete=models.SET_NULL,
+        on_delete=models.CASCADE,
         null=True,
         blank=True,
         related_name='taches_correctives',
         verbose_name="Réclamation liée"
     )
     
-    deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Supprimé le") # Soft delete
 
     # Date de création automatique
     date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création", null=True, blank=True)
@@ -394,9 +427,13 @@ class Tache(models.Model):
             # (Usually distributions are created after task save)
 
     def delete(self, using=None, keep_parents=False):
-        """Soft delete implementation"""
-        self.deleted_at = timezone.now()
-        self.save()
+        """
+        Suppression réelle de la tâche.
+
+        Les distributions associées sont supprimées automatiquement
+        via on_delete=CASCADE sur DistributionCharge.tache.
+        """
+        super().delete(using=using, keep_parents=keep_parents)
 
 
 class DistributionCharge(models.Model):

@@ -84,6 +84,153 @@ def valider_motif(motif: str, obligatoire: bool = True) -> bool:
 
 
 # ==============================================================================
+# VALIDATION DE SUPPRESSION DES DISTRIBUTIONS
+# ==============================================================================
+
+def valider_suppression_distribution(distribution, force: bool = False) -> dict:
+    """
+    Valide si une distribution peut être supprimée.
+
+    Args:
+        distribution: Instance de DistributionCharge à supprimer
+        force: Si True, ignore certaines validations (pour suppression en cascade)
+
+    Returns:
+        dict: {'peut_supprimer': bool, 'erreur': str|None, 'avertissement': str|None}
+
+    Raises:
+        ValidationError: Si la suppression n'est pas autorisée
+    """
+    tache = distribution.tache
+    erreurs = []
+
+    # 1. Vérifier que la tâche n'est pas terminée
+    if tache.statut == 'TERMINEE':
+        erreurs.append("Impossible de supprimer une distribution d'une tâche terminée")
+
+    # 2. Vérifier que la distribution n'a pas été reportée (a un remplacement)
+    if distribution.distribution_remplacement is not None:
+        erreurs.append(
+            f"Cette distribution a été reportée au {distribution.distribution_remplacement.date.strftime('%d/%m/%Y')}. "
+            f"Supprimez d'abord la distribution de remplacement (ID: {distribution.distribution_remplacement.id})."
+        )
+
+    # 3. Vérifier que ce n'est pas la dernière distribution (sauf si force=True)
+    if not force:
+        nombre_distributions = tache.distributions_charge.count()
+        if nombre_distributions <= 1:
+            erreurs.append(
+                "Impossible de supprimer la dernière distribution d'une tâche. "
+                "Une tâche doit avoir au moins une distribution."
+            )
+
+    if erreurs:
+        raise ValidationError(" | ".join(erreurs))
+
+    return {'peut_supprimer': True, 'erreur': None}
+
+
+def valider_suppression_distributions_bulk(tache, distributions_a_supprimer, distributions_a_conserver) -> dict:
+    """
+    Valide la suppression en masse de distributions (update_distributions, serializer update).
+
+    Args:
+        tache: Instance de Tache
+        distributions_a_supprimer: QuerySet des distributions à supprimer
+        distributions_a_conserver: Nombre de distributions qui seront conservées
+
+    Returns:
+        dict: {
+            'peut_supprimer': bool,
+            'erreurs': list,
+            'distributions_bloquees': list[dict]  # [{id, date, raison}]
+        }
+
+    Raises:
+        ValidationError: Si la suppression n'est pas autorisée
+    """
+    erreurs = []
+    distributions_bloquees = []
+
+    # 1. Vérifier que la tâche n'est pas terminée
+    if tache.statut == 'TERMINEE':
+        raise ValidationError("Impossible de modifier les distributions d'une tâche terminée")
+
+    # 2. Vérifier qu'au moins une distribution sera conservée
+    if distributions_a_conserver < 1:
+        raise ValidationError(
+            "Une tâche doit avoir au moins une distribution. "
+            "Impossible de supprimer toutes les distributions."
+        )
+
+    # 3. Vérifier chaque distribution à supprimer
+    for dist in distributions_a_supprimer:
+        # Vérifier si elle a été reportée
+        if dist.distribution_remplacement is not None:
+            distributions_bloquees.append({
+                'id': dist.id,
+                'date': dist.date.strftime('%d/%m/%Y'),
+                'raison': f"Reportée vers le {dist.distribution_remplacement.date.strftime('%d/%m/%Y')}"
+            })
+
+    if distributions_bloquees:
+        dates = ", ".join([d['date'] for d in distributions_bloquees])
+        raise ValidationError(
+            f"Impossible de supprimer les distributions suivantes car elles ont été reportées: {dates}. "
+            f"Supprimez d'abord les distributions de remplacement."
+        )
+
+    return {
+        'peut_supprimer': True,
+        'erreurs': [],
+        'distributions_bloquees': []
+    }
+
+
+def synchroniser_tache_apres_suppression_distribution(tache, distribution_supprimee_etait_en_cours: bool):
+    """
+    Synchronise le statut de la tâche après suppression d'une distribution.
+
+    Args:
+        tache: Instance de Tache
+        distribution_supprimee_etait_en_cours: True si la distribution supprimée était EN_COURS
+
+    Returns:
+        tuple: (tache_modifiee: bool, nouveau_statut: str|None)
+    """
+    # Recharger les distributions restantes
+    distributions_restantes = tache.distributions_charge.all()
+
+    # Compter par statut
+    nb_non_realisee = distributions_restantes.filter(status='NON_REALISEE').count()
+    nb_en_cours = distributions_restantes.filter(status='EN_COURS').count()
+    nb_realisee = distributions_restantes.filter(status='REALISEE').count()
+
+    tache_modifiee = False
+    nouveau_statut = None
+
+    # Si on a supprimé une distribution EN_COURS et qu'il n'y en a plus
+    if distribution_supprimee_etait_en_cours and nb_en_cours == 0:
+        if nb_non_realisee > 0:
+            # Il reste du travail à faire
+            if tache.statut == 'EN_COURS':
+                tache.statut = 'PLANIFIEE'
+                tache.save(update_fields=['statut'])
+                tache_modifiee = True
+                nouveau_statut = 'PLANIFIEE'
+        elif nb_realisee > 0:
+            # Tout est terminé
+            tache.statut = 'TERMINEE'
+            if not tache.date_fin_reelle:
+                tache.date_fin_reelle = timezone.now().date()
+            tache.save(update_fields=['statut', 'date_fin_reelle'])
+            tache_modifiee = True
+            nouveau_statut = 'TERMINEE'
+
+    return tache_modifiee, nouveau_statut
+
+
+# ==============================================================================
 # GESTION DES REPORTS CHAÎNÉS
 # ==============================================================================
 

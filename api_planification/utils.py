@@ -223,7 +223,7 @@ def dupliquer_tache_avec_distributions(
             'equipes',
             'objets',
             'distributions_charge'
-        ).get(id=tache_id, deleted_at__isnull=True)
+        ).get(id=tache_id)
 
         print(f"[RECURRENCE] Tâche source #{tache_id} chargée")
         print(f"[RECURRENCE] Date début: {tache_source.date_debut_planifiee}")
@@ -462,7 +462,7 @@ def dupliquer_tache_recurrence_multiple(
     # ✅ Vérifier la compatibilité de la fréquence AVANT de créer les tâches
     # Récupérer la tâche pour validation
     try:
-        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+        tache_source = Tache.objects.get(id=tache_id)
     except Tache.DoesNotExist:
         raise Tache.DoesNotExist(f"Tâche {tache_id} introuvable")
 
@@ -529,7 +529,7 @@ def dupliquer_tache_dates_specifiques(
 
     # Récupérer la tâche source pour connaître sa date de début
     try:
-        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+        tache_source = Tache.objects.get(id=tache_id)
     except Tache.DoesNotExist:
         raise Tache.DoesNotExist(f"Tâche {tache_id} introuvable")
 
@@ -719,7 +719,7 @@ def dupliquer_tache_recurrence_jours_mois(
     """
     # Récupérer la tâche source
     try:
-        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+        tache_source = Tache.objects.get(id=tache_id)
     except Tache.DoesNotExist:
         raise ValidationError(f"Tâche #{tache_id} introuvable")
 
@@ -943,7 +943,7 @@ def dupliquer_tache_recurrence_jours_semaine(
     """
     # Récupérer la tâche source
     try:
-        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+        tache_source = Tache.objects.get(id=tache_id)
     except Tache.DoesNotExist:
         raise ValidationError(f"Tâche #{tache_id} introuvable")
 
@@ -1173,7 +1173,7 @@ def dupliquer_tache_recurrence_jours_mois(
     """
     # Récupérer la tâche source
     try:
-        tache_source = Tache.objects.get(id=tache_id, deleted_at__isnull=True)
+        tache_source = Tache.objects.get(id=tache_id)
     except Tache.DoesNotExist:
         raise ValidationError(f"Tâche #{tache_id} introuvable")
 

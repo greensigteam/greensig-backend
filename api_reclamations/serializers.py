@@ -17,7 +17,7 @@ class TypeReclamationSerializer(serializers.ModelSerializer):
 class UrgenceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Urgence
-        fields = ['id', 'niveau_urgence', 'couleur', 'delai_max_traitement', 'ordre']
+        fields = ['id', 'niveau_urgence', 'couleur', 'ordre']
 
 
 # ==============================================================================
@@ -51,12 +51,12 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'statut_display',
             'site', 'site_nom',
             'zone', 'zone_nom',
-            'date_cloture_prevue',
             'date_cloture_reelle',
             'date_prise_en_compte',
             'date_debut_traitement',
             'date_resolution',
             'description',
+            'type_autre_description',
             'createur', 'createur_nom',
             'localisation',
             # Champs refus intervention (client)
@@ -176,14 +176,13 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
         """Retourne les infos de base des tâches liées.
 
         Note: Utilise le prefetch 'taches_correctives' avec select_related pour éviter N+1.
-        Le prefetch filtre déjà sur deleted_at__isnull=True dans la view.
         """
         # Utilise le cache prefetch si disponible, sinon fallback
         if hasattr(obj, '_prefetched_objects_cache') and 'taches_correctives' in obj._prefetched_objects_cache:
             taches = obj._prefetched_objects_cache['taches_correctives']
         else:
             # Fallback avec optimisation
-            taches = obj.taches_correctives.filter(deleted_at__isnull=True).select_related(
+            taches = obj.taches_correctives.select_related(
                 'id_type_tache', 'id_equipe'
             ).prefetch_related('equipes')
 
@@ -276,6 +275,7 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
             'zone',
             'localisation',
             'description',
+            'type_autre_description',
             'date_constatation',
             'date_prise_en_compte',
             'date_debut_traitement',
@@ -293,9 +293,20 @@ class ReclamationCreateSerializer(serializers.ModelSerializer):
         Validation: si une localisation est fournie sans site,
         on vérifie qu'un site peut être détecté automatiquement.
         Validation de la date de constatation (horodatage).
+        Validation: type_autre_description obligatoire si type = "Autre".
         """
         from api.models import Site, SousSite
         from django.utils import timezone
+
+        # Validation: type_autre_description obligatoire si type = "Autre"
+        type_reclamation = attrs.get('type_reclamation')
+        type_autre_description = attrs.get('type_autre_description')
+
+        if type_reclamation and type_reclamation.code_reclamation == 'AUTRE-DIVERS':
+            if not type_autre_description or not type_autre_description.strip():
+                raise serializers.ValidationError({
+                    "type_autre_description": "Veuillez préciser le type de réclamation."
+                })
 
         localisation = attrs.get('localisation')
         site = attrs.get('site')

@@ -134,21 +134,26 @@ class MonthlyReportView(APIView):
         }
 
     def _get_travaux_effectues(self, site_id, date_debut, date_fin):
-        """Liste des travaux effectués sur la période (tâches terminées ET validées par l'admin)."""
+        """
+        Liste des travaux effectués sur la période (tâches terminées ET validées par l'admin).
+
+        Retourne un format hybride:
+        - par_type: Groupement par type de tâche (récapitulatif)
+        - details: Liste chronologique des tâches individuelles (timeline)
+        """
         try:
             from api_planification.models import Tache
 
             # Filtrer les tâches liées au site via les objets
             taches = Tache.objects.filter(
-                deleted_at__isnull=True,
                 statut='TERMINEE',
                 etat_validation='VALIDEE',
                 date_fin_reelle__gte=date_debut,
                 date_fin_reelle__lte=date_fin,
                 objets__site_id=site_id
-            ).distinct().select_related('id_type_tache')
+            ).distinct().select_related('id_type_tache').prefetch_related('equipes').order_by('date_fin_reelle')
 
-            # Grouper par type de tâche
+            # 1. Grouper par type de tâche (récapitulatif)
             types_count = {}
             for tache in taches:
                 type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre'
@@ -160,22 +165,53 @@ class MonthlyReportView(APIView):
                     }
                 types_count[type_nom]['count'] += 1
 
-            # Convertir en liste
-            result = []
+            par_type = []
             for type_nom, data in types_count.items():
-                result.append({
+                par_type.append({
                     'type': data['nom'],
                     'description': data['description'],
                     'count': data['count'],
                 })
+            par_type = sorted(par_type, key=lambda x: x['count'], reverse=True)
 
-            return sorted(result, key=lambda x: x['count'], reverse=True)
+            # 2. Liste chronologique des tâches (timeline)
+            details = []
+            for tache in taches:
+                # Récupérer les équipes
+                equipes_list = list(tache.equipes.all())
+                equipes_noms = ', '.join([eq.nom_equipe for eq in equipes_list]) if equipes_list else 'Non assignée'
+
+                # Calculer les heures
+                temps_travail = tache.temps_travail_total
+                heures = temps_travail.get('heures', 0) if isinstance(temps_travail, dict) else 0
+
+                details.append({
+                    'id': tache.id,
+                    'reference': tache.reference or f'T-{tache.id}',
+                    'date': tache.date_fin_reelle.strftime('%Y-%m-%d') if tache.date_fin_reelle else None,
+                    'type': tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre',
+                    'equipes': equipes_noms,
+                    'heures': round(heures, 1),
+                    'description': tache.description_travaux[:100] if tache.description_travaux else None,
+                })
+
+            return {
+                'par_type': par_type,
+                'details': details,
+                'total': len(taches),
+            }
 
         except Exception as e:
-            return [{'error': str(e)}]
+            return {'par_type': [], 'details': [], 'total': 0, 'error': str(e)}
 
     def _get_travaux_planifies(self, site_id, date_fin):
-        """Liste des travaux planifiés pour les 30 jours suivant la période."""
+        """
+        Liste des travaux planifiés pour les 30 jours suivant la période.
+
+        Retourne un format hybride:
+        - par_type: Groupement par type de tâche (récapitulatif)
+        - details: Liste chronologique des tâches individuelles (timeline)
+        """
         try:
             from api_planification.models import Tache
 
@@ -184,14 +220,13 @@ class MonthlyReportView(APIView):
             next_period_end = next_period_start + timedelta(days=30)
 
             taches = Tache.objects.filter(
-                deleted_at__isnull=True,
                 statut__in=['PLANIFIEE'],
                 date_debut_planifiee__gte=next_period_start,
                 date_debut_planifiee__lte=next_period_end,
                 objets__site_id=site_id
-            ).distinct().select_related('id_type_tache')
+            ).distinct().select_related('id_type_tache').prefetch_related('equipes').order_by('date_debut_planifiee')
 
-            # Grouper par type
+            # 1. Grouper par type (récapitulatif)
             types_list = {}
             for tache in taches:
                 type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre'
@@ -199,10 +234,37 @@ class MonthlyReportView(APIView):
                     types_list[type_nom] = 0
                 types_list[type_nom] += 1
 
-            return [{'type': k, 'count': v} for k, v in sorted(types_list.items(), key=lambda x: -x[1])]
+            par_type = [{'type': k, 'count': v} for k, v in sorted(types_list.items(), key=lambda x: -x[1])]
+
+            # 2. Liste chronologique des tâches (timeline)
+            details = []
+            for tache in taches:
+                # Récupérer les équipes
+                equipes_list = list(tache.equipes.all())
+                equipes_noms = ', '.join([eq.nom_equipe for eq in equipes_list]) if equipes_list else 'Non assignée'
+
+                # Charge estimée
+                heures = tache.charge_estimee_heures or 0
+
+                details.append({
+                    'id': tache.id,
+                    'reference': tache.reference or f'T-{tache.id}',
+                    'date_debut': tache.date_debut_planifiee.strftime('%Y-%m-%d') if tache.date_debut_planifiee else None,
+                    'date_fin': tache.date_fin_planifiee.strftime('%Y-%m-%d') if tache.date_fin_planifiee else None,
+                    'type': tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre',
+                    'equipes': equipes_noms,
+                    'heures': round(heures, 1) if heures else None,
+                    'priorite': tache.priorite,
+                })
+
+            return {
+                'par_type': par_type,
+                'details': details,
+                'total': len(taches),
+            }
 
         except Exception as e:
-            return [{'error': str(e)}]
+            return {'par_type': [], 'details': [], 'total': 0, 'error': str(e)}
 
     def _get_equipes(self, site_id, date_debut, date_fin):
         """Équipes du site avec tous leurs membres et heures travaillées si disponibles."""
@@ -214,7 +276,6 @@ class MonthlyReportView(APIView):
             # 1. Récupérer les tâches terminées et validées sur la période FIRST
             #    pour identifier les équipes qui ont RÉELLEMENT travaillé
             taches_periode = Tache.objects.filter(
-                deleted_at__isnull=True,
                 statut='TERMINEE',
                 etat_validation='VALIDEE',
                 date_fin_reelle__gte=date_debut,
@@ -301,14 +362,14 @@ class MonthlyReportView(APIView):
 
                 # Récupérer les absences sur la période
                 absences = Absence.objects.filter(
-                    id_operateur__in=operateurs_actifs,
+                    operateur__in=operateurs_actifs,
                     date_debut__lte=date_fin,
                     date_fin__gte=date_debut,
                     statut='VALIDEE'
-                ).select_related('id_operateur')
+                ).select_related('operateur')
 
                 # Set des IDs d'opérateurs absents
-                operateurs_absents_ids = set(abs.id_operateur_id for abs in absences)
+                operateurs_absents_ids = set(abs.operateur_id for abs in absences)
 
                 # Compter les opérateurs PRÉSENTS (non absents)
                 operateurs_presents = [op for op in operateurs_actifs if op.id not in operateurs_absents_ids]
@@ -468,7 +529,8 @@ class MonthlyReportView(APIView):
             reclamations = Reclamation.objects.filter(
                 date_creation__gte=date_debut,
                 date_creation__lte=date_fin,
-                site_id=site_id
+                site_id=site_id,
+                actif=True  # Exclure les réclamations supprimées
             ).select_related('zone', 'type_reclamation', 'urgence')
 
             result = []
@@ -479,7 +541,7 @@ class MonthlyReportView(APIView):
                     'type': rec.type_reclamation.nom_reclamation if rec.type_reclamation else None,
                     'description': rec.description,
                     'statut': rec.statut,
-                    'urgence': rec.urgence.nom_urgence if rec.urgence else None,
+                    'urgence': rec.urgence.niveau_urgence if rec.urgence else None,
                     'date': rec.date_creation.isoformat(),
                     'zone': rec.zone.nom if rec.zone else None,
                 })
@@ -504,7 +566,6 @@ class MonthlyReportView(APIView):
 
             # Tâches liées au site
             taches_base = Tache.objects.filter(
-                deleted_at__isnull=True,
                 objets__site_id=site_id
             ).distinct()
 
@@ -537,7 +598,7 @@ class MonthlyReportView(APIView):
             ) if taches_planifiees > 0 else 0
 
             # Réclamations sur le site (utiliser le champ site direct, zone peut être NULL)
-            reclamations_base = Reclamation.objects.filter(site_id=site_id)
+            reclamations_base = Reclamation.objects.filter(site_id=site_id, actif=True)
 
             reclamations_creees = reclamations_base.filter(
                 date_creation__gte=date_debut,
@@ -554,7 +615,6 @@ class MonthlyReportView(APIView):
             # ✅ LOGIQUE CORRIGÉE: Simple somme des heures de toutes les tâches
             # Une tâche = ses heures (pas multiplication par nombre d'opérateurs)
             taches_terminees_periode = Tache.objects.filter(
-                deleted_at__isnull=True,
                 statut='TERMINEE',
                 etat_validation='VALIDEE',
                 date_fin_reelle__gte=date_debut,
