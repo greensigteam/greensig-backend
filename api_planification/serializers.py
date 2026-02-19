@@ -1,7 +1,10 @@
+import logging
 from rest_framework import serializers
 from .models import TypeTache, Tache, ParticipationTache, RatioProductivite, DistributionCharge
 from api_users.models import Equipe, Client, StructureClient
 from api.models import Objet
+
+logger = logging.getLogger(__name__)
 
 
 class StructureClientLightSerializer(serializers.ModelSerializer):
@@ -809,38 +812,25 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
 
         # 1. D'abord essayer de déduire depuis les objets
         if objets:
-            print(f"🔍 [TacheCreate] {len(objets)} objet(s) fourni(s)")
             for obj in objets:
                 if hasattr(obj, 'site') and obj.site:
                     site_found = obj.site
-                    print(f"✅ [TacheCreate] Site trouvé depuis objet: {site_found.nom_site}")
                     break
 
         # 2. Sinon, essayer de déduire depuis la réclamation liée
         if not site_found and validated_data.get('reclamation'):
             reclamation = validated_data.get('reclamation')
-            print(f"🔍 [TacheCreate] Réclamation liée: {reclamation.numero_reclamation if reclamation else 'None'}")
             if hasattr(reclamation, 'site') and reclamation.site:
                 site_found = reclamation.site
-                print(f"✅ [TacheCreate] Site trouvé depuis réclamation: {site_found.nom_site}")
-            else:
-                print(f"⚠️ [TacheCreate] Réclamation sans site: site={getattr(reclamation, 'site', 'N/A')}")
 
         # 3. Assigner id_structure_client et id_client depuis le site trouvé
         if site_found:
-            print(f"🏢 [TacheCreate] Site trouvé: {site_found.nom_site} (id={site_found.id})")
-            # Assigner id_structure_client si non fourni
             if ('id_structure_client' not in validated_data or validated_data.get('id_structure_client') is None):
                 if site_found.structure_client:
                     validated_data['id_structure_client'] = site_found.structure_client
-                    print(f"✅ [TacheCreate] Structure client assignée: {site_found.structure_client}")
-            # Legacy: Assigner id_client si non fourni
             if ('id_client' not in validated_data or validated_data.get('id_client') is None):
                 if hasattr(site_found, 'client') and site_found.client:
                     validated_data['id_client'] = site_found.client
-                    print(f"✅ [TacheCreate] Client assigné: {site_found.client}")
-        else:
-            print(f"⚠️ [TacheCreate] Aucun site trouvé! objets={len(objets) if objets else 0}, reclamation={validated_data.get('reclamation')}")
 
         instance = super().create(validated_data)
         if current_user:
@@ -896,11 +886,8 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                     heure_fin=heure_fin,
                     commentaire=dist_data.get('commentaire', '')
                 )
-            print(f"✅ {len(distributions_data)} distribution(s) créée(s) pour tâche #{instance.id}")
-
-        # ✅ Gérer la récurrence automatique si configurée
+        # Gérer la récurrence automatique si configurée
         if recurrence_config and recurrence_config.get('enabled'):
-            print(f"[SERIALIZER-RECURRENCE] Configuration détectée: {recurrence_config}")
             mode = recurrence_config.get('mode')
 
             if mode == 'frequency':
@@ -926,15 +913,12 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                     try:
                         date_fin_recurrence = dt.strptime(date_fin_recurrence, '%Y-%m-%d').date()
                     except ValueError:
-                        print(f"[SERIALIZER-RECURRENCE] Erreur conversion date: {date_fin_recurrence}")
                         date_fin_recurrence = None
 
                 try:
                     nouvelles_taches = []
 
                     if jours_semaine and frequency == 'WEEKLY':
-                        # Mode sélection jours de la semaine
-                        print(f"[SERIALIZER-RECURRENCE] Mode WEEKLY avec jours: {jours_semaine}")
                         nouvelles_taches = dupliquer_tache_recurrence_jours_semaine(
                             tache_id=instance.id,
                             jours_semaine=jours_semaine,
@@ -945,8 +929,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                             nouveau_statut='PLANIFIEE'
                         )
                     elif jours_mois and frequency == 'MONTHLY':
-                        # Mode sélection jours du mois
-                        print(f"[SERIALIZER-RECURRENCE] Mode MONTHLY avec jours: {jours_mois}")
                         nouvelles_taches = dupliquer_tache_recurrence_jours_mois(
                             tache_id=instance.id,
                             jours_mois=jours_mois,
@@ -957,8 +939,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                             nouveau_statut='PLANIFIEE'
                         )
                     else:
-                        # Mode standard (décalage fixe)
-                        print(f"[SERIALIZER-RECURRENCE] Mode standard: {frequency}")
                         nouvelles_taches = dupliquer_tache_recurrence_multiple(
                             tache_id=instance.id,
                             frequence=frequency,
@@ -969,28 +949,12 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                             nouveau_statut='PLANIFIEE'
                         )
 
-                    # Vérification du nombre de tâches créées
-                    if nombre_occurrences and len(nouvelles_taches) != nombre_occurrences:
-                        print(f"[SERIALIZER-RECURRENCE] ⚠️ Attendu {nombre_occurrences} tâches, créé {len(nouvelles_taches)}")
-                    else:
-                        print(f"[SERIALIZER-RECURRENCE] ✅ {len(nouvelles_taches)} tâche(s) récurrente(s) créée(s)")
-
-                    # Log des dates créées
-                    if nouvelles_taches:
-                        dates_creees = [t.date_debut_planifiee.strftime('%d/%m/%Y') for t in nouvelles_taches[:5]]
-                        print(f"[SERIALIZER-RECURRENCE] Dates (5 premières): {', '.join(dates_creees)}")
-                        if len(nouvelles_taches) > 5:
-                            print(f"[SERIALIZER-RECURRENCE] ... et {len(nouvelles_taches) - 5} autres")
-
                 except DjangoValidationError as e:
-                    print(f"[SERIALIZER-RECURRENCE] ❌ Erreur validation: {e}")
                     raise serializers.ValidationError({
                         'recurrence_config': f"Impossible de créer les occurrences: {str(e)}"
                     })
                 except Exception as e:
-                    print(f"[SERIALIZER-RECURRENCE] ❌ Erreur inattendue: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"Erreur récurrence tâche #{instance.id}: {e}")
                     raise serializers.ValidationError({
                         'recurrence_config': f"Erreur lors de la création des occurrences: {str(e)}"
                     })
@@ -998,16 +962,8 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         return instance
 
     def update(self, instance, validated_data):
-        import time
-
-        start_total = time.time()
-        print(f"[PERF] UPDATE START - Tache #{instance.id}")
-
-        # ✅ DEBUG: Capturer le statut explicite AVANT tout pop
+        # Capturer le statut explicite AVANT tout pop
         statut_explicite_initial = validated_data.get('statut')
-        print(f"[DEBUG] Statut explicite reçu: {statut_explicite_initial}")
-        print(f"[DEBUG] Statut actuel instance: {instance.statut}")
-        print(f"[DEBUG] validated_data keys: {list(validated_data.keys())}")
 
         # Extract metadata
         current_user = validated_data.pop('_current_user', None)
@@ -1024,18 +980,12 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         # ✅ NOUVEAU: Extract recurrence config (ignoré en update, seulement pour create)
         recurrence_config = validated_data.pop('recurrence_config', None)
 
-        print(f"[PERF] Extracted M2M - equipes: {len(equipes) if equipes else 0}, objets: {len(objets) if objets else 0}")
-        print(f"[DEBUG] validated_data après pops: {validated_data}")
-
         # Capturer l'ancien statut avant la mise à jour
         ancien_statut_stocke = instance.statut
         # ✅ FIX: Utiliser le statut calculé pour refléter l'état réel (ce que l'utilisateur voit)
         ancien_statut_calcule = instance.computed_statut
 
-        start_super = time.time()
         instance = super().update(instance, validated_data)
-        print(f"[PERF] super().update() took {time.time() - start_super:.2f}s")
-        print(f"[DEBUG] Statut après super().update(): {instance.statut}")
 
         # ✅ ANNULATION: Remplir automatiquement date_annulation et annulee_par
         if statut_explicite_initial == 'ANNULEE' and ancien_statut_stocke != 'ANNULEE':
@@ -1044,7 +994,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
             if current_user:
                 instance.annulee_par = current_user
             instance.save(update_fields=['date_annulation', 'annulee_par'])
-            print(f"[ANNULATION] Tâche #{instance.id} annulée par {current_user} le {instance.date_annulation}")
 
         # ✅ REPLANIFICATION: Nettoyer les champs d'annulation quand on réactive une tâche
         if ancien_statut_stocke == 'ANNULEE' and statut_explicite_initial and statut_explicite_initial != 'ANNULEE':
@@ -1053,23 +1002,15 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
             instance.date_annulation = None
             instance.annulee_par = None
             instance.save(update_fields=['motif_annulation', 'commentaire_annulation', 'date_annulation', 'annulee_par'])
-            print(f"[REPLANIFICATION] Tâche #{instance.id} réactivée, champs d'annulation nettoyés")
 
         # Set M2M relationships
         if equipes is not None:
-            start_eq = time.time()
             instance.equipes.set(equipes)
-            print(f"[PERF] equipes.set() took {time.time() - start_eq:.2f}s")
 
         # ⚡ OPTIMISATION AGRESSIVE: Skip complètement la mise à jour M2M pour beaucoup d'objets
         # La validation de cohérence est déjà faite côté frontend
         if objets is not None and len(objets) <= 50:
-            start_obj = time.time()
-            # Seulement pour peu d'objets (<= 50), faire la mise à jour normale
             instance.objets.set(objets)
-            print(f"[PERF] objets.set() took {time.time() - start_obj:.2f}s")
-        else:
-            print(f"[PERF] SKIPPED objets.set() for {len(objets) if objets else 0} objects")
 
         # ✅ NOUVEAU: Mettre à jour les distributions de charge (Smart Update)
         if distributions_data is not None:
@@ -1134,7 +1075,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                         
                         # ✅ PROTECTION: Si REALISEE, on interdit la modification des données planifiées
                         if dist.status == 'REALISEE':
-                            print(f"🔒 Distribution #{dist.id} est REALISEE -> Modifications ignorées")
                             # Autoriser seulement l'update du commentaire pour les distributions réalisées
                             if 'commentaire' in dist_data and dist_data['commentaire'] != dist.commentaire:
                                 dist.commentaire = dist_data['commentaire']
@@ -1152,7 +1092,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                             # if 'reference' in dist_data:
                             #     dist.reference = dist_data['reference']
                             dist.save()
-                            print(f"✅ Distribution #{dist.id} mise à jour")
                     except DistributionCharge.DoesNotExist:
                         # Si l'ID fourni n'existe pas (ou n'appartient pas à cette tâche), on crée
                         # ❌ NE PAS passer 'reference' - elle sera auto-générée par le modèle
@@ -1166,7 +1105,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                             status=dist_data.get('status', 'NON_REALISEE')
                             # reference sera auto-générée
                         )
-                        print(f"✅ Distribution créée (ID fourni mais non trouvé)")
                 else:
                     # --- CREATE ---
                     # ❌ NE PAS passer 'reference' - elle sera auto-générée par le modèle
@@ -1180,7 +1118,6 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
                         status=dist_data.get('status', 'NON_REALISEE')
                         # reference sera auto-générée
                     )
-                    print(f"✅ Nouvelle distribution #{new_dist.id} créée pour la date {new_dist.date}")
 
         # REPLANIFICATION: Restaurer les distributions APRÈS le traitement de distributions_data
         # Le frontend envoie les distributions avec leur ancien status='ANNULEE',
@@ -1188,32 +1125,18 @@ class TacheCreateUpdateSerializer(serializers.ModelSerializer):
         if ancien_statut_calcule == 'ANNULEE':
             from .business_rules import restaurer_distributions_apres_replanification
             nb_restaurees = restaurer_distributions_apres_replanification(instance)
-            print(f"[REPLANIFICATION] Tâche #{instance.id}: ANNULEE modifiée, {nb_restaurees} distribution(s) restaurée(s)")
 
-        # ✅ SYNC STATUT: Synchroniser le statut stocké avec le statut calculé dynamiquement
-        # Ceci permet de replanifier automatiquement les tâches expirées
-        # ⚠️ IMPORTANT: Ne PAS synchroniser si le statut a été explicitement défini dans la requête
-        # (ex: annulation manuelle, démarrage manuel, etc.)
-        # NOTE: On utilise statut_explicite_initial capturé au début de la méthode
-        print(f"[DEBUG] Vérification sync - statut_explicite_initial: {statut_explicite_initial}")
-        print(f"[DEBUG] Statut instance avant sync: {instance.statut}")
+        # Synchroniser le statut stocké avec le statut calculé dynamiquement
+        # Ne PAS synchroniser si le statut a été explicitement défini dans la requête
 
         if statut_explicite_initial is None:
             # Pas de statut explicite → synchronisation automatique autorisée
             instance.refresh_from_db()  # Recharger pour avoir les distributions à jour
             computed = instance.computed_statut
-            print(f"[DEBUG] computed_statut: {computed}")
             if instance.statut != computed:
-                old_statut = instance.statut
                 instance.statut = computed
                 instance.save(update_fields=['statut'])
-                print(f"[SYNC STATUT] Tâche #{instance.id}: {old_statut} → {computed}")
-        else:
-            print(f"[SYNC STATUT] Statut explicite '{statut_explicite_initial}' → pas de synchronisation automatique")
 
-        print(f"[DEBUG] Statut final instance: {instance.statut}")
-
-        print(f"[PERF] UPDATE TOTAL took {time.time() - start_total:.2f}s")
         return instance
 
 

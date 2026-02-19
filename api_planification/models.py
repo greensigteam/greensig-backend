@@ -820,7 +820,7 @@ class RatioProductivite(models.Model):
 
     id_type_tache = models.ForeignKey(
         TypeTache,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='ratios_productivite',
         verbose_name="Type de tâche"
     )

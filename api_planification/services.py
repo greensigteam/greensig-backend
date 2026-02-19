@@ -266,22 +266,41 @@ class WorkloadCalculationService:
     def _group_objects_by_type(cls, objets: QuerySet) -> Dict[str, list]:
         """
         Groupe les objets par leur type réel (Arbre, Gazon, etc.).
+
+        Optimisé : 15 requêtes IN au total au lieu de N×15 requêtes lazy.
+        Pour 400 objets, passe de ~6000 queries à 15.
         """
-        grouped = {}
-        for obj in objets:
-            type_name = obj.get_nom_type()
-            if type_name not in grouped:
-                grouped[type_name] = []
-            grouped[type_name].append(obj)
+        from api.models import (
+            Arbre, Palmier, Gazon, Arbuste, Vivace, Cactus, Graminee,
+            Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon
+        )
+
+        CHILD_MODELS = [
+            Arbre, Palmier, Gazon, Arbuste, Vivace, Cactus, Graminee,
+            Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon
+        ]
+
+        objet_ids = set(objets.values_list('id', flat=True))
+        grouped: Dict[str, list] = {}
+
+        for Model in CHILD_MODELS:
+            # Une seule requête par type : SELECT ... WHERE objet_ptr_id IN (...)
+            children = Model.objects.filter(objet_ptr_id__in=objet_ids)
+            child_list = list(children)
+            if child_list:
+                grouped[Model.__name__] = child_list
+
         return grouped
 
     @classmethod
     def _calculate_quantity(cls, objets: list, type_objet: str, unite_mesure: str) -> float:
         """
         Calcule la quantité totale pour un groupe d'objets.
+        Les objets sont déjà des instances typées (Arbre, Gazon, etc.),
+        pas besoin de get_type_reel().
 
         Args:
-            objets: Liste d'objets du même type
+            objets: Liste d'instances typées (déjà résolues par _group_objects_by_type)
             type_objet: Nom du type (Arbre, Gazon, etc.)
             unite_mesure: 'm2', 'ml', ou 'unite'
 
@@ -293,24 +312,18 @@ class WorkloadCalculationService:
 
         total = 0.0
         for obj in objets:
-            real_obj = obj.get_type_reel()
-            if not real_obj:
-                continue
-
-            geometry = getattr(real_obj, 'geometry', None)
+            geometry = getattr(obj, 'geometry', None)
             if not geometry:
                 continue
 
             try:
                 if unite_mesure == 'm2':
-                    # Pour polygones: utiliser area_sqm si disponible, sinon calculer
-                    if hasattr(real_obj, 'area_sqm') and real_obj.area_sqm:
-                        total += real_obj.area_sqm
+                    if hasattr(obj, 'area_sqm') and obj.area_sqm:
+                        total += obj.area_sqm
                     elif geometry.geom_type in ('Polygon', 'MultiPolygon'):
                         total += cls._calculate_area_m2(geometry)
 
                 elif unite_mesure == 'ml':
-                    # Pour lignes: calculer la longueur
                     if geometry.geom_type in ('LineString', 'MultiLineString'):
                         total += cls._calculate_length_m(geometry)
             except Exception as e:

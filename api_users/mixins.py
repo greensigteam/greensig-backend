@@ -47,6 +47,11 @@ class RoleBasedQuerySetMixin:
 
         # Récupérer tous les rôles de l'utilisateur
         roles = list(user.roles_utilisateur.values_list('role__nom_role', flat=True))
+
+        # Les superusers Django sont traités comme ADMIN
+        if user.is_superuser and 'ADMIN' not in roles:
+            roles.append('ADMIN')
+
         logger.info(f"[RoleBasedQuerySetMixin] {model_name}: User={user.email}, Roles={roles}")
 
         # ADMIN : Aucun filtre, voit tout
@@ -211,11 +216,13 @@ class RoleBasedQuerySetMixin:
             # 1. Tâches avec objets sur les sites du superviseur
             # 2. Tâches liées à des réclamations sur les sites du superviseur
             # 3. Tâches assignées à des équipes sur les sites du superviseur
+            # 4. Tâches liées à une structure client dont un site est supervisé
             return queryset.filter(
                 Q(objets__site__superviseur=superviseur) |
                 Q(reclamation__site__superviseur=superviseur) |
                 Q(id_equipe__site_principal__superviseur=superviseur) |
-                Q(equipes__site_principal__superviseur=superviseur)
+                Q(equipes__site_principal__superviseur=superviseur) |
+                Q(id_structure_client__sites__superviseur=superviseur)
             ).distinct()
 
         # Distributions de charge : Distributions des tâches sur les sites du superviseur
@@ -224,7 +231,8 @@ class RoleBasedQuerySetMixin:
                 Q(tache__objets__site__superviseur=superviseur) |
                 Q(tache__reclamation__site__superviseur=superviseur) |
                 Q(tache__id_equipe__site_principal__superviseur=superviseur) |
-                Q(tache__equipes__site_principal__superviseur=superviseur)
+                Q(tache__equipes__site_principal__superviseur=superviseur) |
+                Q(tache__id_structure_client__sites__superviseur=superviseur)
             ).distinct()
 
         # Réclamations : Réclamations sur les sites affectés au superviseur

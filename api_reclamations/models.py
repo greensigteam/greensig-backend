@@ -64,7 +64,6 @@ class Urgence(models.Model):
 class Reclamation(models.Model):
     STATUT_CHOICES = [
         ('NOUVELLE', 'En attente de lecture'),
-        ('PRISE_EN_COMPTE', 'Prise en compte'),
         ('EN_COURS', 'En attente de réalisation'),
         ('RESOLUE', 'Tâche terminée côté administrateur'),
         ('EN_ATTENTE_VALIDATION_CLOTURE', 'En attente de validation de clôture'),
@@ -182,6 +181,12 @@ class Reclamation(models.Model):
     date_refus_intervention = models.DateTimeField(null=True, blank=True, verbose_name="Date refus intervention")
     motif_refus_intervention = models.TextField(blank=True, null=True, verbose_name="Motif du refus (obligatoire)")
     nombre_refus = models.PositiveIntegerField(default=0, verbose_name="Nombre de refus")
+
+    rappel_cloture_envoye = models.BooleanField(
+        default=False,
+        verbose_name="Rappel de clôture envoyé",
+        help_text="Indique si le rappel automatique (24h) a été envoyé"
+    )
 
     statut = models.CharField(max_length=50, choices=STATUT_CHOICES, default='NOUVELLE', verbose_name="Statut")
     actif = models.BooleanField(default=True, verbose_name="Actif")

@@ -4,16 +4,16 @@ import json
 from django.db import models
 from django.db.models.deletion import ProtectedError
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.cache import cache
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import Tache, TypeTache, ParticipationTache, RatioProductivite, DistributionCharge
 
-# Constantes pour le cache
-CACHE_KEY_TACHES = 'taches_list_{user_id}_{params_hash}'
-CACHE_TIMEOUT_TACHES = 60  # 1 minute
+from greensig_web.cache_utils import (
+    cache_get, cache_set, make_cache_key, hash_params,
+    invalidate_on_tache_mutation, invalidate_on_distribution_mutation,
+)
 from .serializers import (
     TacheSerializer, TacheListSerializer, TacheCreateUpdateSerializer,
     TypeTacheSerializer, ParticipationTacheSerializer,
@@ -89,12 +89,12 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
     - ADMIN: CRUD complet
     - SUPERVISEUR, CLIENT: Lecture seule
 
-    Pagination: 20 items par page.
+    Pas de pagination (données de configuration système).
     """
     queryset = TypeTache.objects.all()
     serializer_class = TypeTacheSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]
-    pagination_class = SmallPageNumberPagination
+    pagination_class = None
 
     @action(detail=False, methods=['get'])
     def applicables(self, request):
@@ -175,7 +175,7 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
         """
         Supprime un type de tâche.
 
-        Retourne une erreur 400 si des tâches existantes utilisent ce type
+        Retourne une erreur 400 si des tâches ou ratios existants utilisent ce type
         (protection via foreign key PROTECT).
         """
         instance = self.get_object()
@@ -183,15 +183,27 @@ class TypeTacheViewSet(viewsets.ModelViewSet):
             self.perform_destroy(instance)
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ProtectedError as e:
-            # Compter le nombre de tâches liées
-            from .models import Tache
+            from .models import Tache, RatioProductivite
             taches_count = Tache.objects.filter(id_type_tache=instance).count()
+            ratios_count = RatioProductivite.objects.filter(id_type_tache=instance).count()
+
+            if taches_count > 0:
+                message = f'Impossible de supprimer ce type de tâche car {taches_count} tâche(s) existante(s) l\'utilisent.'
+                detail = f'Le type "{instance.nom_tache}" est référencé par des tâches planifiées. Vous devez d\'abord supprimer ou modifier ces tâches.'
+            elif ratios_count > 0:
+                message = f'Impossible de supprimer ce type de tâche car {ratios_count} ratio(s) de productivité y sont associés.'
+                detail = f'Le type "{instance.nom_tache}" possède des ratios de productivité. Vous devez d\'abord supprimer ces ratios.'
+            else:
+                message = 'Impossible de supprimer ce type de tâche car des objets liés existent.'
+                detail = str(e)
+
             return Response(
                 {
                     'error': 'protected_foreign_key',
-                    'message': f'Impossible de supprimer ce type de tâche car {taches_count} tâche(s) existante(s) l\'utilisent.',
-                    'detail': f'Le type "{instance.nom_tache}" est référencé par des tâches planifiées. Vous devez d\'abord supprimer ou modifier ces tâches.',
-                    'taches_count': taches_count
+                    'message': message,
+                    'detail': detail,
+                    'taches_count': taches_count,
+                    'ratios_count': ratios_count
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -313,94 +325,70 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.Mo
         return TacheSerializer  # Serializer complet pour le détail
 
     def _get_cache_key(self, request):
-        """Génère une clé de cache unique basée sur l'utilisateur, son rôle et les filtres."""
+        """Génère une clé de cache versionnée via cache_utils."""
         user_id = request.user.id if request.user.is_authenticated else 'anon'
-        # ⚡ SÉCURITÉ: Inclure le rôle dans la clé de cache pour éviter les fuites de données
-        # Différents rôles voient différentes données (ADMIN: tout, CLIENT: ses sites uniquement)
         user_role = getattr(request.user, 'role', 'unknown') if request.user.is_authenticated else 'anon'
-        # Hash des query params pour différencier les filtres
-        params_str = json.dumps(dict(request.query_params), sort_keys=True)
-        params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
-        return f'taches_list_{user_id}_{user_role}_{params_hash}'
+        params_hash = hash_params(dict(request.query_params))
+        return make_cache_key('TACHES', user_id, user_role, params_hash)
 
     def list(self, request, *args, **kwargs):
-        """
-        ⚡ Liste des tâches avec cache Redis (1 minute).
-
-        Le cache est invalidé automatiquement par les tâches Celery
-        quand des statuts changent.
-        """
+        """⚡ Liste des tâches avec cache Redis versionné."""
         cache_key = self._get_cache_key(request)
 
-        # Essayer de récupérer depuis le cache
+        from django.core.cache import cache
         cached_data = cache.get(cache_key)
         if cached_data is not None:
             return Response(cached_data)
 
-        # Sinon, exécuter la requête normale
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
         data = serializer.data
 
-        # Mettre en cache
-        cache.set(cache_key, data, CACHE_TIMEOUT_TACHES)
+        from greensig_web.cache_utils import get_cache_ttl
+        cache.set(cache_key, data, get_cache_ttl('TACHES'))
 
         return Response(data)
 
     def _invalidate_cache(self):
-        """Invalide le cache après modification d'une tâche."""
-        try:
-            # Tenter de supprimer toutes les clés de cache des tâches
-            cache.delete_pattern('greensig:taches_list_*')
-        except (AttributeError, Exception):
-            # Si delete_pattern n'est pas supporté, ignorer
-            pass
+        """Invalide le cache tâches + KPIs + reporting (graphe de dépendances)."""
+        invalidate_on_tache_mutation()
 
-    def perform_create(self, serializer):
-        """Invalide le cache après création."""
-        super().perform_create(serializer)
-        self._invalidate_cache()
-
-    def perform_update(self, serializer):
-        """Invalide le cache après modification."""
-        super().perform_update(serializer)
-        self._invalidate_cache()
+    # perform_create est défini plus bas dans la classe (après reset_temps-travail)
 
     def perform_destroy(self, instance):
         """Invalide le cache après suppression."""
-        super().perform_destroy(instance)
-        self._invalidate_cache()
+        try:
+            super().perform_destroy(instance)
+            self._invalidate_cache()
+        except ProtectedError as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                'error': 'protected_foreign_key',
+                'message': f'Impossible de supprimer la tâche #{instance.id} car des objets liés la protègent.',
+                'detail': str(e)
+            })
+        except Exception as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                'error': 'deletion_error',
+                'message': f'Erreur lors de la suppression de la tâche #{instance.id}: {str(e)}'
+            })
 
     def update(self, request, *args, **kwargs):
         """Override update pour retourner une réponse minimale (sans _detail fields lourds)."""
-        import time
-        start = time.time()
-        print(f"[VIEWSET] update() START")
-
         partial = kwargs.pop('partial', False)
 
-        t1 = time.time()
         instance = self.get_object()
-        print(f"[VIEWSET] get_object() took {time.time() - t1:.2f}s")
+        # Capturer l'ancien statut ICI pour éviter un 2e get_object() dans perform_update
+        self._ancien_statut = instance.statut
 
-        t2 = time.time()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        print(f"[VIEWSET] get_serializer() took {time.time() - t2:.2f}s")
-
-        t3 = time.time()
         serializer.is_valid(raise_exception=True)
-        print(f"[VIEWSET] is_valid() took {time.time() - t3:.2f}s")
-
-        t4 = time.time()
         self.perform_update(serializer)
-        print(f"[VIEWSET] perform_update() took {time.time() - t4:.2f}s")
 
         if getattr(instance, '_prefetched_objects_cache', None):
             instance._prefetched_objects_cache = {}
 
-        # ⚡ OPTIMISATION: Retourner une réponse minimale sans recharger tous les _detail
-        # Le frontend rechargera les données via loadTaches() de toute façon
-        print(f"[VIEWSET] update() TOTAL took {time.time() - start:.2f}s")
         return Response({
             'id': instance.id,
             'message': 'Tâche mise à jour avec succès'
@@ -763,14 +751,14 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.Mo
         # Gestion Statut Réclamation (User 6.6.5.4)
         if tache.reclamation:
             from api_reclamations.models import HistoriqueReclamation
-            
+
             rec = tache.reclamation
             # On passe en 'EN_COURS' uniquement si on est au début du cycle
-            if rec.statut in ['NOUVELLE', 'PRISE_EN_COMPTE']:
+            if rec.statut == 'NOUVELLE':
                 old_statut = rec.statut
                 rec.statut = 'EN_COURS'
                 rec.save()
-                
+
                 HistoriqueReclamation.objects.create(
                     reclamation=rec,
                     statut_precedent=old_statut,
@@ -778,6 +766,9 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.Mo
                     auteur=self.request.user,
                     commentaire=f"Passage en cours automatique suite à la création de tâches"
                 )
+
+        # Invalider le cache pour que la nouvelle tâche apparaisse immédiatement
+        self._invalidate_cache()
 
     @action(detail=True, methods=['post'], url_path='dupliquer-recurrence')
     def dupliquer_recurrence(self, request, pk=None):
@@ -943,23 +934,27 @@ class TacheViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.Mo
             )
 
     def perform_update(self, serializer):
-        # Récupérer l'ancien statut avant la sauvegarde
-        instance = self.get_object()
-        ancien_statut = instance.statut if instance else None
+        # Utiliser l'ancien statut capturé par update() pour éviter un 2e get_object()
+        ancien_statut = getattr(self, '_ancien_statut', None)
 
         tache = serializer.save(_current_user=self.request.user)
 
         # Si le statut passe à TERMINEE, marquer toutes les distributions non réalisées comme réalisées
         if tache.statut == 'TERMINEE' and ancien_statut != 'TERMINEE':
-            # Mettre à jour toutes les distributions qui ne sont pas encore réalisées
             distributions_non_realisees = tache.distributions_charge.filter(status='NON_REALISEE')
             nombre_mis_a_jour = distributions_non_realisees.update(status='REALISEE')
 
             if nombre_mis_a_jour > 0:
                 print(f"✅ {nombre_mis_a_jour} distribution(s) marquée(s) comme réalisée(s) automatiquement")
 
-        # Recalcul automatique de la charge estimée
-        WorkloadCalculationService.recalculate_and_save(tache)
+        # Recalcul uniquement si les objets ou le type de tâche ont changé
+        # (pas pour un simple changement de commentaire ou de statut)
+        changed_fields = set(serializer.validated_data.keys())
+        fields_requiring_recalc = {'objets', 'id_type_tache', 'distributions_charge_data'}
+        if changed_fields & fields_requiring_recalc:
+            WorkloadCalculationService.recalculate_and_save(tache)
+
+        self._invalidate_cache()
 
 
 class RatioProductiviteViewSet(viewsets.ModelViewSet):
@@ -971,12 +966,12 @@ class RatioProductiviteViewSet(viewsets.ModelViewSet):
     - ADMIN: CRUD complet
     - SUPERVISEUR, CLIENT: Lecture seule
 
-    Pagination: 20 items par page.
+    Pas de pagination (données de configuration système).
     """
     queryset = RatioProductivite.objects.select_related('id_type_tache').all()
     serializer_class = RatioProductiviteSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]
-    pagination_class = SmallPageNumberPagination
+    pagination_class = None
 
     def get_queryset(self):
         from django.db.models import Q
@@ -1108,6 +1103,17 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         return [permission() for permission in permission_classes]
 
+    def _invalidate_tache_cache(self):
+        """Invalide le cache tâches + KPIs + reporting (graphe de dépendances)."""
+        invalidate_on_distribution_mutation()
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        """Invalide le cache tâches après toute mutation réussie (POST/PUT/PATCH/DELETE)."""
+        response = super().finalize_response(request, response, *args, **kwargs)
+        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and response.status_code < 400:
+            self._invalidate_tache_cache()
+        return response
+
     def perform_update(self, serializer):
         """
         Validation supplémentaire lors de la mise à jour.
@@ -1140,6 +1146,7 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         # Tenter la sauvegarde avec gestion de l'erreur d'unicité
         try:
             serializer.save()
+            self._invalidate_tache_cache()
         except IntegrityError as e:
             # Attraper l'erreur d'unicité de contrainte (tache, date)
             if 'tache_id_date' in str(e):
@@ -1182,6 +1189,7 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
         # Tenter la sauvegarde avec gestion de l'erreur d'unicité
         try:
             serializer.save()
+            self._invalidate_tache_cache()
         except IntegrityError as e:
             # Attraper l'erreur d'unicité de contrainte (tache, date)
             if 'tache_id_date' in str(e):
@@ -1218,6 +1226,9 @@ class DistributionChargeViewSet(RoleBasedQuerySetMixin, viewsets.ModelViewSet):
 
         # Synchroniser le statut de la tâche
         synchroniser_tache_apres_suppression_distribution(tache, etait_en_cours)
+
+        # Invalider le cache des tâches (les distributions sont préfetchées dedans)
+        self._invalidate_tache_cache()
 
     @action(detail=True, methods=['post'], url_path='marquer-realisee')
     def marquer_realisee(self, request, pk=None):
@@ -2180,8 +2191,9 @@ class PlanningExportPDFView(APIView):
     Permissions:
         - ADMIN: toutes les taches
         - SUPERVISEUR: taches de ses equipes uniquement
+        - CLIENT: taches de ses sites uniquement
     """
-    permission_classes = [permissions.IsAuthenticated, IsAdminOrSuperviseur]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
         from celery.result import AsyncResult
@@ -2227,6 +2239,20 @@ class PlanningExportPDFView(APIView):
                     {'error': 'equipe_id doit etre un entier'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+        site_id = request.query_params.get('site_id')
+        if site_id:
+            try:
+                filters['site_id'] = int(site_id)
+            except ValueError:
+                return Response(
+                    {'error': 'site_id doit etre un entier'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        statuts = request.query_params.get('statuts')
+        if statuts:
+            filters['statuts'] = [s.strip() for s in statuts.split(',') if s.strip()]
 
         # Mode synchrone (fallback)
         sync_mode = request.query_params.get('sync', 'false').lower() == 'true'

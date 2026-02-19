@@ -13,27 +13,21 @@ import logging
 import os
 from datetime import datetime
 from celery import shared_task
+from django.db.models import Q
 from django.utils import timezone
-from django.core.cache import cache
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# Cache key pour la liste des taches
-CACHE_KEY_TACHES_LIST = 'taches_list_{user_id}_{params_hash}'
-CACHE_TIMEOUT_TACHES = 60  # 1 minute
-
 
 def invalidate_taches_cache():
-    """Invalide le cache de la liste des taches pour tous les utilisateurs."""
-    try:
-        # Supprimer toutes les cles commencant par 'taches_list_'
-        cache.delete_pattern('greensig:taches_list_*')
-    except AttributeError:
-        # Si delete_pattern n'est pas disponible
-        logger.warning("Cache backend doesn't support delete_pattern, skipping cache invalidation")
-    except Exception as e:
-        logger.warning(f"Failed to invalidate taches cache: {e}")
+    """Invalide le cache de la liste des taches pour tous les utilisateurs.
+
+    Delegue a cache_utils pour utiliser le meme compteur de version
+    que les vues (coherence globale).
+    """
+    from greensig_web.cache_utils import invalidate_on_tache_mutation
+    invalidate_on_tache_mutation()
 
 
 # ==============================================================================
@@ -169,15 +163,34 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
             'tache__id_type_tache',
             'tache__id_structure_client'
         ).prefetch_related(
-            'tache__equipes'
+            'tache__equipes',
+            'tache__objets__site'
         ).order_by('date', 'heure_debut')
 
-        # Filtrage par role
+        # Filtrage par role — pré-cacher les IDs pour éviter les jointures M2M lourdes
         if not is_admin:
             if is_superviseur and hasattr(user, 'superviseur_profile'):
                 # SUPERVISEUR: seulement ses equipes
-                equipes_ids = user.superviseur_profile.equipes_gerees.values_list('id', flat=True)
+                equipes_ids = set(user.superviseur_profile.equipes_gerees.values_list('id', flat=True))
                 queryset = queryset.filter(tache__equipes__id__in=equipes_ids)
+            elif hasattr(user, 'client_profile') and user.client_profile.structure:
+                # CLIENT: pré-cacher les IDs de tâches liées à sa structure
+                # (via FK direct OU via les sites de sa structure)
+                from api.models import Site
+                structure = user.client_profile.structure
+                client_site_ids = set(
+                    Site.objects.filter(structure_client=structure).values_list('id', flat=True)
+                )
+                # Tâches liées par FK structure OU par objets sur les sites du client
+                from api_planification.models import Tache
+                tache_ids_by_structure = set(
+                    Tache.objects.filter(id_structure_client=structure).values_list('id', flat=True)
+                )
+                tache_ids_by_site = set(
+                    Tache.objects.filter(objets__site_id__in=client_site_ids).values_list('id', flat=True)
+                ) if client_site_ids else set()
+                client_tache_ids = tache_ids_by_structure | tache_ids_by_site
+                queryset = queryset.filter(tache_id__in=client_tache_ids)
 
         # Filtres additionnels
         if filters.get('structure_client_id'):
@@ -186,7 +199,18 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
         if filters.get('equipe_id'):
             queryset = queryset.filter(tache__equipes__id=filters['equipe_id'])
 
-        # Distinct pour eviter les doublons (ManyToMany)
+        if filters.get('site_id'):
+            # Pré-cacher les IDs de tâches du site (évite une jointure M2M dans le queryset principal)
+            from api_planification.models import Tache
+            site_tache_ids = set(
+                Tache.objects.filter(objets__site_id=filters['site_id']).values_list('id', flat=True)
+            )
+            queryset = queryset.filter(tache_id__in=site_tache_ids)
+
+        if filters.get('statuts'):
+            queryset = queryset.filter(tache__statut__in=filters['statuts'])
+
+        # Distinct pour eviter les doublons (equipe M2M peut encore en produire)
         queryset = queryset.distinct()
 
         # Creer le buffer PDF
@@ -301,7 +325,7 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
             }
 
         # En-tetes du tableau
-        headers = ['Date', 'Reference', 'Type', 'Equipe(s)', 'Horaires', 'Charge', 'Statut', 'Priorite']
+        headers = ['Date', 'Reference', 'Type', 'Site', 'Equipe(s)', 'Horaires', 'Charge', 'Statut']
         table_data = [[Paragraph(h, header_cell_style) for h in headers]]
 
         # Mapping statut vers couleurs et labels
@@ -321,17 +345,8 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
             'NON_REALISEE': colors.white,
         }
 
-        PRIORITE_LABELS = {
-            1: 'P1 - Tres basse',
-            2: 'P2 - Basse',
-            3: 'P3 - Moyenne',
-            4: 'P4 - Haute',
-            5: 'P5 - Urgent',
-        }
-
         # Construire les lignes du tableau
         row_statuts = []  # Pour appliquer les couleurs par statut
-        row_priorites = []  # Pour appliquer le style urgent
 
         for dist in distributions:
             tache = dist.tache
@@ -344,6 +359,13 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
 
             # Type de tache
             type_str = tache.id_type_tache.nom_tache if tache.id_type_tache else '-'
+
+            # Site (via les objets lies a la tache)
+            sites = set()
+            for obj in tache.objets.all():
+                if obj.site:
+                    sites.add(obj.site.nom_site)
+            site_str = ', '.join(sorted(sites)) if sites else '-'
 
             # Equipes
             equipes_list = list(tache.equipes.all())
@@ -364,24 +386,19 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
             # Statut
             statut_str = STATUT_LABELS.get(dist.status, dist.status)
 
-            # Priorite
-            priorite = tache.priorite or 3
-            priorite_str = PRIORITE_LABELS.get(priorite, f"P{priorite}")
-
             # Ajouter la ligne
             row = [
                 Paragraph(date_str, cell_style),
                 Paragraph(ref_str, cell_style),
                 Paragraph(type_str, cell_style),
+                Paragraph(site_str, cell_style),
                 Paragraph(equipes_str, cell_style),
                 Paragraph(horaires_str, cell_style),
                 Paragraph(charge_str, cell_style),
                 Paragraph(statut_str, cell_style),
-                Paragraph(priorite_str, cell_style),
             ]
             table_data.append(row)
             row_statuts.append(dist.status)
-            row_priorites.append(priorite)
 
         # Statistiques en bas du tableau
         total_distributions = len(distributions)
@@ -402,9 +419,52 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
         table_data.append([Paragraph(stats_text, cell_style)] + [Paragraph('', cell_style) for _ in range(len(headers) - 1)])
         stats_row_index = len(table_data) - 1
 
-        # Creer le tableau avec largeurs de colonnes
-        # Date(2.5), Ref(3.5), Type(3), Equipes(3.5), Horaires(2.5), Charge(1.5), Statut(2.5), Priorite(2)
-        col_widths = [2.5*cm, 3.5*cm, 3*cm, 3.5*cm, 2.5*cm, 1.5*cm, 2.5*cm, 2.5*cm]
+        # Largeurs de colonnes dynamiques basées sur le contenu
+        page_width = landscape(A4)[0] - 3*cm  # largeur utile (marges 1.5cm × 2)
+        num_cols = len(headers)
+
+        # Largeurs minimales (assez large pour que le header ne wrappe jamais) et poids par colonne
+        # Date, Reference, Type, Site, Equipe(s), Horaires, Charge, Statut
+        col_min = [2.3*cm, 2.5*cm, 2*cm, 2.5*cm, 2.5*cm, 2.3*cm, 2*cm, 1.8*cm]
+        col_weight = [1, 1.2, 1.5, 2.5, 2, 1, 0.5, 1]  # poids pour distribuer l'espace restant
+
+        # Calculer les largeurs max observées dans les données (hors header)
+        from reportlab.lib.units import mm
+        char_width = 1.8 * mm  # largeur approximative d'un caractère en fontSize 8
+
+        col_max_content = [len(h) for h in headers]
+        for row in table_data[1:]:  # skip header
+            for j, cell in enumerate(row):
+                # Extraire le texte du Paragraph
+                text = cell.text if hasattr(cell, 'text') else str(cell)
+                col_max_content[j] = max(col_max_content[j], len(text))
+
+        # Largeurs idéales basées sur le contenu (plafonnées)
+        col_ideal = [min(max(chars * char_width, col_min[i]), 8*cm) for i, chars in enumerate(col_max_content)]
+
+        total_ideal = sum(col_ideal)
+        if total_ideal <= page_width:
+            # L'espace restant est distribué selon les poids
+            remaining = page_width - total_ideal
+            total_weight = sum(col_weight)
+            col_widths = [col_ideal[i] + remaining * col_weight[i] / total_weight for i in range(num_cols)]
+        else:
+            # Réduire proportionnellement pour tenir dans la page
+            scale = page_width / total_ideal
+            col_widths = [max(w * scale, col_min[i]) for i, w in enumerate(col_ideal)]
+            # Ajuster si le total dépasse encore (à cause des minimums)
+            total = sum(col_widths)
+            if total > page_width:
+                excess = total - page_width
+                # Réduire les colonnes les plus larges en priorité
+                flexible = [(i, col_widths[i] - col_min[i]) for i in range(num_cols) if col_widths[i] > col_min[i]]
+                flexible.sort(key=lambda x: -x[1])
+                for i, margin in flexible:
+                    reduction = min(margin, excess)
+                    col_widths[i] -= reduction
+                    excess -= reduction
+                    if excess <= 0:
+                        break
 
         table = Table(table_data, colWidths=col_widths, repeatRows=1)
 
@@ -440,17 +500,11 @@ def export_planning_pdf_async(self, user_id, start_date, end_date, filters=None)
         ]
 
         # Appliquer les couleurs par statut (colonne 6 = Statut)
-        statut_col = 6
+        statut_col = 7
         for i, statut in enumerate(row_statuts, start=1):
             if statut in STATUT_COLORS:
                 table_style_commands.append(('BACKGROUND', (statut_col, i), (statut_col, i), STATUT_COLORS[statut]))
 
-        # Mettre en rouge les taches urgentes (priorite 5, colonne 7 = Priorite)
-        priorite_col = 7
-        for i, priorite in enumerate(row_priorites, start=1):
-            if priorite == 5:
-                table_style_commands.append(('TEXTCOLOR', (priorite_col, i), (priorite_col, i), colors.red))
-                table_style_commands.append(('FONTNAME', (priorite_col, i), (priorite_col, i), 'Helvetica-Bold'))
 
         table.setStyle(TableStyle(table_style_commands))
         story.append(table)

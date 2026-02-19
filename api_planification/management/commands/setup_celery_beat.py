@@ -59,6 +59,30 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f'  [OK] {status}: cleanup_old_exports (daily 03:00, retention: 7 days)'))
 
         # ===================================================================
+        # RECLAMATIONS (Auto-cloture)
+        # ===================================================================
+        self.stdout.write('')
+        self.stdout.write(self.style.MIGRATE_HEADING('RECLAMATIONS TASKS:'))
+
+        # Schedule: toutes les heures
+        schedule_1h, _ = IntervalSchedule.objects.get_or_create(
+            every=1, period=IntervalSchedule.HOURS,
+        )
+
+        task, created = PeriodicTask.objects.update_or_create(
+            name='Auto-close Pending Reclamations (Hourly)',
+            defaults={
+                'task': 'api_reclamations.tasks.auto_close_pending_reclamations',
+                'interval': schedule_1h,
+                'crontab': None,
+                'enabled': True,
+                'description': 'Rappel 24h + auto-cloture 48h des reclamations en attente de validation',
+            }
+        )
+        status = 'Created' if created else 'Updated'
+        self.stdout.write(self.style.SUCCESS(f'  [OK] {status}: auto_close_pending_reclamations (hourly)'))
+
+        # ===================================================================
         # DESACTIVATION DES ANCIENNES TACHES (systeme simplifie)
         # ===================================================================
         self.stdout.write('')
@@ -92,7 +116,8 @@ class Command(BaseCommand):
 
         self.stdout.write('')
         self.stdout.write('Active periodic tasks:')
-        self.stdout.write('  1. cleanup_old_exports  -> Daily at 03:00')
+        self.stdout.write('  1. cleanup_old_exports                 -> Daily at 03:00')
+        self.stdout.write('  2. auto_close_pending_reclamations     -> Hourly (rappel 24h + auto-cloture 48h)')
 
         self.stdout.write('')
         self.stdout.write('Disabled tasks (simplified status system):')

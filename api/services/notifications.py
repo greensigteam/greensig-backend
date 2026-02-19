@@ -34,6 +34,8 @@ class NotificationTypes:
     RECLAMATION_PRISE_EN_COMPTE = 'reclamation_prise_en_compte'
     RECLAMATION_RESOLUE = 'reclamation_resolue'
     RECLAMATION_CLOTUREE = 'reclamation_cloturee'
+    RECLAMATION_RAPPEL_CLOTURE = 'reclamation_rappel_cloture'
+    RECLAMATION_AUTO_CLOTURE = 'reclamation_auto_cloture'
 
     # Absences
     ABSENCE_DEMANDEE = 'absence_demandee'
@@ -556,12 +558,8 @@ class NotificationService:
         nouveau_statut = reclamation.statut
 
         # Determiner le type de notification et les destinataires
-        if nouveau_statut == 'PRISE_EN_COMPTE':
+        if nouveau_statut == 'EN_COURS':
             notif_type = NotificationTypes.RECLAMATION_PRISE_EN_COMPTE
-            destinataires = [reclamation.createur.id] if reclamation.createur else []
-            titre = "Reclamation prise en compte"
-        elif nouveau_statut == 'EN_COURS':
-            notif_type = NotificationTypes.RECLAMATION_PRISE_EN_COMPTE  # Can use same icon/logic or add new type
             destinataires = [reclamation.createur.id] if reclamation.createur else []
             titre = "Reclamation en cours de traitement"
         elif nouveau_statut == 'RESOLUE':

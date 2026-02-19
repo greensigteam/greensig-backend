@@ -3,9 +3,12 @@
 Vue pour la génération du rapport de site.
 Agrège toutes les données nécessaires pour le rapport PDF sur une période personnalisée.
 """
+import json
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from api_users.permissions import IsAdminOrSuperviseur
 from rest_framework import status
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
@@ -37,7 +40,7 @@ class MonthlyReportView(APIView):
             "statistiques": {...}
         }
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminOrSuperviseur]
 
     def get(self, request):
         # Paramètres obligatoires
@@ -125,146 +128,242 @@ class MonthlyReportView(APIView):
                 'lat': center.y
             }
 
+        geometry = None
+        if site.geometrie_emprise:
+            geometry = json.loads(site.geometrie_emprise.geojson)
+
         return {
             'id': site.id,
             'nom': site.nom_site,
             'adresse': site.adresse,
             'superficie': site.superficie_totale,
             'centroid': centroid,
+            'geometry': geometry,
         }
 
     def _get_travaux_effectues(self, site_id, date_debut, date_fin):
         """
-        Liste des travaux effectués sur la période (tâches terminées ET validées par l'admin).
+        Planning des travaux effectués sur la période (distributions réalisées).
 
-        Retourne un format hybride:
-        - par_type: Groupement par type de tâche (récapitulatif)
-        - details: Liste chronologique des tâches individuelles (timeline)
+        Retourne le format planning style export:
+        - planning: Liste des distributions avec date, reference, type, equipes, horaires, charge, statut, priorite
+        - statistiques: Total, heures, répartition par statut
         """
         try:
-            from api_planification.models import Tache
+            from api_planification.models import DistributionCharge
 
-            # Filtrer les tâches liées au site via les objets
-            taches = Tache.objects.filter(
-                statut='TERMINEE',
-                etat_validation='VALIDEE',
-                date_fin_reelle__gte=date_debut,
-                date_fin_reelle__lte=date_fin,
-                objets__site_id=site_id
-            ).distinct().select_related('id_type_tache').prefetch_related('equipes').order_by('date_fin_reelle')
+            # Mapping statut vers labels
+            STATUT_LABELS = {
+                'NON_REALISEE': 'A faire',
+                'EN_COURS': 'En cours',
+                'REALISEE': 'Réalisée',
+                'REPORTEE': 'Reportée',
+                'ANNULEE': 'Annulée',
+            }
 
-            # 1. Grouper par type de tâche (récapitulatif)
-            types_count = {}
-            for tache in taches:
-                type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre'
-                if type_nom not in types_count:
-                    types_count[type_nom] = {
-                        'nom': type_nom,
-                        'description': tache.id_type_tache.description if tache.id_type_tache else '',
-                        'count': 0,
-                    }
-                types_count[type_nom]['count'] += 1
+            PRIORITE_LABELS = {
+                1: 'P1 - Très basse',
+                2: 'P2 - Basse',
+                3: 'P3 - Moyenne',
+                4: 'P4 - Haute',
+                5: 'P5 - Urgent',
+            }
 
-            par_type = []
-            for type_nom, data in types_count.items():
-                par_type.append({
-                    'type': data['nom'],
-                    'description': data['description'],
-                    'count': data['count'],
-                })
-            par_type = sorted(par_type, key=lambda x: x['count'], reverse=True)
+            # Filtrer les distributions réalisées liées au site via les objets de la tâche
+            distributions = DistributionCharge.objects.filter(
+                date__gte=date_debut,
+                date__lte=date_fin,
+                status='REALISEE',
+                tache__objets__site_id=site_id
+            ).distinct().select_related(
+                'tache',
+                'tache__id_type_tache'
+            ).prefetch_related(
+                'tache__equipes'
+            ).order_by('date', 'heure_debut')
 
-            # 2. Liste chronologique des tâches (timeline)
-            details = []
-            for tache in taches:
-                # Récupérer les équipes
+            # Construire le planning
+            planning = []
+            statuts_count = {}
+            total_heures = 0
+
+            for dist in distributions:
+                tache = dist.tache
+
+                # Date
+                date_str = dist.date.strftime('%Y-%m-%d') if dist.date else None
+
+                # Reference
+                ref_str = tache.reference or f'T-{tache.id}'
+
+                # Type de tâche
+                type_str = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre'
+
+                # Équipes
                 equipes_list = list(tache.equipes.all())
-                equipes_noms = ', '.join([eq.nom_equipe for eq in equipes_list]) if equipes_list else 'Non assignée'
+                equipes_str = ', '.join([eq.nom_equipe for eq in equipes_list]) if equipes_list else 'Non assignée'
 
-                # Calculer les heures
-                temps_travail = tache.temps_travail_total
-                heures = temps_travail.get('heures', 0) if isinstance(temps_travail, dict) else 0
+                # Horaires
+                horaires_str = None
+                if dist.heure_debut and dist.heure_fin:
+                    horaires_str = f"{dist.heure_debut.strftime('%H:%M')} - {dist.heure_fin.strftime('%H:%M')}"
 
-                details.append({
-                    'id': tache.id,
-                    'reference': tache.reference or f'T-{tache.id}',
-                    'date': tache.date_fin_reelle.strftime('%Y-%m-%d') if tache.date_fin_reelle else None,
-                    'type': tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre',
-                    'equipes': equipes_noms,
-                    'heures': round(heures, 1),
-                    'description': tache.description_travaux[:100] if tache.description_travaux else None,
+                # Charge (heures réelles si disponibles, sinon planifiées)
+                charge = dist.heures_reelles if dist.heures_reelles else dist.heures_planifiees
+                total_heures += charge or 0
+
+                # Statut
+                statut = dist.status
+                statut_label = STATUT_LABELS.get(statut, statut)
+                statuts_count[statut] = statuts_count.get(statut, 0) + 1
+
+                # Priorité
+                priorite = tache.priorite or 3
+                priorite_label = PRIORITE_LABELS.get(priorite, f'P{priorite}')
+
+                planning.append({
+                    'id': dist.id,
+                    'tache_id': tache.id,
+                    'date': date_str,
+                    'reference': ref_str,
+                    'type': type_str,
+                    'equipes': equipes_str,
+                    'horaires': horaires_str,
+                    'charge': round(charge, 1) if charge else 0,
+                    'statut': statut,
+                    'statut_label': statut_label,
+                    'priorite': priorite,
+                    'priorite_label': priorite_label,
                 })
 
             return {
-                'par_type': par_type,
-                'details': details,
-                'total': len(taches),
+                'planning': planning,
+                'statistiques': {
+                    'total': len(distributions),
+                    'total_heures': round(total_heures, 1),
+                    'par_statut': statuts_count,
+                },
             }
 
         except Exception as e:
-            return {'par_type': [], 'details': [], 'total': 0, 'error': str(e)}
+            import traceback
+            print(f"[ERROR] _get_travaux_effectues: {str(e)}")
+            print(traceback.format_exc())
+            return {'planning': [], 'statistiques': {'total': 0, 'total_heures': 0, 'par_statut': {}}, 'error': str(e)}
 
     def _get_travaux_planifies(self, site_id, date_fin):
         """
-        Liste des travaux planifiés pour les 30 jours suivant la période.
+        Planning des travaux planifiés pour les 30 jours suivant la période.
 
-        Retourne un format hybride:
-        - par_type: Groupement par type de tâche (récapitulatif)
-        - details: Liste chronologique des tâches individuelles (timeline)
+        Retourne le format planning style export:
+        - planning: Liste des distributions avec date, reference, type, equipes, horaires, charge, statut, priorite
+        - statistiques: Total, heures, répartition par statut
         """
         try:
-            from api_planification.models import Tache
+            from api_planification.models import DistributionCharge
+
+            # Mapping statut vers labels
+            STATUT_LABELS = {
+                'NON_REALISEE': 'A faire',
+                'EN_COURS': 'En cours',
+                'REALISEE': 'Réalisée',
+                'REPORTEE': 'Reportée',
+                'ANNULEE': 'Annulée',
+            }
+
+            PRIORITE_LABELS = {
+                1: 'P1 - Très basse',
+                2: 'P2 - Basse',
+                3: 'P3 - Moyenne',
+                4: 'P4 - Haute',
+                5: 'P5 - Urgent',
+            }
 
             # Période suivante (30 jours après la date de fin)
             next_period_start = date_fin + timedelta(days=1)
             next_period_end = next_period_start + timedelta(days=30)
 
-            taches = Tache.objects.filter(
-                statut__in=['PLANIFIEE'],
-                date_debut_planifiee__gte=next_period_start,
-                date_debut_planifiee__lte=next_period_end,
-                objets__site_id=site_id
-            ).distinct().select_related('id_type_tache').prefetch_related('equipes').order_by('date_debut_planifiee')
+            # Filtrer les distributions à venir (non réalisées, non annulées)
+            distributions = DistributionCharge.objects.filter(
+                date__gte=next_period_start,
+                date__lte=next_period_end,
+                status__in=['NON_REALISEE', 'EN_COURS'],
+                tache__objets__site_id=site_id
+            ).distinct().select_related(
+                'tache',
+                'tache__id_type_tache'
+            ).prefetch_related(
+                'tache__equipes'
+            ).order_by('date', 'heure_debut')
 
-            # 1. Grouper par type (récapitulatif)
-            types_list = {}
-            for tache in taches:
-                type_nom = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre'
-                if type_nom not in types_list:
-                    types_list[type_nom] = 0
-                types_list[type_nom] += 1
+            # Construire le planning
+            planning = []
+            statuts_count = {}
+            total_heures = 0
 
-            par_type = [{'type': k, 'count': v} for k, v in sorted(types_list.items(), key=lambda x: -x[1])]
+            for dist in distributions:
+                tache = dist.tache
 
-            # 2. Liste chronologique des tâches (timeline)
-            details = []
-            for tache in taches:
-                # Récupérer les équipes
+                # Date
+                date_str = dist.date.strftime('%Y-%m-%d') if dist.date else None
+
+                # Reference
+                ref_str = tache.reference or f'T-{tache.id}'
+
+                # Type de tâche
+                type_str = tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre'
+
+                # Équipes
                 equipes_list = list(tache.equipes.all())
-                equipes_noms = ', '.join([eq.nom_equipe for eq in equipes_list]) if equipes_list else 'Non assignée'
+                equipes_str = ', '.join([eq.nom_equipe for eq in equipes_list]) if equipes_list else 'Non assignée'
 
-                # Charge estimée
-                heures = tache.charge_estimee_heures or 0
+                # Horaires
+                horaires_str = None
+                if dist.heure_debut and dist.heure_fin:
+                    horaires_str = f"{dist.heure_debut.strftime('%H:%M')} - {dist.heure_fin.strftime('%H:%M')}"
 
-                details.append({
-                    'id': tache.id,
-                    'reference': tache.reference or f'T-{tache.id}',
-                    'date_debut': tache.date_debut_planifiee.strftime('%Y-%m-%d') if tache.date_debut_planifiee else None,
-                    'date_fin': tache.date_fin_planifiee.strftime('%Y-%m-%d') if tache.date_fin_planifiee else None,
-                    'type': tache.id_type_tache.nom_tache if tache.id_type_tache else 'Autre',
-                    'equipes': equipes_noms,
-                    'heures': round(heures, 1) if heures else None,
-                    'priorite': tache.priorite,
+                # Charge planifiée
+                charge = dist.heures_planifiees or 0
+                total_heures += charge
+
+                # Statut
+                statut = dist.status
+                statut_label = STATUT_LABELS.get(statut, statut)
+                statuts_count[statut] = statuts_count.get(statut, 0) + 1
+
+                # Priorité
+                priorite = tache.priorite or 3
+                priorite_label = PRIORITE_LABELS.get(priorite, f'P{priorite}')
+
+                planning.append({
+                    'id': dist.id,
+                    'tache_id': tache.id,
+                    'date': date_str,
+                    'reference': ref_str,
+                    'type': type_str,
+                    'equipes': equipes_str,
+                    'horaires': horaires_str,
+                    'charge': round(charge, 1) if charge else 0,
+                    'statut': statut,
+                    'statut_label': statut_label,
+                    'priorite': priorite,
+                    'priorite_label': priorite_label,
                 })
 
             return {
-                'par_type': par_type,
-                'details': details,
-                'total': len(taches),
+                'planning': planning,
+                'statistiques': {
+                    'total': len(distributions),
+                    'total_heures': round(total_heures, 1),
+                    'par_statut': statuts_count,
+                },
             }
 
         except Exception as e:
-            return {'par_type': [], 'details': [], 'total': 0, 'error': str(e)}
+            import traceback
+            print(f"[ERROR] _get_travaux_planifies: {str(e)}")
+            print(traceback.format_exc())
+            return {'planning': [], 'statistiques': {'total': 0, 'total_heures': 0, 'par_statut': {}}, 'error': str(e)}
 
     def _get_equipes(self, site_id, date_debut, date_fin):
         """Équipes du site avec tous leurs membres et heures travaillées si disponibles."""

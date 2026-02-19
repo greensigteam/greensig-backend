@@ -16,6 +16,11 @@ class MeView(APIView):
         ).get(pk=request.user.pk)
 
         roles = [ur.role.nom_role for ur in user.roles_utilisateur.all()]
+
+        # Les superusers Django sont traités comme ADMIN dans l'application
+        if user.is_superuser and 'ADMIN' not in roles:
+            roles.append('ADMIN')
+
         serializer = UtilisateurSerializer(user)
         data = serializer.data
 
@@ -187,6 +192,13 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
         try:
             ur = UtilisateurRole.objects.get(utilisateur=user, role=role)
             ur.delete()
+
+            # Retirer is_superuser/is_staff si on enlève le rôle ADMIN
+            if role.nom_role == 'ADMIN' and user.is_superuser:
+                user.is_superuser = False
+                user.is_staff = False
+                user.save(update_fields=['is_superuser', 'is_staff'])
+
             return Response({'message': f'Rôle {role.nom_role} retiré avec succès.'})
         except UtilisateurRole.DoesNotExist:
             return Response({'error': "L'utilisateur ne possède pas ce rôle."}, status=status.HTTP_400_BAD_REQUEST)
@@ -279,6 +291,12 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             utilisateur=user,
             role=role
         )
+
+        # Synchroniser is_superuser/is_staff pour les ADMIN
+        if role.nom_role == 'ADMIN' and not user.is_superuser:
+            user.is_superuser = True
+            user.is_staff = True
+            user.save(update_fields=['is_superuser', 'is_staff'])
 
         if created:
             return Response({'message': f'Rôle {role.nom_role} attribué avec succès.'})
@@ -719,11 +737,23 @@ class SuperviseurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, views
             return SuperviseurCreateSerializer
         return SuperviseurSerializer
 
+    def perform_create(self, serializer):
+        serializer.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
+
     def destroy(self, request, *args, **kwargs):
         """Soft delete : désactive l'utilisateur superviseur."""
         instance = self.get_object()
         instance.utilisateur.actif = False
         instance.utilisateur.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
         return Response(
             {'message': 'Superviseur désactivé avec succès.'},
             status=status.HTTP_200_OK
@@ -961,10 +991,23 @@ class OperateurViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewset
         instance.statut = 'INACTIF'
         instance.save()
 
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
+
         return Response(
             {'message': 'Opérateur désactivé avec succès.'},
             status=status.HTTP_200_OK
         )
+
+    def perform_create(self, serializer):
+        serializer.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
 
     @action(detail=True, methods=['get'])
     def competences(self, request, pk=None):
@@ -1206,11 +1249,23 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
             return EquipeDetailSerializer
         return EquipeListSerializer
 
+    def perform_create(self, serializer):
+        serializer.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
+
     def destroy(self, request, *args, **kwargs):
         """Désactive une équipe au lieu de la supprimer. Permission: ADMIN only."""
         instance = self.get_object()
         instance.actif = False
         instance.save()
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
         return Response(
             {'message': 'Équipe désactivée avec succès.'},
             status=status.HTTP_200_OK
@@ -1232,6 +1287,8 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
 
         if serializer.is_valid():
             serializer.update_membres(equipe, serializer.validated_data['operateurs'])
+            from greensig_web.cache_utils import invalidate_on_team_mutation
+            invalidate_on_team_mutation()
             return Response({'message': 'Membres affectés avec succès.'})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1264,6 +1321,9 @@ class EquipeViewSet(RoleBasedQuerySetMixin, RoleBasedPermissionMixin, viewsets.M
 
         operateur.equipe = None
         operateur.save()
+
+        from greensig_web.cache_utils import invalidate_on_team_mutation
+        invalidate_on_team_mutation()
 
         return Response({'message': 'Membre retiré de l\'équipe.'})
 

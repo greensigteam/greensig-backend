@@ -44,6 +44,9 @@ class UrgenceViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
 
+CONTENT_FIELDS = {'type_reclamation', 'urgence', 'description', 'type_autre_description', 'date_constatation', 'localisation'}
+
+
 class ReclamationViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des réclamations.
@@ -133,6 +136,8 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         Les tâches correctives associées sont supprimées automatiquement (CASCADE).
         """
         instance.delete()
+        from greensig_web.cache_utils import invalidate_on_reclamation_mutation
+        invalidate_on_reclamation_mutation()
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -177,6 +182,30 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             commentaire="Création de la réclamation"
         )
 
+        from greensig_web.cache_utils import invalidate_on_reclamation_mutation
+        invalidate_on_reclamation_mutation()
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        # Bloquer si réclamation clôturée ou rejetée
+        if instance.statut in ('CLOTUREE', 'REJETEE'):
+            return Response(
+                {"error": "Impossible de modifier une réclamation clôturée ou rejetée."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Seul le créateur peut modifier le contenu
+        if request.user != instance.createur:
+            content_in_request = CONTENT_FIELDS & set(request.data.keys())
+            if content_in_request:
+                return Response(
+                    {"error": "Seul le créateur de la réclamation peut modifier son contenu."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        return super().update(request, *args, **kwargs)
+
     def perform_update(self, serializer):
         # Récupération de l'instance avant modification pour comparer le statut
         instance = self.get_object()
@@ -193,6 +222,9 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                 auteur=self.request.user if self.request.user.is_authenticated else None,
                 commentaire=f"Changement de statut : {old_statut} -> {updated_instance.statut}"
             )
+
+        from greensig_web.cache_utils import invalidate_on_reclamation_mutation
+        invalidate_on_reclamation_mutation()
 
 
     @action(detail=True, methods=['get'])
@@ -229,9 +261,9 @@ class ReclamationViewSet(viewsets.ModelViewSet):
              
              # 1. Mise à jour de la Réclamation
              reclamation.equipe_affectee = equipe
-             # Si nouvelle -> Prise en compte
+             # Si nouvelle -> En cours
              if reclamation.statut == 'NOUVELLE':
-                 reclamation.statut = 'PRISE_EN_COMPTE'
+                 reclamation.statut = 'EN_COURS'
              
              reclamation._current_user = request.user
              reclamation.save()
@@ -447,6 +479,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             # Réinitialisation des champs de proposition de clôture
             reclamation.cloture_proposee_par = None
             reclamation.date_proposition_cloture = None
+            reclamation.rappel_cloture_envoye = False
 
             reclamation._current_user = user
             reclamation.save()
@@ -526,6 +559,7 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             # Réinitialisation des champs de proposition de clôture
             reclamation.cloture_proposee_par = None
             reclamation.date_proposition_cloture = None
+            reclamation.rappel_cloture_envoye = False
 
             reclamation._current_user = user
             reclamation.save()
@@ -735,7 +769,6 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         # Couleurs par statut (du plus urgent au moins urgent)
         STATUT_COLORS = {
             'NOUVELLE': '#ef4444',        # Rouge vif - nouvelle réclamation
-            'PRISE_EN_COMPTE': '#f97316', # Orange - en cours de prise en compte
             'EN_COURS': '#eab308',         # Jaune - en cours de traitement
             'RESOLUE': '#22c55e',          # Vert - résolue, en attente de clôture
             'EN_ATTENTE_VALIDATION_CLOTURE': '#10b981', # Vert clair - en attente validation
@@ -999,7 +1032,6 @@ class ReclamationExportExcelView(APIView):
     # Labels français pour les statuts
     STATUT_LABELS = {
         'NOUVELLE': 'En attente de lecture',
-        'PRISE_EN_COMPTE': 'Prise en compte',
         'EN_COURS': 'En attente de réalisation',
         'RESOLUE': 'Tâche terminée côté administrateur',
         'EN_ATTENTE_VALIDATION_CLOTURE': 'En attente de validation de clôture',
@@ -1125,7 +1157,6 @@ class ReclamationExportExcelView(APIView):
         # Versions claires des couleurs UI pour lisibilité Excel
         statut_colors = {
             'NOUVELLE': 'FEE2E2',        # Rouge clair (UI: #ef4444)
-            'PRISE_EN_COMPTE': 'FFEDD5', # Orange clair (UI: #f97316)
             'EN_COURS': 'FFEDD5',        # Orange clair (UI: #f97316)
             'RESOLUE': 'DCFCE7',         # Vert clair (UI: #22c55e)
             'EN_ATTENTE_VALIDATION_CLOTURE': 'D1FAE5',  # Émeraude clair (UI: #10b981)

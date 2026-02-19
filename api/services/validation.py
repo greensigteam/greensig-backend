@@ -296,6 +296,99 @@ def detect_duplicates(
     return duplicates
 
 
+def find_existing_match(
+    geometry: GEOSGeometry,
+    model_class,
+    site_id: Optional[int],
+    target_type: str,
+    mapped_properties: Dict[str, Any],
+    tolerance_meters: float = 5.0
+) -> Optional[Dict[str, Any]]:
+    """
+    Find an existing object that matches by name/marque + site + proximity.
+
+    Strategy per type:
+    - Types with 'nom' (Arbre, Palmier, Gazon, Arbuste, Vivace, Cactus, Graminee, Puit, Pompe):
+      site + nom (iexact) + geometry <5m
+    - Types with 'marque' without nom (Vanne, Clapet, Ballon, Canalisation, Aspersion):
+      site + marque (iexact) + geometry <5m
+    - Goutte (neither nom nor marque): site + geometry <5m only
+    - Site: match by code_site (unique field)
+
+    Returns:
+        None if no match, else {'id': int, 'nom': str, 'match_type': str}
+    """
+    from django.contrib.gis.measure import D
+
+    if target_type == 'Site':
+        code = mapped_properties.get('code_site')
+        if code:
+            try:
+                obj = model_class.objects.get(code_site__iexact=code)
+                return {
+                    'id': obj.pk,
+                    'nom': getattr(obj, 'nom_site', str(obj)),
+                    'match_type': 'code_site',
+                }
+            except model_class.DoesNotExist:
+                return None
+        # Fallback: match by geometry intersection
+        obj = model_class.objects.filter(
+            geometrie_emprise__intersects=geometry
+        ).first()
+        if obj:
+            return {
+                'id': obj.pk,
+                'nom': getattr(obj, 'nom_site', str(obj)),
+                'match_type': 'geo_intersects',
+            }
+        return None
+
+    # Build base queryset filtered by site
+    queryset = model_class.objects.all()
+    if site_id:
+        queryset = queryset.filter(site_id=site_id)
+
+    # Filter by proximity
+    queryset = queryset.filter(geometry__distance_lte=(geometry, D(m=tolerance_meters)))
+
+    # Types with 'nom' field
+    types_with_nom = {'Arbre', 'Palmier', 'Gazon', 'Arbuste', 'Vivace', 'Cactus', 'Graminee', 'Puit', 'Pompe'}
+    # Types with 'marque' field (no nom)
+    types_with_marque = {'Vanne', 'Clapet', 'Ballon', 'Canalisation', 'Aspersion'}
+
+    if target_type in types_with_nom:
+        nom = mapped_properties.get('nom')
+        if nom:
+            queryset = queryset.filter(nom__iexact=nom)
+            match_type = 'nom+site+geo'
+        else:
+            # No nom mapped — fallback to site + proximity only
+            match_type = 'site+geo'
+    elif target_type in types_with_marque:
+        marque = mapped_properties.get('marque')
+        if marque:
+            queryset = queryset.filter(marque__iexact=marque)
+            match_type = 'marque+site+geo'
+        else:
+            # No marque mapped — fallback to site + proximity only
+            match_type = 'site+geo'
+    else:
+        # Goutte: geometry + site only
+        match_type = 'site+geo'
+
+    obj = queryset.first()
+    if obj:
+        display_name = getattr(obj, 'nom', None) or getattr(obj, 'marque', None) or str(obj)
+        return {
+            'id': obj.pk,
+            'nom': display_name,
+            'match_type': match_type,
+        }
+
+    return None
+
+
 # =============================================================================
 # VÉRIFICATION HORS EMPRISE
 # =============================================================================

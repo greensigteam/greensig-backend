@@ -6,8 +6,8 @@ Agrège les statistiques de toutes les sources (tâches, réclamations, équipes
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.core.cache import cache
 from django.conf import settings
+from greensig_web.cache_utils import cache_get, cache_set
 from django.db.models import Count, Avg, Sum, Q, F
 from django.utils import timezone
 from datetime import timedelta
@@ -63,17 +63,15 @@ class ReportingView(APIView):
     def get(self, request):
         now = timezone.now()
         seven_days_ago = now - timedelta(days=7)
-
-        # Déterminer le filtre structure pour les utilisateurs CLIENT
         structure_filter = None
         user = request.user
         if user.roles_utilisateur.filter(role__nom_role='CLIENT').exists():
             if hasattr(user, 'client_profile') and user.client_profile.structure:
                 structure_filter = user.client_profile.structure
 
-        # Cache Redis (5 min)
-        cache_key = f'reporting:{structure_filter.id if structure_filter else "all"}'
-        cached = cache.get(cache_key)
+        # Cache Redis versionné (invalidé automatiquement après mutations)
+        structure_key = structure_filter.id if structure_filter else 'all'
+        cached = cache_get('REPORTING', structure_key)
         if cached:
             cached['cached'] = True
             return Response(cached)
@@ -85,8 +83,7 @@ class ReportingView(APIView):
             'inventaire': self._get_inventaire_stats(structure_filter),
         }
 
-        cache_timeout = getattr(settings, 'CACHE_TIMEOUT_STATISTICS', 300)
-        cache.set(cache_key, stats, cache_timeout)
+        cache_set('REPORTING', structure_key, data=stats)
         stats['cached'] = False
         return Response(stats)
 
@@ -266,16 +263,16 @@ class ReportingView(APIView):
             # Batch 1: Annoter opérateurs actifs et absents par équipe
             equipes = equipes.annotate(
                 total_ops=Count(
-                    'operateur',
-                    filter=Q(operateur__statut='ACTIF')
+                    'operateurs',
+                    filter=Q(operateurs__statut='ACTIF')
                 ),
                 ops_absents=Count(
-                    'operateur',
+                    'operateurs',
                     filter=Q(
-                        operateur__statut='ACTIF',
-                        operateur__absences__statut=StatutAbsence.VALIDEE,
-                        operateur__absences__date_debut__lte=today,
-                        operateur__absences__date_fin__gte=today,
+                        operateurs__statut='ACTIF',
+                        operateurs__absences__statut=StatutAbsence.VALIDEE,
+                        operateurs__absences__date_debut__lte=today,
+                        operateurs__absences__date_fin__gte=today,
                     ),
                     distinct=True
                 ),

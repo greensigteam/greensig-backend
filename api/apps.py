@@ -9,17 +9,36 @@ class ApiConfig(AppConfig):
         print("[APP] ========== ApiConfig.ready() APPELE ==========")
 
         try:
-            # Importer les signals et les connecter manuellement
-            from django.db.models.signals import pre_save, post_save
-            from api.models import Site
-            from api.signals import site_pre_save, site_post_save
+            from django.db.models.signals import pre_save, post_save, post_delete
+            from api.models import (
+                Site, SousSite,
+                Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee,
+                Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon,
+            )
+            from api.signals import (
+                site_pre_save, site_post_save,
+                invalidate_gis_object_cache, invalidate_site_cache,
+            )
 
-            # Connecter les signals au modele Site
+            # Signals existants — notifications superviseur
             pre_save.connect(site_pre_save, sender=Site)
             post_save.connect(site_post_save, sender=Site)
 
-            print(f"[APP] Signals connectes pour Site: {Site}")
-            print("[APP] ========== Signals Site connectes ==========")
+            # Invalidation du cache — Sites & SousSites
+            for model in [Site, SousSite]:
+                post_save.connect(invalidate_site_cache, sender=model)
+                post_delete.connect(invalidate_site_cache, sender=model)
+
+            # Invalidation du cache — 15 types d'objets GIS
+            gis_models = [
+                Arbre, Gazon, Palmier, Arbuste, Vivace, Cactus, Graminee,
+                Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon,
+            ]
+            for model in gis_models:
+                post_save.connect(invalidate_gis_object_cache, sender=model)
+                post_delete.connect(invalidate_gis_object_cache, sender=model)
+
+            print("[APP] Signals + cache invalidation connectes")
         except Exception as e:
             print(f"[APP] ERREUR lors de la connexion des signals: {e}")
             import traceback

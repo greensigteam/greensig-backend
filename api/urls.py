@@ -24,36 +24,24 @@ from .views import (
     BallonListCreateView, TankDetailView,
     # Recherche
     SearchView,
-    # Export PDF
-    ExportPDFView,
-    # Statistiques
-    StatisticsView,
-    # Export données
-    ExportDataView,
-    InventoryExportExcelView,
-    InventoryExportPDFView,
-    # Inventaire unifié
-    InventoryListView,
-    InventoryFilterOptionsView,
-    # Carte avec bounding box
-    MapObjectsView,
-    # Import géographique
-    GeoImportPreviewView,
-    GeoImportValidateView,
-    GeoImportExecuteView,
-    # Opérations géométriques
-    GeometrySimplifyView,
-    GeometrySplitView,
-    GeometryMergeView,
-    GeometryValidateView,
-    GeometryCalculateView,
-    GeometryBufferView,
-    # Objets dans une géométrie
-    ObjectsInGeometryView,
     # Statut des tâches Celery
     TaskStatusView,
 )
-from .site_statistics_view import SiteStatisticsView
+from .views_export import (
+    ExportPDFView, ExportDataView,
+    InventoryExportExcelView, InventoryExportPDFView,
+)
+from .views_inventory import (
+    InventoryListView, InventoryFilterOptionsView, MapObjectsView,
+)
+from .views_import import (
+    GeoImportPreviewView, GeoImportValidateView, GeoImportExecuteView,
+)
+from .views_geometry import (
+    GeometrySimplifyView, GeometrySplitView, GeometryMergeView,
+    GeometryValidateView, GeometryCalculateView, GeometryBufferView,
+    ObjectsInGeometryView,
+)
 from .reporting_view import ReportingView
 from .monthly_report_view import MonthlyReportView
 from .kpi_view import KPIView, KPIHistoriqueView
@@ -85,7 +73,6 @@ urlpatterns = [
     # ==============================================================================
     # STATISTIQUES
     # ==============================================================================
-    path('statistics/', StatisticsView.as_view(), name='statistics'),
     path('reporting/', ReportingView.as_view(), name='reporting'),
     path('monthly-report/', MonthlyReportView.as_view(), name='monthly-report'),
     path('kpis/', KPIView.as_view(), name='kpis'),
@@ -132,7 +119,6 @@ urlpatterns = [
     # ==============================================================================
     path('sites/', SiteListCreateView.as_view(), name='site-list'),
     path('sites/<int:pk>/', SiteDetailView.as_view(), name='site-detail'),
-    path('sites/<int:site_id>/statistics/', SiteStatisticsView.as_view(), name='site-statistics'),
     path('sites/detect/', DetectSiteView.as_view(), name='site-detect'),
     path('sous-sites/', SousSiteListCreateView.as_view(), name='sous-site-list'),
     path('sous-sites/<int:pk>/', SousSiteDetailView.as_view(), name='sous-site-detail'),

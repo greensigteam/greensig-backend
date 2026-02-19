@@ -3,6 +3,10 @@ Signals pour l'application API (Sites, Objets GIS, etc.)
 
 Ces signals sont connectes manuellement dans apps.py pour eviter les problemes
 avec les decorateurs @receiver et les string senders.
+
+Invalidation du cache :
+  - Site / SousSite → STATISTICS, FILTERS, REPORTING
+  - Objets GIS (15 types) → STATISTICS, FILTERS
 """
 
 import logging
@@ -10,6 +14,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 print("[SIGNALS] ========== api/signals.py CHARGE ==========")
+
+
+# ==============================================================================
+# INVALIDATION DU CACHE APRÈS MUTATIONS GIS
+# ==============================================================================
+
+def invalidate_gis_object_cache(sender, instance, **kwargs):
+    """Invalide les caches STATISTICS + FILTERS après mutation d'un objet GIS."""
+    from greensig_web.cache_utils import invalidate_on_gis_object_mutation
+    invalidate_on_gis_object_mutation()
+
+
+def invalidate_site_cache(sender, instance, **kwargs):
+    """Invalide les caches STATISTICS + FILTERS + REPORTING après mutation d'un Site/SousSite."""
+    from greensig_web.cache_utils import invalidate_on_site_mutation
+    invalidate_on_site_mutation()
 
 
 def site_pre_save(sender, instance, **kwargs):

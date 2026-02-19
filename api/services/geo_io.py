@@ -12,10 +12,14 @@ from io import BytesIO
 from typing import List, Dict, Any, Optional, Tuple
 from xml.etree import ElementTree as ET
 
+import logging
+
 from django.contrib.gis.geos import (
     GEOSGeometry, Point, Polygon, LineString,
     MultiPolygon, MultiLineString, MultiPoint
 )
+
+logger = logging.getLogger(__name__)
 
 # ==============================================================================
 # CONSTANTS
@@ -62,10 +66,10 @@ TAILLE_MAPPING = {
 
 # Fields per object type
 OBJECT_FIELDS = {
-    'Arbre': ['nom', 'famille', 'taille', 'symbole', 'observation'],
-    'Palmier': ['nom', 'famille', 'taille', 'symbole', 'observation'],
-    'Gazon': ['nom', 'famille', 'area_sqm', 'observation'],
-    'Arbuste': ['nom', 'famille', 'densite', 'symbole', 'observation'],
+    'Arbre': ['nom', 'famille', 'taille', 'symbole', 'etat', 'observation'],
+    'Palmier': ['nom', 'famille', 'taille', 'symbole', 'etat', 'observation'],
+    'Gazon': ['nom', 'famille', 'area_sqm', 'etat', 'observation'],
+    'Arbuste': ['nom', 'famille', 'densite', 'symbole', 'etat', 'observation'],
     'Vivace': ['nom', 'famille', 'densite', 'observation'],
     'Cactus': ['nom', 'famille', 'densite', 'observation'],
     'Graminee': ['nom', 'famille', 'densite', 'symbole', 'observation'],
@@ -123,7 +127,7 @@ def parse_densite(value: Any) -> Optional[float]:
     return density_map.get(str(value).lower().strip(), None)
 
 
-def convert_geometry(geom_dict: Dict, target_type: str) -> GEOSGeometry:
+def convert_geometry(geom_dict: Dict, target_type: str) -> Tuple[GEOSGeometry, List[str]]:
     """
     Convert a GeoJSON geometry to the target type.
     Handles Multi* to simple types conversion.
@@ -133,15 +137,22 @@ def convert_geometry(geom_dict: Dict, target_type: str) -> GEOSGeometry:
         target_type: Target geometry type ('Point', 'Polygon', 'LineString')
 
     Returns:
-        GEOSGeometry object
+        Tuple of (GEOSGeometry object, list of warning messages)
     """
     geom = GEOSGeometry(json.dumps(geom_dict), srid=4326)
     geom_type = geom_dict.get('type', '')
+    warnings = []
 
-    # MultiPolygon -> Polygon (take first)
+    # MultiPolygon -> Polygon (take largest by area)
     if target_type == 'Polygon' and geom_type == 'MultiPolygon':
         if isinstance(geom, MultiPolygon) and len(geom) > 0:
-            return geom[0]
+            largest = max(geom, key=lambda p: p.area)
+            if len(geom) > 1:
+                warnings.append(
+                    f"MultiPolygon with {len(geom)} polygons reduced to largest polygon "
+                    f"({len(geom) - 1} polygon(s) dropped)"
+                )
+            return largest, warnings
 
     # MultiLineString -> LineString (merge all segments)
     if target_type == 'LineString' and geom_type == 'MultiLineString':
@@ -149,18 +160,30 @@ def convert_geometry(geom_dict: Dict, target_type: str) -> GEOSGeometry:
             all_coords = []
             for line in geom:
                 all_coords.extend(list(line.coords))
-            return LineString(all_coords, srid=4326)
+            if len(geom) > 1:
+                warnings.append(
+                    f"MultiLineString with {len(geom)} segments merged into single LineString"
+                )
+            return LineString(all_coords, srid=4326), warnings
 
     # MultiPoint -> Point (take first)
     if target_type == 'Point' and geom_type == 'MultiPoint':
         if isinstance(geom, MultiPoint) and len(geom) > 0:
-            return geom[0]
+            if len(geom) > 1:
+                warnings.append(
+                    f"MultiPoint with {len(geom)} points reduced to first point "
+                    f"({len(geom) - 1} point(s) dropped)"
+                )
+            return geom[0], warnings
 
     # Polygon centroid -> Point
     if target_type == 'Point' and geom_type in ('Polygon', 'MultiPolygon'):
-        return geom.centroid
+        warnings.append(
+            f"{geom_type} converted to Point using centroid"
+        )
+        return geom.centroid, warnings
 
-    return geom
+    return geom, warnings
 
 
 def validate_geometry_for_type(geometry: GEOSGeometry, object_type: str) -> Tuple[bool, str]:
@@ -452,6 +475,26 @@ def parse_kml(file_content: bytes) -> Dict[str, Any]:
 # SHAPEFILE PARSING
 # ==============================================================================
 
+def _reproject_coords(coords, transformer):
+    """Recursively reproject coordinates using a pyproj Transformer."""
+    if isinstance(coords[0], (int, float)):
+        # Base case: single coordinate pair [x, y] or [x, y, z]
+        x, y = transformer.transform(coords[0], coords[1])
+        if len(coords) > 2:
+            return [x, y, coords[2]]
+        return [x, y]
+    else:
+        # Recursive case: list of coordinates
+        return [_reproject_coords(c, transformer) for c in coords]
+
+
+def _reproject_geometry(geometry: Dict, transformer) -> Dict:
+    """Reproject a GeoJSON geometry dict from source CRS to WGS84."""
+    reprojected = dict(geometry)
+    reprojected['coordinates'] = _reproject_coords(geometry['coordinates'], transformer)
+    return reprojected
+
+
 def parse_shapefile(file_content: bytes) -> Dict[str, Any]:
     """
     Parse a Shapefile (ZIP containing .shp, .shx, .dbf).
@@ -501,13 +544,40 @@ def parse_shapefile(file_content: bytes) -> Dict[str, Any]:
 
             # Read with fiona
             with fiona.open(shp_path, 'r') as src:
-                # Get CRS info
+                # Get CRS info and setup reprojection if needed
                 crs = src.crs
+                transformer = None
+
+                if crs:
+                    try:
+                        from pyproj import Transformer, CRS as PyProjCRS
+                        source_crs = PyProjCRS.from_user_input(crs)
+                        target_crs = PyProjCRS.from_epsg(4326)
+                        if not source_crs.equals(target_crs):
+                            transformer = Transformer.from_crs(
+                                source_crs, target_crs, always_xy=True
+                            )
+                            result['warnings'] = result.get('warnings', [])
+                            result['warnings'].append(
+                                f"CRS reprojection: {source_crs.name} -> WGS84 (EPSG:4326)"
+                            )
+                    except ImportError:
+                        logger.warning("pyproj not installed, skipping CRS reprojection")
+                    except Exception as e:
+                        logger.warning(f"CRS detection/reprojection setup failed: {e}. Assuming WGS84.")
 
                 for idx, feature in enumerate(src):
                     try:
                         geometry = feature['geometry']
                         properties = dict(feature['properties'])
+
+                        # Reproject geometry if needed
+                        if transformer is not None:
+                            try:
+                                geometry = _reproject_geometry(geometry, transformer)
+                            except Exception as e:
+                                result['errors'].append(f"Feature {idx}: reprojection failed: {e}")
+                                continue
 
                         geom_type = geometry['type']
 
@@ -823,8 +893,11 @@ def apply_attribute_mapping(
 
     result = {}
 
-    for source_attr, target_field in mapping.items():
+    for target_field, source_attr in mapping.items():
         if target_field not in target_fields:
+            continue
+
+        if not source_attr:
             continue
 
         value = source_props.get(source_attr)
@@ -857,7 +930,7 @@ def suggest_attribute_mapping(
         target_type: Target object type
 
     Returns:
-        Dict of suggested mappings (source -> target)
+        Dict of suggested mappings (target_field -> source_attr)
     """
     target_fields = OBJECT_FIELDS.get(target_type, [])
     suggestions = {}
@@ -886,7 +959,7 @@ def suggest_attribute_mapping(
         for source_attr in source_attributes:
             source_lower = source_attr.lower()
             if source_lower in possible_names or target_field in source_lower:
-                suggestions[source_attr] = target_field
+                suggestions[target_field] = source_attr
                 break
 
     return suggestions

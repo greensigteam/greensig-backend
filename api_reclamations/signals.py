@@ -34,7 +34,7 @@ def reclamation_pre_save(sender, instance, **kwargs):
 
                 # Statuts qui impliquent que la réclamation a été prise en compte
                 STATUTS_APRES_PRISE_EN_COMPTE = [
-                    'PRISE_EN_COMPTE', 'EN_COURS', 'RESOLUE',
+                    'EN_COURS', 'RESOLUE',
                     'EN_ATTENTE_VALIDATION_CLOTURE', 'CLOTUREE', 'INTERVENTION_REFUSEE'
                 ]
 
