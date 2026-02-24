@@ -26,8 +26,8 @@ def update_last_intervention_date(tache):
         Puit, Pompe, Vanne, Clapet, Canalisation, Aspersion, Goutte, Ballon
     )
 
-    # Date à utiliser: date_fin_reelle ou date du jour
-    intervention_date = tache.date_fin_reelle.date() if tache.date_fin_reelle else timezone.now().date()
+    # Date à utiliser: date_fin_reelle (DateField, déjà un date) ou date du jour
+    intervention_date = tache.date_fin_reelle or timezone.now().date()
 
     # Récupérer tous les objets liés à cette tâche
     objets = tache.objets.all()
@@ -189,16 +189,22 @@ def tache_post_save(sender, instance, created, **kwargs):
                 logger.info(f"[NOTIF] Tache #{instance.id} statut: {old_statut} -> {instance.statut}")
 
                 if instance.statut == 'TERMINEE':
-                    NotificationService.notify_tache_terminee(
-                        instance,
-                        createur=getattr(instance, '_current_user', None)
-                    )
+                    # Notification (non bloquante : un échec ne doit pas empêcher
+                    # la mise à jour de last_intervention_date)
+                    try:
+                        NotificationService.notify_tache_terminee(
+                            instance,
+                            createur=getattr(instance, '_current_user', None)
+                        )
+                    except Exception as notif_err:
+                        logger.error(f"[NOTIF] Erreur notification tache #{instance.id}: {notif_err}")
 
                     # Mettre à jour last_intervention_date sur tous les objets liés
+                    # (toujours exécuté, même si la notification a échoué)
                     update_last_intervention_date(instance)
 
     except Exception as e:
-        logger.error(f"[NOTIF] Erreur notification tache #{instance.id}: {e}")
+        logger.error(f"[NOTIF] Erreur signal tache #{instance.id}: {e}")
 
 
 @receiver(m2m_changed, sender=Tache.objets.through)

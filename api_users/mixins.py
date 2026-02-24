@@ -96,6 +96,11 @@ class RoleBasedQuerySetMixin:
         """
         Filtre le queryset pour un superviseur.
 
+        Principe d'isolation : un superviseur ne voit QUE les données
+        liées aux sites qui lui sont directement affectés (Site.superviseur = superviseur).
+        Aucune logique basée sur les équipes ou les clients n'intervient dans
+        la visibilité — seule la relation Site → Superviseur fait foi.
+
         Args:
             queryset: QuerySet à filtrer
             superviseur: Profil Superviseur de l'utilisateur
@@ -113,126 +118,45 @@ class RoleBasedQuerySetMixin:
         if model_name == 'SousSite':
             return queryset.filter(site__superviseur=superviseur)
 
-        # Opérateurs : Ses opérateurs + opérateurs des équipes sur ses sites
-        if model_name == 'Operateur':
-            # 1. Opérateurs directement supervisés (relation directe)
-            operateurs_directs = Q(superviseur=superviseur)
-
-            # 2. Opérateurs des équipes affectées aux sites du superviseur (site principal OU secondaire)
-            operateurs_via_equipe_site_principal = Q(equipe__site_principal__superviseur=superviseur)
-            operateurs_via_equipe_site_secondaire = Q(equipe__sites_secondaires__superviseur=superviseur)
-            operateurs_via_equipe_site_legacy = Q(equipe__site__superviseur=superviseur)  # Legacy fallback
-
-            # 3. Opérateurs des équipes avec tâches sur les sites du superviseur
-            from api_planification.models import Tache
-
-            taches_sur_mes_sites = Tache.objects.filter(
-                objets__site__superviseur=superviseur
-            ).distinct()
-
-            equipes_ids_avec_taches = set()
-            # M2M relation
-            equipes_ids_avec_taches.update(
-                taches_sur_mes_sites.values_list('equipes__id', flat=True)
-            )
-            # Legacy FK
-            equipes_ids_avec_taches.update(
-                taches_sur_mes_sites.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
-            )
-            equipes_ids_avec_taches.discard(None)
-
-            operateurs_via_taches = Q(equipe__id__in=equipes_ids_avec_taches) if equipes_ids_avec_taches else Q(pk__in=[])
-
-            # Combiner avec OR
-            return queryset.filter(
-                operateurs_directs |
-                operateurs_via_equipe_site_principal |
-                operateurs_via_equipe_site_secondaire |
-                operateurs_via_equipe_site_legacy |
-                operateurs_via_taches
-            ).distinct()
-
-        # Équipes : Ses équipes + équipes avec tâches sur ses sites
+        # Équipes : Équipes dont le site principal (ou legacy) est un site du superviseur
         if model_name == 'Equipe':
-            # 1. Équipes affectées à ses sites (principal OU secondaire)
-            equipes_site_principal = Q(site_principal__superviseur=superviseur)
-            equipes_site_secondaire = Q(sites_secondaires__superviseur=superviseur)
-            equipes_site_legacy = Q(site__superviseur=superviseur)  # Legacy fallback
-
-            # 2. Équipes ayant des tâches sur les sites du superviseur
-            # Via Tache.equipes (M2M) ou Tache.id_equipe (legacy)
-            from api_planification.models import Tache
-            sites_superviseur_ids = superviseur.equipes_gerees.values_list('site_id', flat=True).distinct()
-
-            taches_sur_mes_sites = Tache.objects.filter(
-                objets__site__superviseur=superviseur
-            ).distinct()
-
-            equipes_ids_avec_taches = set()
-            # M2M relation (multi-équipes)
-            equipes_ids_avec_taches.update(
-                taches_sur_mes_sites.values_list('equipes__id', flat=True)
-            )
-            # Legacy FK relation
-            equipes_ids_avec_taches.update(
-                taches_sur_mes_sites.exclude(id_equipe__isnull=True).values_list('id_equipe', flat=True)
-            )
-            equipes_ids_avec_taches.discard(None)  # Retirer None
-
-            equipes_avec_taches = Q(id__in=equipes_ids_avec_taches)
-
-            # Combiner tous les critères avec OR
             return queryset.filter(
-                equipes_site_principal |
-                equipes_site_secondaire |
-                equipes_site_legacy |
-                equipes_avec_taches
+                Q(site_principal__superviseur=superviseur) |
+                Q(sites_secondaires__superviseur=superviseur) |
+                Q(site__superviseur=superviseur)  # champ legacy
             ).distinct()
 
-        # Absences : Absences de ses opérateurs
-        # Un opérateur est "sous" un superviseur si:
-        # 1. operateur.superviseur == superviseur (relation directe)
-        # 2. operateur.equipe.site_principal.superviseur == superviseur (via équipe/site principal)
-        # 3. operateur.equipe.sites_secondaires contient un site du superviseur (via équipe/site secondaire)
+        # Opérateurs : Opérateurs des équipes sur les sites du superviseur
+        if model_name == 'Operateur':
+            return queryset.filter(
+                Q(equipe__site_principal__superviseur=superviseur) |
+                Q(equipe__sites_secondaires__superviseur=superviseur) |
+                Q(equipe__site__superviseur=superviseur)  # champ legacy
+            ).distinct()
+
+        # Absences : Absences des opérateurs sur les sites du superviseur
         if model_name == 'Absence':
-            # Relation directe
-            absences_direct = Q(operateur__superviseur=superviseur)
-            # Via équipe -> site principal -> superviseur
-            absences_via_equipe_principal = Q(operateur__equipe__site_principal__superviseur=superviseur)
-            # Via équipe -> sites secondaires -> superviseur
-            absences_via_equipe_secondaire = Q(operateur__equipe__sites_secondaires__superviseur=superviseur)
-            # Legacy fallback
-            absences_via_equipe_legacy = Q(operateur__equipe__site__superviseur=superviseur)
             return queryset.filter(
-                absences_direct |
-                absences_via_equipe_principal |
-                absences_via_equipe_secondaire |
-                absences_via_equipe_legacy
+                Q(operateur__equipe__site_principal__superviseur=superviseur) |
+                Q(operateur__equipe__sites_secondaires__superviseur=superviseur) |
+                Q(operateur__equipe__site__superviseur=superviseur)  # champ legacy
             ).distinct()
 
-        # Tâches : Tâches assignées à ses équipes OU tâches sur ses sites
+        # Tâches : uniquement les tâches dont les objets sont sur les sites du superviseur,
+        # ou liées à une réclamation sur ses sites.
+        # Les conditions basées sur les équipes sont volontairement exclues :
+        # une équipe d'un autre site travaillant sur ce site ne change pas la visibilité.
         if model_name == 'Tache':
-            # Inclure:
-            # 1. Tâches avec objets sur les sites du superviseur
-            # 2. Tâches liées à des réclamations sur les sites du superviseur
-            # 3. Tâches assignées à des équipes sur les sites du superviseur
-            # 4. Tâches liées à une structure client dont un site est supervisé
             return queryset.filter(
                 Q(objets__site__superviseur=superviseur) |
-                Q(reclamation__site__superviseur=superviseur) |
-                Q(id_equipe__site_principal__superviseur=superviseur) |
-                Q(equipes__site_principal__superviseur=superviseur) |
-                Q(id_structure_client__sites__superviseur=superviseur)
+                Q(reclamation__site__superviseur=superviseur)
             ).distinct()
 
-        # Distributions de charge : Distributions des tâches sur les sites du superviseur
+        # Distributions de charge : uniquement via les tâches visibles par le superviseur
         if model_name == 'DistributionCharge':
             return queryset.filter(
                 Q(tache__objets__site__superviseur=superviseur) |
-                Q(tache__reclamation__site__superviseur=superviseur) |
-                Q(tache__id_equipe__site_principal__superviseur=superviseur) |
-                Q(tache__equipes__site_principal__superviseur=superviseur) |
-                Q(tache__id_structure_client__sites__superviseur=superviseur)
+                Q(tache__reclamation__site__superviseur=superviseur)
             ).distinct()
 
         # Réclamations : Réclamations sur les sites affectés au superviseur

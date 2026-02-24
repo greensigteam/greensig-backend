@@ -80,6 +80,9 @@ class ReclamationViewSet(viewsets.ModelViewSet):
             'cloture_refusee_par'  # Pour afficher le nom du client qui a refusé la clôture
         )
 
+        # Prefetch roles du créateur pour createur_est_client (list + detail)
+        queryset = queryset.prefetch_related('createur__roles_utilisateur__role')
+
         # Prefetch pour le détail (historique, photos, taches, satisfaction)
         if self.action in ['retrieve', 'suivi']:
             from django.db.models import Prefetch
@@ -100,22 +103,15 @@ class ReclamationViewSet(viewsets.ModelViewSet):
         if user.is_staff or user.is_superuser:
             return queryset
 
-        # Superviseur : accès aux réclamations de ses sites
+        # Superviseur : accès aux réclamations de ses sites uniquement.
+        # L'isolation est basée sur Site.superviseur, pas sur l'équipe affectée
+        # ni sur le créateur (qui pourraient introduire une visibilité croisée).
         if hasattr(user, 'superviseur_profile'):
             try:
                 superviseur = user.superviseur_profile
-
-                # Le superviseur voit:
-                # 1. Les réclamations sur les sites qu'il supervise
-                # 2. Les réclamations affectées à ses équipes
-                # 3. Les réclamations qu'il a créées lui-même
-                return queryset.filter(
-                    Q(site__superviseur=superviseur) |  # Sites supervisés
-                    Q(equipe_affectee__site__superviseur=superviseur) |  # Équipes de ses sites
-                    Q(createur=user)  # Ses propres réclamations
-                ).distinct()
+                return queryset.filter(site__superviseur=superviseur)
             except AttributeError:
-                return queryset.filter(createur=user)
+                return queryset.none()
 
         # Client : accès à ses réclamations uniquement (créées par lui ou liées à sa structure si visible_client=True)
         if hasattr(user, 'client_profile'):
@@ -194,6 +190,18 @@ class ReclamationViewSet(viewsets.ModelViewSet):
                 {"error": "Impossible de modifier une réclamation clôturée ou rejetée."},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Bloquer la modification de visible_client si le créateur est un CLIENT :
+        # masquer une réclamation créée par un client n'a pas de sens.
+        if 'visible_client' in request.data and instance.createur:
+            createur_est_client = instance.createur.roles_utilisateur.filter(
+                role__nom_role='CLIENT'
+            ).exists()
+            if createur_est_client:
+                return Response(
+                    {"error": "Impossible de masquer une réclamation créée par un client."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
         # Seul le créateur peut modifier le contenu
         if request.user != instance.createur:
@@ -927,19 +935,16 @@ class SatisfactionClientViewSet(viewsets.ModelViewSet):
         # ADMIN/Staff: accès à toutes les évaluations
         if user.is_staff or user.is_superuser:
             queryset = SatisfactionClient.objects.all()
+        elif hasattr(user, 'superviseur_profile'):
+            # Superviseur : uniquement les évaluations des réclamations sur ses sites
+            # Isolation stricte : Site.superviseur FK uniquement, pas via equipe_affectee
+            superviseur = user.superviseur_profile
+            queryset = SatisfactionClient.objects.filter(
+                reclamation__site__superviseur=superviseur
+            )
         else:
-            # Filtres cumulatifs (OR)
-            from django.db.models import Q
-
-            filters = Q(reclamation__createur=user)  # Évaluations créées par l'utilisateur
-
-            # Si superviseur: ajouter les évaluations des réclamations de ses équipes
-            if hasattr(user, 'superviseur_profile'):
-                superviseur = user.superviseur_profile
-                # Réclamations traitées par les équipes gérées par ce superviseur
-                filters |= Q(reclamation__equipe_affectee__site__superviseur=superviseur)
-
-            queryset = SatisfactionClient.objects.filter(filters)
+            # Tous les autres (CLIENT, etc.) : seulement leurs propres évaluations
+            queryset = SatisfactionClient.objects.filter(reclamation__createur=user)
 
         # Optimisation: select_related pour éviter N+1
         queryset = queryset.select_related(

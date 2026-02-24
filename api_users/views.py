@@ -1426,10 +1426,14 @@ class HoraireTravailViewSet(viewsets.ModelViewSet):
         if 'ADMIN' in roles:
             return queryset
 
-        # SUPERVISEUR voit les horaires de ses équipes
+        # SUPERVISEUR voit les horaires des équipes de ses sites uniquement
         if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
             superviseur = user.superviseur_profile
-            return queryset.filter(equipe__site__superviseur=superviseur)
+            return queryset.filter(
+                Q(equipe__site_principal__superviseur=superviseur) |
+                Q(equipe__sites_secondaires__superviseur=superviseur) |
+                Q(equipe__site__superviseur=superviseur)  # champ legacy
+            ).distinct()
 
         # Autres utilisateurs voient les horaires de toutes les équipes (lecture seule)
         return queryset

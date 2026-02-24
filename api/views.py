@@ -147,40 +147,6 @@ class SiteListCreateView(generics.ListCreateAPIView):
         # Par défaut, aucun accès pour les utilisateurs sans rôle reconnu
         return queryset.none()
 
-    def _get_superviseur_site_ids(self, user):
-        """
-        Récupère les IDs des sites contenant les objets liés aux tâches du superviseur.
-        Seuls les sites avec des objets dans les tâches sont retournés.
-
-        OPTIMISÉ: Une seule requête SQL au lieu de N+1.
-        """
-        from api_planification.models import Tache
-
-        try:
-            superviseur = user.superviseur_profile
-            # Équipes gérées par ce superviseur
-            equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
-            equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
-
-            if not equipes_gerees_ids:
-                return []
-
-            # Tâches assignées à ces équipes
-            taches_ids = Tache.objects.filter(
-                Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).values_list('id', flat=True).distinct()
-
-            # OPTIMISÉ: Récupérer les site_ids en une seule requête via la relation inverse
-            # Au lieu de boucler sur chaque tâche puis chaque objet (N+1)
-            site_ids = list(Objet.objects.filter(
-                taches__id__in=taches_ids,
-                site_id__isnull=False
-            ).values_list('site_id', flat=True).distinct())
-
-            return site_ids
-        except Exception:
-            return []
-
 
 class SiteDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = SiteSerializer
@@ -290,7 +256,7 @@ class SousSiteDetailView(generics.RetrieveUpdateDestroyAPIView):
             if 'SUPERVISEUR' in roles and hasattr(user, 'superviseur_profile'):
                 return queryset.filter(site__superviseur=user.superviseur_profile)
 
-        return queryset
+        return queryset.none()
 
 
 class DetectSiteView(APIView):
@@ -543,7 +509,7 @@ class SearchView(APIView):
     🔒 FILTRAGE PAR RÔLE:
     - ADMIN: voit tout
     - CLIENT: voit uniquement ses sites/objets
-    - SUPERVISEUR: voit uniquement les sites liés à ses équipes
+    - SUPERVISEUR: voit uniquement les sites qui lui sont directement affectés (Site.superviseur FK)
     """
     def get(self, request, *args, **kwargs):
         query = request.query_params.get('q', '').strip()
@@ -565,7 +531,7 @@ class SearchView(APIView):
             if 'CLIENT' in roles and hasattr(user, 'client_profile'):
                 structure_filter = user.client_profile.structure
 
-            # SUPERVISEUR: uniquement les sites de ses équipes
+            # SUPERVISEUR: uniquement les sites qui lui sont directement affectés
             elif 'SUPERVISEUR' in roles and not ('ADMIN' in roles):
                 site_ids_filter = self._get_superviseur_site_ids(user)
 
@@ -681,27 +647,11 @@ class SearchView(APIView):
 
     def _get_superviseur_site_ids(self, user):
         """
-        Récupère les IDs des sites contenant les objets liés aux tâches du superviseur.
+        Récupère les IDs des sites directement affectés au superviseur (Site.superviseur FK).
+        Principe d'isolation : uniquement les sites où Site.superviseur = superviseur.
         """
-        from api_planification.models import Tache
-
         try:
             superviseur = user.superviseur_profile
-            equipes_gerees = superviseur.equipes_gerees.filter(actif=True)
-            equipes_gerees_ids = list(equipes_gerees.values_list('id', flat=True))
-
-            if not equipes_gerees_ids:
-                return []
-
-            taches_ids = Tache.objects.filter(
-                Q(equipes__id__in=equipes_gerees_ids) | Q(id_equipe__in=equipes_gerees_ids)
-            ).values_list('id', flat=True).distinct()
-
-            site_ids = list(Objet.objects.filter(
-                taches__id__in=taches_ids,
-                site_id__isnull=False
-            ).values_list('site_id', flat=True).distinct())
-
-            return site_ids
+            return list(Site.objects.filter(superviseur=superviseur).values_list('id', flat=True))
         except Exception:
             return []

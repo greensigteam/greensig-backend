@@ -32,6 +32,7 @@ class ReclamationListSerializer(serializers.ModelSerializer):
     site_nom = serializers.CharField(source='site.nom_site', read_only=True)
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     createur_nom = serializers.SerializerMethodField()
+    createur_est_client = serializers.SerializerMethodField()
     statut_display = serializers.CharField(source='get_statut_display', read_only=True)
     localisation = GeometryField(read_only=True, allow_null=True)
     intervention_refusee_par_nom = serializers.SerializerMethodField()
@@ -57,7 +58,7 @@ class ReclamationListSerializer(serializers.ModelSerializer):
             'date_resolution',
             'description',
             'type_autre_description',
-            'createur', 'createur_nom',
+            'createur', 'createur_nom', 'createur_est_client',
             'localisation',
             # Champs refus intervention (client)
             'nombre_refus',
@@ -80,6 +81,12 @@ class ReclamationListSerializer(serializers.ModelSerializer):
         if obj.createur:
             return f"{obj.createur.prenom} {obj.createur.nom}".strip() or obj.createur.email
         return None
+
+    def get_createur_est_client(self, obj):
+        """Retourne True si le créateur de la réclamation a le rôle CLIENT."""
+        if not obj.createur:
+            return False
+        return obj.createur.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
 
     def get_intervention_refusee_par_nom(self, obj):
         if obj.intervention_refusee_par:
@@ -139,6 +146,7 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
     zone_nom = serializers.CharField(source='zone.nom', read_only=True, allow_null=True)
     equipe_nom = serializers.CharField(source='equipe_affectee.nom_equipe', read_only=True, allow_null=True)
     createur_nom = serializers.SerializerMethodField()
+    createur_est_client = serializers.SerializerMethodField()
     statut_display = serializers.CharField(source='get_statut_display', read_only=True)
     photos = PhotoSerializer(many=True, read_only=True)
     photos_taches = serializers.SerializerMethodField()
@@ -232,6 +240,12 @@ class ReclamationDetailSerializer(serializers.ModelSerializer):
         if obj.createur:
             return f"{obj.createur.prenom} {obj.createur.nom}".strip() or obj.createur.email
         return None
+
+    def get_createur_est_client(self, obj):
+        """Retourne True si le créateur de la réclamation a le rôle CLIENT."""
+        if not obj.createur:
+            return False
+        return obj.createur.roles_utilisateur.filter(role__nom_role='CLIENT').exists()
 
     def get_satisfaction(self, obj):
         """Retourne les données de satisfaction si elles existent."""
